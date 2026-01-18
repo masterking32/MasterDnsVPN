@@ -29,6 +29,8 @@ class MasterDnsVPNServer:
         self.udp_sock: Optional[socket.socket] = None
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.should_stop = asyncio.Event()
+        self.vpn_packet_sign = self.config.get("vpn_packet_sign", "0032")
+
         self.recv_data_cache = {}
         self.send_data_cache = {}
 
@@ -38,6 +40,11 @@ class MasterDnsVPNServer:
         """
         for dns_server in self.config.get('dns_servers', []):
             try:
+                if self.udp_sock is None or self.udp_sock.fileno() == -1:
+                    self.logger.warning(
+                        "UDP socket is closed. Exiting DNS solving.")
+                    return b''
+
                 self.logger.debug(f"Forwarding DNS query to {dns_server}")
                 loop = asyncio.get_running_loop()
                 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
@@ -58,29 +65,60 @@ class MasterDnsVPNServer:
         self.logger.error("All DNS servers failed to respond.")
         return b''
 
+    async def is_vpn_packet(self, parsed_packet: dict) -> bool:
+        """
+        Check if the DNS packet is a VPN packet based on a specific signature.
+        """
+
+        if not parsed_packet.get('additionals'):
+            return False
+
+        # last bytes of rdata in additional section
+        for additional in parsed_packet['additionals']:
+            rdata = additional.get('rdata', b'')
+            if len(rdata) >= 2 and rdata[-2:].hex() == self.vpn_packet_sign:
+                return True
+
+        return False
+
     async def handle_single_request(self, data, addr):
         """
         Handle a single DNS request in its own task.
         """
+        if data is None or addr is None:
+            self.logger.error("Invalid data or address in DNS request.")
+            return
+
         self.logger.debug(f"Received DNS request from {addr}")
-        # TODO: Add DNS request parsing and response logic here
+        parsed_packet = await self.parse_dns_packet(data)
+        self.logger.debug(
+            f"Parsed DNS packet from {addr}: {parsed_packet}")
+
+        if await self.is_vpn_packet(parsed_packet):
+            self.logger.debug(
+                f"VPN packet detected from {addr}, processing accordingly.")
+            # TODO: Add VPN packet handling logic here
+            return
+
+        # Normal DNS query processing
         response = await self.solve_dns(data)
-        if response:
-            try:
-                await self.loop.sock_sendto(self.udp_sock, response, addr)
-                self.logger.debug(f"Sent DNS response to {addr}")
-            except Exception as e:
-                self.logger.error(
-                    f"Failed to send DNS response to {addr}: {e}")
-        else:
-            self.logger.error(f"No response to send back to {addr}")
+        if not response:
+            self.logger.error(
+                f"No response generated for DNS request from {addr}")
+            return
+
+        try:
+            self.udp_sock.sendto(response, addr)
+            self.logger.debug(f"Sent DNS response to {addr}")
+        except Exception as e:
+            self.logger.error(
+                f"Failed to send DNS response to {addr}: {e}")
 
     async def parse_dns_headers(self, data: bytes) -> Any:
         """
         Parse incoming DNS packet data.
         """
         try:
-
             headers = {}
             headers['id'] = int.from_bytes(data[0:2], byteorder='big')
             flags = int.from_bytes(data[2:4], byteorder='big')
@@ -300,9 +338,6 @@ class MasterDnsVPNServer:
         while not self.should_stop.is_set():
             try:
                 data, addr = await self.loop.sock_recvfrom(self.udp_sock, 512)
-                parsed_packet = await self.parse_dns_packet(data)
-                self.logger.debug(
-                    f"Parsed DNS packet from {addr}: {parsed_packet}")
             except OSError as e:
                 self.logger.error(
                     f"Socket error: {e}. Exiting DNS request handler.")
