@@ -1,0 +1,220 @@
+from typing import Any
+
+
+class dns_packet_parser:
+    def __init__(self, logger: Any = None) -> None:
+        self.logger = logger
+
+    async def parse_dns_headers(self, data: bytes) -> Any:
+        """
+        Parse incoming DNS packet data.
+        """
+        try:
+            headers = {}
+            headers['id'] = int.from_bytes(data[0:2], byteorder='big')
+            flags = int.from_bytes(data[2:4], byteorder='big')
+            headers['qr'] = (flags >> 15) & 0x1
+            headers['opcode'] = (flags >> 11) & 0xF
+            headers['aa'] = (flags >> 10) & 0x1
+            headers['tc'] = (flags >> 9) & 0x1
+            headers['rd'] = (flags >> 8) & 0x1
+            headers['ra'] = (flags >> 7) & 0x1
+            headers['z'] = (flags >> 4) & 0x7
+            headers['rcode'] = flags & 0xF
+            headers['qdcount'] = int.from_bytes(data[4:6], byteorder='big')
+            headers['ancount'] = int.from_bytes(data[6:8], byteorder='big')
+            headers['nscount'] = int.from_bytes(data[8:10], byteorder='big')
+            headers['arcount'] = int.from_bytes(data[10:12], byteorder='big')
+            return headers
+        except Exception as e:
+            self.logger.error(f"Failed to parse DNS headers: {e}")
+            return {}
+
+    async def parse_dns_question(self, headers: dict, data: bytes, offset: int) -> Any:
+        """
+        Parse the DNS question section from the packet data.
+        """
+        try:
+            qname = []
+            if headers['qdcount'] == 0:
+                return None, offset
+
+            while True:
+                length = data[offset]
+                if length == 0:
+                    offset += 1
+                    break
+                offset += 1
+                qname.append(data[offset:offset + length].decode('utf-8'))
+                offset += length
+            qtype = int.from_bytes(data[offset:offset + 2], byteorder='big')
+            offset += 2
+            qclass = int.from_bytes(data[offset:offset + 2], byteorder='big')
+            offset += 2
+            question = {
+                'qname': '.'.join(qname),
+                'qtype': qtype,
+                'qclass': qclass
+            }
+            return question, offset
+        except Exception as e:
+            self.logger.error(f"Failed to parse DNS question: {e}")
+            return None, offset
+
+    async def parse_dns_answer(self, headers: dict, data: bytes, offset: int) -> Any:
+        """
+        Parse the DNS answer section from the packet data.
+        """
+        try:
+            if headers['ancount'] == 0:
+                return None, offset
+
+            answers = []
+            for _ in range(headers['ancount']):
+                name = []
+                while True:
+                    length = data[offset]
+                    if length == 0:
+                        offset += 1
+                        break
+                    offset += 1
+                    name.append(data[offset:offset + length].decode('utf-8'))
+                    offset += length
+                atype = int.from_bytes(
+                    data[offset:offset + 2], byteorder='big')
+                offset += 2
+                aclass = int.from_bytes(
+                    data[offset:offset + 2], byteorder='big')
+                offset += 2
+                ttl = int.from_bytes(data[offset:offset + 4], byteorder='big')
+                offset += 4
+                rdlength = int.from_bytes(
+                    data[offset:offset + 2], byteorder='big')
+                offset += 2
+                rdata = data[offset:offset + rdlength]
+                offset += rdlength
+                answer = {
+                    'name': '.'.join(name),
+                    'type': atype,
+                    'class': aclass,
+                    'ttl': ttl,
+                    'rdata': rdata
+                }
+                answers.append(answer)
+            return answers, offset
+        except Exception as e:
+            self.logger.error(f"Failed to parse DNS answer: {e}")
+            return None, offset
+
+    async def parse_dns_authority(self, headers: dict, data: bytes, offset: int) -> Any:
+        """
+        Parse the DNS authority section from the packet data.
+        """
+        try:
+            if headers['nscount'] == 0:
+                return None, offset
+
+            authorities = []
+            for _ in range(headers['nscount']):
+                name = []
+                while True:
+                    length = data[offset]
+                    if length == 0:
+                        offset += 1
+                        break
+                    offset += 1
+                    name.append(data[offset:offset + length].decode('utf-8'))
+                    offset += length
+                atype = int.from_bytes(
+                    data[offset:offset + 2], byteorder='big')
+                offset += 2
+                aclass = int.from_bytes(
+                    data[offset:offset + 2], byteorder='big')
+                offset += 2
+                ttl = int.from_bytes(data[offset:offset + 4], byteorder='big')
+                offset += 4
+                rdlength = int.from_bytes(
+                    data[offset:offset + 2], byteorder='big')
+                offset += 2
+                rdata = data[offset:offset + rdlength]
+                offset += rdlength
+                authority = {
+                    'name': '.'.join(name),
+                    'type': atype,
+                    'class': aclass,
+                    'ttl': ttl,
+                    'rdata': rdata
+                }
+                authorities.append(authority)
+            return authorities, offset
+        except Exception as e:
+            self.logger.error(f"Failed to parse DNS authority: {e}")
+            return None, offset
+
+    async def parse_dns_additional(self, headers: dict, data: bytes, offset: int) -> Any:
+        """
+        Parse the DNS additional section from the packet data.
+        """
+        try:
+            if headers['arcount'] == 0:
+                return None, offset
+
+            additionals = []
+            for _ in range(headers['arcount']):
+                name = []
+                while True:
+                    length = data[offset]
+                    if length == 0:
+                        offset += 1
+                        break
+                    offset += 1
+                    name.append(data[offset:offset + length].decode('utf-8'))
+                    offset += length
+                atype = int.from_bytes(
+                    data[offset:offset + 2], byteorder='big')
+                offset += 2
+                aclass = int.from_bytes(
+                    data[offset:offset + 2], byteorder='big')
+                offset += 2
+                ttl = int.from_bytes(data[offset:offset + 4], byteorder='big')
+                offset += 4
+                rdlength = int.from_bytes(
+                    data[offset:offset + 2], byteorder='big')
+                offset += 2
+                rdata = data[offset:offset + rdlength]
+                offset += rdlength
+                additional = {
+                    'name': '.'.join(name),
+                    'type': atype,
+                    'class': aclass,
+                    'ttl': ttl,
+                    'rdata': rdata
+                }
+                additionals.append(additional)
+            return additionals, offset
+        except Exception as e:
+            self.logger.error(f"Failed to parse DNS additional: {e}")
+            return None, offset
+
+    async def parse_dns_packet(self, data: bytes) -> Any:
+        """
+        Parse the entire DNS packet from the data.
+        """
+        try:
+            headers = await self.parse_dns_headers(data)
+            offset = 12
+            questions, offset = await self.parse_dns_question(headers, data, offset)
+            answers, offset = await self.parse_dns_answer(headers, data, offset)
+            authorities, offset = await self.parse_dns_authority(headers, data, offset)
+            additionals, offset = await self.parse_dns_additional(headers, data, offset)
+            dns_packet = {
+                'headers': headers,
+                'questions': questions,
+                'answers': answers,
+                'authorities': authorities,
+                'additionals': additionals
+            }
+            return dns_packet
+        except Exception as e:
+            self.logger.error(f"Failed to parse DNS packet: {e}")
+            return {}
