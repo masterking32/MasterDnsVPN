@@ -1,6 +1,7 @@
-# Developed by: MasterkinG32
-# Date: 2026
+# MasterDnsVPN Server
+# Author: MasterkinG32
 # Github: https://github.com/masterking32
+# Year: 2026
 
 import json
 from loguru import logger

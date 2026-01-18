@@ -1,4 +1,4 @@
-# MasterDnsVPN Server - Professional Edition
+# MasterDnsVPN Server
 # Author: MasterkinG32
 # Github: https://github.com/masterking32
 # Year: 2026

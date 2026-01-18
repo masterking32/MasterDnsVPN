@@ -1,3 +1,9 @@
+# MasterDnsVPN Server
+# Author: MasterkinG32
+# Github: https://github.com/masterking32
+# Year: 2026
+
+
 from typing import Any
 
 
@@ -61,6 +67,31 @@ class dns_packet_parser:
             self.logger.error(f"Failed to parse DNS question: {e}")
             return None, offset
 
+    def _parse_name(self, data: bytes, offset: int):
+        labels = []
+        jumped = False
+        original_offset = offset
+        while True:
+            length = data[offset]
+            # Check for pointer (compression)
+            if (length & 0xC0) == 0xC0:
+                if not jumped:
+                    original_offset = offset + 2
+                pointer = ((length & 0x3F) << 8) | data[offset + 1]
+                offset = pointer
+                jumped = True
+                continue
+            if length == 0:
+                offset += 1
+                break
+            offset += 1
+            labels.append(data[offset:offset + length].decode('utf-8'))
+            offset += length
+        if not jumped:
+            return '.'.join(labels), offset
+        else:
+            return '.'.join(labels), original_offset
+
     async def parse_dns_answer(self, headers: dict, data: bytes, offset: int) -> Any:
         """
         Parse the DNS answer section from the packet data.
@@ -71,15 +102,7 @@ class dns_packet_parser:
 
             answers = []
             for _ in range(headers['ancount']):
-                name = []
-                while True:
-                    length = data[offset]
-                    if length == 0:
-                        offset += 1
-                        break
-                    offset += 1
-                    name.append(data[offset:offset + length].decode('utf-8'))
-                    offset += length
+                name, offset = self._parse_name(data, offset)
                 atype = int.from_bytes(
                     data[offset:offset + 2], byteorder='big')
                 offset += 2
@@ -94,13 +117,14 @@ class dns_packet_parser:
                 rdata = data[offset:offset + rdlength]
                 offset += rdlength
                 answer = {
-                    'name': '.'.join(name),
+                    'name': name,
                     'type': atype,
                     'class': aclass,
                     'ttl': ttl,
                     'rdata': rdata
                 }
                 answers.append(answer)
+
             return answers, offset
         except Exception as e:
             self.logger.error(f"Failed to parse DNS answer: {e}")
@@ -218,3 +242,93 @@ class dns_packet_parser:
         except Exception as e:
             self.logger.error(f"Failed to parse DNS packet: {e}")
             return {}
+
+    async def create_packet(self, dns_type: str = "A", domain: str = "google.com", is_request: bool = True) -> Any:
+        """
+        Create a DNS packet for the given domain and type.
+        """
+        try:
+            if is_request:
+                # Create DNS query packet
+                packet = bytearray()
+                packet += (0x1234).to_bytes(2, byteorder='big')  # ID
+                packet += (0x0100).to_bytes(2, byteorder='big')  # Flags
+                packet += (1).to_bytes(2, byteorder='big')       # QDCOUNT
+                packet += (0).to_bytes(2, byteorder='big')       # ANCOUNT
+                packet += (0).to_bytes(2, byteorder='big')       # NSCOUNT
+                packet += (0).to_bytes(2, byteorder='big')       # ARCOUNT
+
+                # Question Section
+                for part in domain.split('.'):
+                    packet += bytes([len(part)])
+                    packet += part.encode('utf-8')
+                packet += bytes([0])  # End of QNAME
+
+                qtype = 1  # Default to A record
+                if dns_type == "AAAA":
+                    qtype = 28
+                elif dns_type == "CNAME":
+                    qtype = 5
+                elif dns_type == "MX":
+                    qtype = 15
+                elif dns_type == "TXT":
+                    qtype = 16
+                elif dns_type == "NS":
+                    qtype = 2
+                elif dns_type == "SOA":
+                    qtype = 6
+
+                packet += qtype.to_bytes(2, byteorder='big')  # QTYPE
+                packet += (1).to_bytes(2, byteorder='big')    # QCLASS
+                return bytes(packet), packet
+            else:
+                # Create DNS response packet with TTL=0 (no cache)
+                packet = bytearray()
+                packet += (0x1234).to_bytes(2, byteorder='big')  # ID
+                # Flags (standard response)
+                packet += (0x8180).to_bytes(2, byteorder='big')
+                packet += (1).to_bytes(2, byteorder='big')       # QDCOUNT
+                packet += (1).to_bytes(2, byteorder='big')       # ANCOUNT
+                packet += (0).to_bytes(2, byteorder='big')       # NSCOUNT
+                packet += (0).to_bytes(2, byteorder='big')       # ARCOUNT
+
+                # Question Section
+                for part in domain.split('.'):
+                    packet += bytes([len(part)])
+                    packet += part.encode('utf-8')
+                packet += bytes([0])  # End of QNAME
+                qtype = 1  # Default to A record
+                if dns_type == "AAAA":
+                    qtype = 28
+                elif dns_type == "CNAME":
+                    qtype = 5
+                elif dns_type == "MX":
+                    qtype = 15
+                elif dns_type == "TXT":
+                    qtype = 16
+                elif dns_type == "NS":
+                    qtype = 2
+                elif dns_type == "SOA":
+                    qtype = 6
+                packet += qtype.to_bytes(2, byteorder='big')  # QTYPE
+                packet += (1).to_bytes(2, byteorder='big')    # QCLASS
+
+                # Answer Section
+                # Name: pointer to offset 12 (0xC00C)
+                packet += (0xC00C).to_bytes(2, byteorder='big')
+                packet += qtype.to_bytes(2, byteorder='big')  # TYPE
+                packet += (1).to_bytes(2, byteorder='big')    # CLASS
+                # TTL = 0 (no cache)
+                packet += (0).to_bytes(4, byteorder='big')
+                if dns_type == "A":
+                    packet += (4).to_bytes(2, byteorder='big')  # RDLENGTH
+                    packet += bytes([127, 0, 0, 1])  # RDATA: 127.0.0.1
+                elif dns_type == "AAAA":
+                    packet += (16).to_bytes(2, byteorder='big')  # RDLENGTH
+                    packet += bytes([0]*15 + [1])  # ::1
+                else:
+                    packet += (0).to_bytes(2, byteorder='big')  # RDLENGTH
+                return bytes(packet), packet
+        except Exception as e:
+            self.logger.error(f"Failed to create DNS packet: {e}")
+            return b'', b''
