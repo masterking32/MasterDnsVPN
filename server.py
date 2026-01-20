@@ -9,8 +9,9 @@ import asyncio
 import signal
 from typing import Optional, Any
 
-from dns_utils.utils import getLogger, load_json
-from dns_utils.dns_packet_parser import dns_packet_parser
+from server_config import master_dns_vpn_config
+from dns_utils.utils import getLogger
+from dns_utils.DnsPacketParser import DnsPacketParser
 
 # Ensure UTF-8 output for consistent logging
 try:
@@ -25,23 +26,26 @@ class MasterDnsVPNServer:
 
     def __init__(self) -> None:
         """Initialize the MasterDnsVPNServer with configuration and logger."""
-        self.config = load_json("server_config.json")
-        self.logger = getLogger(log_level=self.config.get("log_level", "INFO"))
+        self.config = master_dns_vpn_config.__dict__
+        self.logger = getLogger(log_level=self.config.get("LOG_LEVEL", "INFO"))
         self.udp_sock: Optional[socket.socket] = None
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.should_stop = asyncio.Event()
-        self.vpn_packet_sign = self.config.get("vpn_packet_sign", "0032")
-        self.allowed_domains = self.config.get("domain", [])
+        self.vpn_packet_sign = self.config.get("VPN_PACKET_SIGN", "0032")
+        self.allowed_domains = self.config.get("DOMAIN", [])
 
         self.recv_data_cache = {}
         self.send_data_cache = {}
-        self.dns_parser = dns_packet_parser(logger=self.logger)
+        self.dns_parser = DnsPacketParser(logger=self.logger,
+                                          global_key=bytes.fromhex(
+                                              self.config.get("GLOBAL_KEY", "32323232323232323232323232323232")),
+                                          global_encrypt=self.config.get("GLOBAL_ENCRYPT", 1))
 
     async def solve_dns(self, query: bytes) -> bytes:
         """
         Solve DNS query by forwarding it to configured DNS servers asynchronously.
         """
-        for dns_server in self.config.get('dns_servers', []):
+        for dns_server in self.config.get('DNS_SERVERS', []):
             try:
                 if self.udp_sock is None or self.udp_sock.fileno() == -1:
                     self.logger.warning(
@@ -224,12 +228,13 @@ class MasterDnsVPNServer:
             self.logger.debug("Binding UDP socket ...")
             self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.udp_sock.bind((self.config.get("udp_host", "0.0.0.0"),
-                                self.config.get("udp_port", 53)))
+            self.udp_sock.bind((self.config.get("UDP_HOST", "0.0.0.0"),
+                                self.config.get("UDP_PORT", 53)))
             self.logger.info(
-                f"UDP socket bound on {self.config.get('udp_host', '0.0.0.0')}:{self.config.get('udp_port', 53)}")
+                f"UDP socket bound on {self.config.get('UDP_HOST', '0.0.0.0')}:{self.config.get('UDP_PORT', 53)}")
             self.logger.info("MasterDnsVPN Server started successfully.")
             self.dns_loop()
+
         except Exception as e:
             self.logger.exception(f"Failed to start MasterDnsVPN Server: {e}")
             if self.udp_sock:
