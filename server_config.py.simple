@@ -37,8 +37,10 @@ class master_dns_vpn_config:
     ]
 
     # Domains used for DNS tunneling.
-    # These domains must be controlled by you and configured to point to this server.
-    # Add multiple domains for redundancy or load balancing.
+    # Specify one or more domains that you own and have configured to resolve to this server's IP address.
+    # These domains will be used to encapsulate and transport VPN data via DNS queries.
+    # Adding multiple domains can improve reliability (redundancy) and distribute traffic (load balancing).
+    # For best performance, use domains with shorter names, as they reduce packet size and increase efficiency.
     DOMAIN = [
         "t.example.com",  # Main tunnel domain
         "b.example.com"   # Backup or secondary domain
