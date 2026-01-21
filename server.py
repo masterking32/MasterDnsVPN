@@ -11,7 +11,7 @@ import random
 from typing import Optional, Any
 
 from server_config import master_dns_vpn_config
-from dns_utils.utils import getLogger
+from dns_utils.utils import getLogger, get_encrypt_key
 from dns_utils.DnsPacketParser import DnsPacketParser
 
 # Ensure UTF-8 output for consistent logging
@@ -37,10 +37,16 @@ class MasterDnsVPNServer:
 
         self.recv_data_cache = {}
         self.send_data_cache = {}
+        # Generate or load encryption key
+        self.encrypt_key = get_encrypt_key(
+            self.config.get("DATA_ENCRYPTION_METHOD", 1))
+        self.logger.warning(
+            f"Using encryption key: <green>{self.encrypt_key}</green>")
+
         self.dns_parser = DnsPacketParser(logger=self.logger,
                                           encryption_method=self.config.get(
                                               "DATA_ENCRYPTION_METHOD", 1),
-                                          encryption_key=self.config.get("ENCRYPTION_KEY", "32323232323232323232323232323232"))
+                                          encryption_key=self.encrypt_key)
 
     async def solve_dns(self, query: bytes) -> bytes:
         """

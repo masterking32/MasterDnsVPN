@@ -8,9 +8,63 @@ from loguru import logger
 import sys
 
 
-def load_json(file_path):
-    with open(file_path, 'r') as file:
-        return json.load(file)
+def load_text(file_path):
+    """
+    Load and return the contents of a text file, stripped of leading/trailing whitespace.
+    Returns None if the file does not exist.
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as file:
+            return file.read().strip()
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        # Log or handle other exceptions as needed
+        return None
+
+
+def save_text(file_path, text):
+    """
+    Save the given text to a file. Returns True on success, False otherwise.
+    """
+    try:
+        with open(file_path, 'w', encoding='utf-8') as file:
+            file.write(text)
+        return True
+    except Exception as exc:
+        # Log or handle the exception as needed
+        return False
+
+
+def get_encrypt_key(method_id):
+    """
+    Retrieve or generate an encryption key of appropriate length based on method_id.
+    method_id: 3 -> 16 chars, 4 -> 24 chars, else 32 chars.
+    Returns the key as a hex string.
+    """
+    if method_id == 3:
+        length = 16
+    elif method_id == 4:
+        length = 24
+    else:
+        length = 32
+
+    key_path = 'encrypt_key.txt'
+    random_key = load_text(key_path)
+    if not random_key or len(random_key) != length:
+        random_key = generate_random_hex_text(length)
+        save_text(key_path, random_key)
+
+    return random_key
+
+
+def generate_random_hex_text(length):
+    """
+    Generate a random hexadecimal string of the specified length.
+    """
+    import random
+    hex_chars = '0123456789abcdef'
+    return ''.join(random.choice(hex_chars) for _ in range(length))
 
 
 def getLogger(log_level="DEBUG", logFile=None, max_log_size=1, backup_count=3):

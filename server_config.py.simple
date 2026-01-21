@@ -53,15 +53,3 @@ class master_dns_vpn_config:
     # 5 - AES-256-CTR encryption (strongest, slowest, largest packets)
     # Choose based on your security and performance needs.
     DATA_ENCRYPTION_METHOD = 1
-
-    # Encryption key in hexadecimal format.
-    # The required length depends on the encryption method:
-    #   XOR:         32 hex chars (16 bytes)
-    #   ChaCha20:    64 hex chars (32 bytes)
-    #   AES-128-CTR: 32 hex chars (16 bytes)
-    #   AES-192-CTR: 48 hex chars (24 bytes)
-    #   AES-256-CTR: 64 hex chars (32 bytes)
-    #
-    # WARNING: Changing it will disconnect all clients until they update their configs.
-    # You can share this key securely with your users.
-    ENCRYPTION_KEY = "32323232323232323232323232323232"
