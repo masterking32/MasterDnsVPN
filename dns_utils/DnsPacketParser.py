@@ -300,6 +300,35 @@ class DnsPacketParser:
                 self.logger.error(f"Failed to parse DNS packet: {e}")
             return {}
 
+    async def server_fail_response(self, request_data: bytes) -> bytes:
+        """
+        Create a DNS Server Failure (RCODE=2) response packet based on the request data.
+        """
+        try:
+            if len(request_data) < 12:
+                raise ValueError("Invalid DNS request data.")
+
+            response = bytearray(request_data)
+            # Set QR to 1 (response), Opcode remains the same, AA=0, TC=0, RD remains the same
+            # Set RA=0, Z=0, RCODE=2 (Server Failure)
+            flags = int.from_bytes(response[2:4], byteorder='big')
+            flags |= 0x8000  # Set QR to 1
+            flags &= 0xFFF0  # Clear RCODE
+            flags |= 0x0002  # Set RCODE to 2
+            response[2:4] = flags.to_bytes(2, byteorder='big')
+
+            # Set ANCOUNT, NSCOUNT, ARCOUNT to 0
+            response[6:8] = (0).to_bytes(2, byteorder='big')  # ANCOUNT
+            response[8:10] = (0).to_bytes(2, byteorder='big')  # NSCOUNT
+            response[10:12] = (0).to_bytes(2, byteorder='big')  # ARCOUNT
+
+            return bytes(response)
+        except Exception as e:
+            if self.logger:
+                self.logger.error(
+                    f"Failed to create Server Failure response: {e}")
+            return b''
+
     async def create_packet(self, dns_type: str = "A", domain: str = "google.com", is_request: bool = True) -> tuple:
         """
         Create a DNS packet for the given domain and type.

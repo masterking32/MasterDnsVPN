@@ -7,6 +7,7 @@ import sys
 import socket
 import asyncio
 import signal
+import random
 from typing import Optional, Any
 
 from server_config import master_dns_vpn_config
@@ -37,39 +38,47 @@ class MasterDnsVPNServer:
         self.recv_data_cache = {}
         self.send_data_cache = {}
         self.dns_parser = DnsPacketParser(logger=self.logger,
-                                          global_key=bytes.fromhex(
-                                              self.config.get("GLOBAL_KEY", "32323232323232323232323232323232")),
-                                          global_encrypt=self.config.get("GLOBAL_ENCRYPT", 1))
+                                          encryption_method=self.config.get(
+                                              "DATA_ENCRYPTION_METHOD", 1),
+                                          encryption_key=self.config.get("ENCRYPTION_KEY", "32323232323232323232323232323232"))
 
     async def solve_dns(self, query: bytes) -> bytes:
         """
         Solve DNS query by forwarding it to configured DNS servers asynchronously.
         """
-        for dns_server in self.config.get('DNS_SERVERS', []):
-            try:
-                if self.udp_sock is None or self.udp_sock.fileno() == -1:
-                    self.logger.warning(
-                        "UDP socket is closed. Exiting DNS solving.")
-                    return b''
 
-                self.logger.debug(f"Forwarding DNS query to {dns_server}")
-                loop = asyncio.get_running_loop()
-                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                    sock.setblocking(False)
-                    await loop.sock_sendto(sock, query, (dns_server, 53))
-                    try:
-                        response, _ = await asyncio.wait_for(loop.sock_recvfrom(sock, 512), timeout=10)
-                    except asyncio.TimeoutError:
-                        self.logger.error(
-                            f"Timeout waiting for response from {dns_server}")
-                        continue
-                    self.logger.debug(
-                        f"Received DNS response from {dns_server}")
-                    return response
-            except Exception as e:
-                self.logger.error(
-                    f"Failed to get response from {dns_server}: {e}")
-        self.logger.error("All DNS servers failed to respond.")
+        if not query:
+            self.logger.error("Empty DNS query received.")
+            return b''
+
+        if not self.config.get("DNS_SERVERS"):
+            self.logger.error("No DNS servers configured.")
+            return b''
+
+        dns_server = random.choice(self.config["DNS_SERVERS"])
+        try:
+            if self.udp_sock is None or self.udp_sock.fileno() == -1:
+                self.logger.warning(
+                    "UDP socket is closed. Exiting DNS solving.")
+                return b''
+
+            self.logger.debug(f"Forwarding DNS query to {dns_server}")
+            loop = asyncio.get_running_loop()
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.setblocking(False)
+                await loop.sock_sendto(sock, query, (dns_server, 53))
+                try:
+                    response, _ = await asyncio.wait_for(loop.sock_recvfrom(sock, 512), timeout=2)
+                except asyncio.TimeoutError:
+                    self.logger.error(
+                        f"Timeout waiting for response from {dns_server}")
+                    return b''
+                self.logger.debug(
+                    f"Received DNS response from {dns_server}")
+                return response
+        except Exception as e:
+            self.logger.error(
+                f"Failed to get response from {dns_server}: {e}")
         return b''
 
     async def is_vpn_packet(self, parsed_packet: dict) -> bool:
@@ -142,7 +151,11 @@ class MasterDnsVPNServer:
         if not response:
             self.logger.error(
                 f"No response generated for DNS request from {addr}")
-            return
+            response = await self.dns_parser.server_fail_response(data)
+            if not response:
+                self.logger.error(
+                    f"Failed to generate Server Failure response for DNS request from {addr}")
+                return
 
         try:
             self.udp_sock.sendto(response, addr)
