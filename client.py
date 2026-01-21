@@ -9,8 +9,9 @@ import asyncio
 import signal
 from typing import Optional, Any
 
-from dns_utils.utils import getLogger, load_json
-from dns_utils.dns_packet_parser import dns_packet_parser
+from dns_utils.utils import getLogger
+from client_config import master_dns_vpn_config
+from dns_utils.DnsPacketParser import DnsPacketParser
 
 # Ensure UTF-8 output for consistent logging
 try:
@@ -23,80 +24,52 @@ except Exception:
 class MasterDnsVPNClient:
     """MasterDnsVPN Client class to handle DNS requests over UDP."""
 
-    def __init__(self, log_level="INFO", dns_server=None, encrypt_key=None, vpn_packet_sign=None) -> None:
+    def __init__(self) -> None:
         """Initialize the MasterDnsVPNClient with configuration and logger."""
-        self.logger = getLogger(log_level=log_level)
         self.udp_sock: Optional[socket.socket] = None
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.should_stop = asyncio.Event()
-        self.dns_server = dns_server
-        self.encrypt_key = encrypt_key
-        self.vpn_packet_sign = vpn_packet_sign
-        self.dns_parser = dns_packet_parser(logger=self.logger)
 
-    async def connect(self) -> None:
+        self.config = master_dns_vpn_config.__dict__
+        self.logger = getLogger(log_level=self.config.get("LOG_LEVEL", "INFO"))
+        self.resolvers = self.config.get("RESOLVER_DNS_SERVERS", [])
+        self.domains = self.config.get("DOMAIN")
+        self.encryption_method = self.config.get(
+            "DATA_ENCRYPTION_METHOD", None)
+        self.encryption_key = self.config.get("ENCRYPTION_KEY", None)
+
+    async def start(self) -> None:
         """Start the MasterDnsVPN Client."""
-        if self.udp_sock is not None:
-            self.logger.error("Client is already running.")
+        self.logger.info("Starting MasterDnsVPN Client...")
+
+        self.logger.debug(f"Checking configuration...")
+        if not self.domains:
+            self.logger.error("No domains configured for DNS tunneling.")
             return
 
-        if self.dns_server is None:
-            self.logger.error("DNS server is not configured.")
+        if not self.resolvers:
+            self.logger.error("No DNS resolvers configured.")
             return
 
-        if self.encrypt_key is None:
-            self.logger.error("Encryption key is not configured.")
+        if self.encryption_method is None or self.encryption_key is None:
+            self.logger.error("Encryption method or key not configured.")
             return
 
-        if self.vpn_packet_sign is None:
-            self.logger.error("VPN packet signature is not configured.")
-            return
+        self.logger.debug(f"Configuration looks good.")
 
-        self.logger.info("Connecting to DNS server...")
-        self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.udp_sock.setblocking(False)
-        self.udp_sock.settimeout(10)
-
-        # create a packet to solve google.com
-        test_query, packet = await self.dns_parser.create_packet("A", "google.com", True)
-
-        self.logger.debug(
-            f"Sending test query to DNS server: {test_query}")
-        try:
-            await self.loop.sock_sendto(self.udp_sock, test_query, (self.dns_server, 53))
-            self.logger.debug(
-                f"Sent test query to DNS server: {test_query.hex()}")
-            recv_result = await asyncio.wait_for(self.loop.sock_recvfrom(self.udp_sock, 512), timeout=10)
-            response = recv_result[0]
-            addr = recv_result[1]
-            parsed_response = await self.dns_parser.parse_dns_packet(response)
-            self.logger.debug(
-                f"Received response from DNS server {addr}: {parsed_response}")
-            self.logger.info("Successfully connected to DNS server.")
-        except Exception as e:
-            self.logger.error(f"Failed to connect to DNS server: {e}")
-            self.udp_sock.close()
-            self.udp_sock = None
+        # @TODO: TEST connectivity to resolvers and domains
+        # @TODO: Find MTU for each resolver
 
 
-# test
-if __name__ == "__main__":
-    config = load_json("client_config.json")
-    client = MasterDnsVPNClient(
-        log_level=config.get("log_level", "INFO"),
-        dns_server="127.0.0.1",
-        encrypt_key="test",
-        vpn_packet_sign="test"
-    )
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    client.loop = loop
+def main():
+    """Main function to start the MasterDnsVPN Client."""
+    client = MasterDnsVPNClient()
 
     try:
-        loop.run_until_complete(client.connect())
+        asyncio.run(client.start())
     except KeyboardInterrupt:
-        pass
-    finally:
-        if client.udp_sock:
-            client.udp_sock.close()
+        print("MasterDnsVPN Client stopped by user.")
+
+
+if __name__ == "__main__":
+    main()

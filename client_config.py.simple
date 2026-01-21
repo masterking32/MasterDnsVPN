@@ -1,0 +1,84 @@
+
+# MasterDnsVPN Client Configuration File
+# --------------------------------------
+# Author: MasterkinG32
+# Github: https://github.com/masterking32
+# Year: 2026
+#
+# This file contains all configurable parameters for the MasterDnsVPN Client.
+# Adjust these settings according to your network environment and security requirements.
+#
+# IMPORTANT: After modifying this file, restart the client to apply changes.
+
+class master_dns_vpn_config:
+    # Logging level for client output.
+    # Options:
+    #   DEBUG    - Detailed information, useful for debugging.
+    #   INFO     - General operational messages.
+    #   WARNING  - Indications of possible issues.
+    #   ERROR    - Errors that prevent some operations.
+    #   CRITICAL - Severe errors causing shutdown.
+    LOG_LEVEL = "DEBUG"
+
+    # DNS Resolver Servers Configuration
+    # ----------------------------------
+    # This section defines the DNS resolver servers that client queries will be forwarded to.
+    #
+    # Recommendations:
+    #   - Use fast, reliable public DNS servers (e.g., Google, Cloudflare) or your own trusted resolvers.
+    #   - Each resolver entry can be customized with the following options:
+    #       - address: The IP address of the DNS resolver (e.g., 8.8.8.8 for Google DNS).
+    #       - READ_MTU: The maximum packet size (MTU) for reading responses from this resolver.
+    #           * Set to 0 to auto-detect on the first run (recommended for initial setup).
+    #           * After running and reviewing logs, set this to a fixed value for best performance.
+    #       - WRITE_MTU: The maximum packet size (MTU) for sending queries to this resolver.
+    #           * Set to 0 to auto-detect on the first run.
+    #           * Set to a fixed value after testing if needed.
+    #       - allow_skipping: If True, this resolver can be skipped if its MTU is much lower than others.
+    #           * This helps avoid slowdowns caused by resolvers with poor MTU values.
+    #
+    # Performance Tips:
+    #   - If you have a mix of resolvers with good and bad MTU values, the lowest MTU will be used by default to avoid fragmentation.
+    #   - To maximize speed, either remove resolvers with low MTU or set their allow_skipping to True.
+    #   - Always review logs after initial setup to determine optimal MTU settings for your environment.
+    RESOLVER_DNS_SERVERS = [
+        {
+            "address": "8.8.8.8",  # Example: Google Public DNS
+            "READ_MTU": 0,  # 0 = auto-detect on first run; set manually after checking logs for best results
+            # 0 = auto-detect on first run; set manually after checking logs for best results
+            "WRITE_MTU": 0,
+            # If True, skip this server if its MTU is significantly lower than others
+            "allow_skipping": True
+        }
+    ]
+
+    # Domains used for DNS tunneling.
+    # These domains must be controlled by you and configured to point to this server.
+    # Add multiple domains for redundancy or load balancing.
+    DOMAIN = [
+        "t.example.com",  # Main tunnel domain
+        "b.example.com"   # Backup or secondary domain
+    ]
+
+    # Data Encryption Method
+    # -------------------------------------------------
+    # IMPORTANT: This value MUST match the server's encryption method!
+    # If the client and server use different encryption methods, communication will fail.
+    # Available options:
+    #   0 - No encryption (NOT recommended)
+    #   1 - XOR encryption (default, fast, basic security)
+    #   2 - ChaCha20 encryption (stronger, slower, larger packets)
+    #   3 - AES-128-CTR encryption (strong, slower, larger packets)
+    #   4 - AES-192-CTR encryption (strong, slower, larger packets)
+    #   5 - AES-256-CTR encryption (strongest, slowest, largest packets)
+    # Choose based on your security and performance needs.
+    DATA_ENCRYPTION_METHOD = 1
+
+    # Data Encryption Key
+    # -------------------------------------------------
+    # This key is used to encrypt and decrypt all tunneled data.
+    # - When you first run the server, it will generate a random key and display it in the logs.
+    # - Copy that key from the server logs and paste it here to ensure clients and server use the same encryption key.
+    # - Keeping this key unchanged across restarts ensures stable and secure communication.
+    # - If you change this key, all clients must update to match, or connections will fail.
+    ENCRYPTION_KEY = ""

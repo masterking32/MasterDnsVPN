@@ -27,11 +27,12 @@ class MasterDnsVPNServer:
 
     def __init__(self) -> None:
         """Initialize the MasterDnsVPNServer with configuration and logger."""
-        self.config = master_dns_vpn_config.__dict__
-        self.logger = getLogger(log_level=self.config.get("LOG_LEVEL", "INFO"))
         self.udp_sock: Optional[socket.socket] = None
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.should_stop = asyncio.Event()
+
+        self.config = master_dns_vpn_config.__dict__
+        self.logger = getLogger(log_level=self.config.get("LOG_LEVEL", "INFO"))
         self.vpn_packet_sign = self.config.get("VPN_PACKET_SIGN", "0032")
         self.allowed_domains = self.config.get("DOMAIN", [])
 

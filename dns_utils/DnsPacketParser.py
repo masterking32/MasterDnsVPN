@@ -427,7 +427,7 @@ class DnsPacketParser:
         alphabet = '0123456789abcdefghijklmnopqrstuvwxyz'  # base36
         if lowerCaseOnly is False:
             # base94
-            alphabet = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!#$%&\()*+,-/:;<=>?@[\\]^_`{|}~ '
+            alphabet = r'0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!#$%&\()*+,-/:;<=>?@[\\]^_`{|}~ '
 
         num = int.from_bytes(data_bytes, byteorder='big')
         if num == 0:
@@ -509,14 +509,16 @@ class DnsPacketParser:
     #
     # Byte Layout:
     #   [0]  1 byte  (uint8)  : Session ID
-    #   [1]  1 byte  (uint8)  : Packet Type (lower 4 bits) | Flags (upper 4 bits)
+    #   [1]  1 byte  (uint8)  : Packet Type
     #   [...]  Variable Length   : Optional payload (e.g., additional headers)
     #
 
-    # Packet Types (lower 4 bits)
+    # Packet Types
     PACKET_TYPE_SERVER_TEST = 0x00
-    PACKET_TYPE_NEW_SESSION = 0x01
-    PACKET_TYPE_QUIC_PACKET = 0x02
+    PACKET_TYPE_SET_READ_MTU = 0x01
+    PACKET_TYPE_SET_WRITE_MTU = 0x02
+    PACKET_TYPE_NEW_SESSION = 0x03
+    PACKET_TYPE_QUIC_PACKET = 0x04
 
     def create_chunk_header(
         self,
@@ -529,7 +531,7 @@ class DnsPacketParser:
 
         Args:
             session_id (int): VPN session identifier (0-255).
-            packet_type (int): Type of VPN packet (0-15).
+            packet_type (int): Type of VPN packet (0-255).
             header_payload (bytes, optional): Additional header payload. Defaults to b"".
         Returns:
             bytes: Encoded VPN header.
@@ -540,12 +542,13 @@ class DnsPacketParser:
         # Input validation
         if not (0 <= session_id <= 0xFF):
             raise ValueError("session_id must be in 0-255.")
-        if not (0 <= packet_type <= 0x0F):
-            raise ValueError("packet_type must be in 0-15 (4 bits).")
+        if not (0 <= packet_type <= 0xFF):
+            raise ValueError("packet_type must be in 0-255.")
 
         # Compose header
         header = bytearray()
         header.append(session_id)
+        header.append(packet_type)
 
         if header_payload:
             header += header_payload
