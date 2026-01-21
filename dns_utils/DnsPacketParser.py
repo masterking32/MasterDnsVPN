@@ -510,43 +510,18 @@ class DnsPacketParser:
     # Byte Layout:
     #   [0]  1 byte  (uint8)  : Session ID
     #   [1]  1 byte  (uint8)  : Packet Type (lower 4 bits) | Flags (upper 4 bits)
-    #
-    #   If Packet Type == 0x02 (Data Packet):
-    #     [2]  2 bytes (uint16): Packet ID (unique for each logical message)
-    #     [4]  2 bytes (uint16): Chunk ID (index of this chunk in the message)
-    #
     #   [...]  Variable Length   : Optional payload (e.g., additional headers)
-    #
-    # Field Details:
-    #   - Session ID: Identifies the VPN session (0-255).
-    #   - Packet Type: Lower 4 bits specify the type (e.g., 0x01 = New Session, 0x02 = Data Packet).
-    #   - Flags: Upper 4 bits, context-dependent. For Data Packets:
-    #       0x10 - NEW_PACKET: First chunk of a logical message
-    #       0x20 - LAST_PACKET: Last chunk of a logical message
-    #       (Both flags can be set for single-chunk messages)
-    #   - Packet ID: Groups all chunks of a logical message
-    #   - Chunk ID: Index of this chunk (starting from 0, max 65535)
-    #   - Optional Payload: Additional data can be appended after the header as needed.
     #
 
     # Packet Types (lower 4 bits)
     PACKET_TYPE_SERVER_TEST = 0x00
     PACKET_TYPE_NEW_SESSION = 0x01
-    PACKET_TYPE_DATA_PACKET = 0x02
-    PACKET_TYPE_DROP_PACKET = 0x03
-
-    # Flags (upper 4 bits)
-    FLAG_NEW_PACKET = 0x10  # 0x10 0000
-    FLAG_LAST_PACKET = 0x20  # 0x20 0000
+    PACKET_TYPE_QUIC_PACKET = 0x02
 
     def create_chunk_header(
         self,
         session_id: int,
         packet_type: int,
-        packet_id: int = 0,
-        chunk_id: int = 0,
-        is_new_packet: bool = False,
-        is_last_packet: bool = False,
         header_payload: bytes = b""
     ) -> bytes:
         """
@@ -554,12 +529,8 @@ class DnsPacketParser:
 
         Args:
             session_id (int): VPN session identifier (0-255).
-            packet_type (int): Packet type (lower 4 bits).
-            packet_id (int, optional): Unique ID for logical message (required for data packets).
-            chunk_id (int, optional): Chunk index in message (required for data packets).
-            is_new_packet (bool, optional): Set NEW_PACKET flag.
-            is_last_packet (bool, optional): Set LAST_PACKET flag.
-            header_payload (bytes, optional): Additional payload to append after header.
+            packet_type (int): Type of VPN packet (0-15).
+            header_payload (bytes, optional): Additional header payload. Defaults to b"".
         Returns:
             bytes: Encoded VPN header.
 
@@ -571,26 +542,10 @@ class DnsPacketParser:
             raise ValueError("session_id must be in 0-255.")
         if not (0 <= packet_type <= 0x0F):
             raise ValueError("packet_type must be in 0-15 (4 bits).")
-        if not (0 <= packet_id <= 0xFFFF):
-            raise ValueError("packet_id must be in 0-65535 (16 bits).")
-        if not (0 <= chunk_id <= 0xFFFF):
-            raise ValueError("chunk_id must be in 0-65535 (16 bits).")
-
-        # Compose flags
-        flags = 0
-        if is_new_packet:
-            flags |= self.FLAG_NEW_PACKET
-        if is_last_packet:
-            flags |= self.FLAG_LAST_PACKET
 
         # Compose header
         header = bytearray()
         header.append(session_id)
-        header.append((flags & 0xF0) | (packet_type & 0x0F))
-
-        if packet_type == self.PACKET_TYPE_DATA_PACKET:
-            header += packet_id.to_bytes(2, byteorder='big')
-            header += chunk_id.to_bytes(2, byteorder='big')
 
         if header_payload:
             header += header_payload
