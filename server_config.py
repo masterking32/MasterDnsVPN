@@ -37,23 +37,6 @@ class master_dns_vpn_config:
         "1.1.1.1"       # Cloudflare DNS
     ]
 
-    # SOCKS5 proxy configuration for outgoing connections.
-    # If you want to tunnel outgoing traffic through a proxy, set the details here.
-    # Leave as-is if not using a proxy, or update with your proxy credentials.
-    SOCKS5_PROXY = {
-        "host": "127.0.0.1",   # Proxy server address
-        "port": 1080,           # Proxy server port
-        "username": "user",    # Username for proxy authentication
-        "password": "pass"     # Password for proxy authentication
-    }
-
-    # List of authorized user hashes.
-    # Only users whose hash appears here will be allowed to connect.
-    # Each hash must be a 32-character hexadecimal string (MD5 or similar).
-    USERS = [
-        "83d3192c9fb9e73cb3305baaaaaaaaaaa"  # Example user hash
-    ]
-
     # Domains used for DNS tunneling.
     # These domains must be controlled by you and configured to point to this server.
     # Add multiple domains for redundancy or load balancing.
@@ -62,12 +45,7 @@ class master_dns_vpn_config:
         "b.example.com"   # Backup or secondary domain
     ]
 
-    # VPN packet signature in hexadecimal (2-4 characters).
-    # Used to identify and validate VPN packets in DNS queries.
-    # Change this value to add a layer of obfuscation.
-    VPN_PACKET_SIGN = "0032"
-
-    # Global encryption method for VPN headers.
+    # Data encryption method.
     # 0 - No encryption (not recommended)
     # 1 - XOR encryption (default, fast, basic security)
     # 2 - ChaCha20 encryption (stronger, slower, larger packets)
@@ -75,9 +53,9 @@ class master_dns_vpn_config:
     # 4 - AES-192-CTR encryption (strong, slower, larger packets)
     # 5 - AES-256-CTR encryption (strongest, slowest, largest packets)
     # Choose based on your security and performance needs.
-    GLOBAL_ENCRYPT = 1
+    DATA_ENCRYPTION_METHOD = 1
 
-    # Global encryption key in hexadecimal format.
+    # Encryption key in hexadecimal format.
     # The required length depends on the encryption method:
     #   XOR:         32 hex chars (16 bytes)
     #   ChaCha20:    64 hex chars (32 bytes)
@@ -87,4 +65,4 @@ class master_dns_vpn_config:
     #
     # WARNING: Changing it will disconnect all clients until they update their configs.
     # You can share this key securely with your users.
-    GLOBAL_KEY = "32323232323232323232323232323232"
+    ENCRYPTION_KEY = "32323232323232323232323232323232"

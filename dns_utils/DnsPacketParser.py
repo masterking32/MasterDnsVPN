@@ -13,27 +13,27 @@ class DnsPacketParser:
     Handles DNS packet parsing, construction, and custom VPN header encoding.
     """
 
-    def __init__(self, logger: Any = None, global_key: bytes = b"", global_encrypt: int = 1):
+    def __init__(self, logger: Any = None, encryption_key: bytes = b"", encryption_method: int = 1):
         self.logger = logger
-        self.global_key = global_key
-        self.global_encrypt = global_encrypt
+        self.encryption_key = encryption_key
+        self.encryption_method = encryption_method
 
-        if self.global_encrypt not in (0, 1, 2, 3, 4, 5):
+        if self.encryption_method not in (0, 1, 2, 3, 4, 5):
             if self.logger:
                 self.logger.error(
-                    f"Invalid global_encrypt value: {self.global_encrypt}. Defaulting to 1 (XOR encryption)."
+                    f"Invalid encryption_method value: {self.encryption_method}. Defaulting to 1 (XOR encryption)."
                 )
-            self.global_encrypt = 1
+            self.encryption_method = 1
 
         # Adjust key length for encryption methods
-        if self.global_encrypt == 2:
-            self.global_key = self.fix_key_length(self.global_key, 32)
-        elif self.global_encrypt == 3:
-            self.global_key = self.fix_key_length(self.global_key, 16)
-        elif self.global_encrypt == 4:
-            self.global_key = self.fix_key_length(self.global_key, 24)
-        elif self.global_encrypt == 5:
-            self.global_key = self.fix_key_length(self.global_key, 32)
+        if self.encryption_method == 2:
+            self.encryption_key = self.fix_key_length(self.encryption_key, 32)
+        elif self.encryption_method == 3:
+            self.encryption_key = self.fix_key_length(self.encryption_key, 16)
+        elif self.encryption_method == 4:
+            self.encryption_key = self.fix_key_length(self.encryption_key, 24)
+        elif self.encryption_method == 5:
+            self.encryption_key = self.fix_key_length(self.encryption_key, 32)
 
     def fix_key_length(self, key: bytes, desired_length: int) -> bytes:
         """
@@ -46,6 +46,11 @@ class DnsPacketParser:
         elif len(key) < desired_length:
             return key.ljust(desired_length, b'\0')
         return key
+
+    """
+    Default DNS Packet Parsers
+    Methods to parse and create standard DNS packets.
+    """
 
     async def parse_dns_headers(self, data: bytes) -> dict:
         """
@@ -383,19 +388,30 @@ class DnsPacketParser:
                 self.logger.error(f"Failed to create DNS packet: {e}")
             return b'', b''
 
-    def base36_encode(self, data_bytes: bytes) -> str:
+    """
+    VPN over DNS Utilities
+    Methods for data encoding, encryption, and custom VPN header creation.
+    """
+
+    def base_encode(self, data_bytes: bytes, lowerCaseOnly: bool = True) -> str:
         """
-        Encode bytes to base36 lowercase (0-9, a-z).
+        Encode bytes to base lowercase (0-9, a-z) or mixed case.
         """
-        number = int.from_bytes(data_bytes, byteorder='big')
-        alphabet = '0123456789abcdefghijklmnopqrstuvwxyz'
-        if number == 0:
-            return '0'
-        result = ''
-        while number > 0:
-            number, remainder = divmod(number, len(alphabet))
-            result = alphabet[remainder] + result
-        return result
+        alphabet = '0123456789abcdefghijklmnopqrstuvwxyz'  # base36
+        if lowerCaseOnly is False:
+            # base94
+            alphabet = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!#$%&\()*+,-/:;<=>?@[\\]^_`{|}~ '
+
+        num = int.from_bytes(data_bytes, byteorder='big')
+        if num == 0:
+            return alphabet[0]
+
+        encoded = ''
+        base = len(alphabet)
+        while num > 0:
+            num, rem = divmod(num, base)
+            encoded = alphabet[rem] + encoded
+        return encoded
 
     def xor_data(self, data: bytes, key: bytes) -> bytes:
         """
@@ -456,60 +472,99 @@ class DnsPacketParser:
                 self.logger.error(f"Failed to encrypt data: {e}")
             return b''
 
-    # Headers structure for custom VPN packets over DNS
     #
-    # Packet Types:
-    #   0x01 - Connection Request
-    #   0x02 - Data Request
-    #   0x03 - Data Packet
+    # Custom VPN Packet Header Structure (for data fragmentation over DNS)
     #
-    # Structure:
-    #   [0]  1 byte  (uint8)   : User ID
-    #   [1]  1 byte  (uint8)   : Session ID
-    #   [2]  1 byte  (uint8)   : Packet Type (lower 4 bits) | Flags (upper 4 bits)
+    # Overview:
+    #   - Designed for minimal overhead and no redundant fields.
+    #   - Easily extensible for future packet types.
+    #   - All multi-byte fields are big-endian.
     #
-    #   If Packet Type == 0x03 (Data Packet):
-    #     [3]   2 bytes (uint16) : Packet ID
-    #     [5]   2 bytes (uint16) : Data Part ID
-    #     [7]   2 bytes (uint16) : Total Parts
+    # Byte Layout:
+    #   [0]  1 byte  (uint8)  : Session ID
+    #   [1]  1 byte  (uint8)  : Packet Type (lower 4 bits) | Flags (upper 4 bits)
+    #
+    #   If Packet Type == 0x02 (Data Packet):
+    #     [2]  2 bytes (uint16): Packet ID (unique for each logical message)
+    #     [4]  2 bytes (uint16): Chunk ID (index of this chunk in the message)
+    #
+    #   [...]  Variable Length   : Optional payload (e.g., additional headers)
+    #
+    # Field Details:
+    #   - Session ID: Identifies the VPN session (0-255).
+    #   - Packet Type: Lower 4 bits specify the type (e.g., 0x01 = New Session, 0x02 = Data Packet).
+    #   - Flags: Upper 4 bits, context-dependent. For Data Packets:
+    #       0x10 - NEW_PACKET: First chunk of a logical message
+    #       0x20 - LAST_PACKET: Last chunk of a logical message
+    #       (Both flags can be set for single-chunk messages)
+    #   - Packet ID: Groups all chunks of a logical message
+    #   - Chunk ID: Index of this chunk (starting from 0, max 65535)
+    #   - Optional Payload: Additional data can be appended after the header as needed.
+    #
 
-    def create_vpn_headers(
+    # Packet Types (lower 4 bits)
+    PACKET_TYPE_SERVER_TEST = 0x00
+    PACKET_TYPE_NEW_SESSION = 0x01
+    PACKET_TYPE_DATA_PACKET = 0x02
+    PACKET_TYPE_DROP_PACKET = 0x03
+
+    # Flags (upper 4 bits)
+    FLAG_NEW_PACKET = 0x10  # 0x10 0000
+    FLAG_LAST_PACKET = 0x20  # 0x20 0000
+
+    def create_chunk_header(
         self,
-        user_id: int,
         session_id: int,
         packet_type: int,
-        flags: int = 0,
         packet_id: int = 0,
-        part_id: int = 0,
-        total_parts: int = 0
-    ) -> str:
+        chunk_id: int = 0,
+        is_new_packet: bool = False,
+        is_last_packet: bool = False,
+        header_payload: bytes = b""
+    ) -> bytes:
         """
-        Create custom VPN packet headers for DNS tunneling.
-        Returns a base36-encoded string of the encrypted header.
+        Construct custom VPN header for a DNS packet.
+
+        Args:
+            session_id (int): VPN session identifier (0-255).
+            packet_type (int): Packet type (lower 4 bits).
+            packet_id (int, optional): Unique ID for logical message (required for data packets).
+            chunk_id (int, optional): Chunk index in message (required for data packets).
+            is_new_packet (bool, optional): Set NEW_PACKET flag.
+            is_last_packet (bool, optional): Set LAST_PACKET flag.
+            header_payload (bytes, optional): Additional payload to append after header.
+        Returns:
+            bytes: Encoded VPN header.
+
+        Raises:
+            ValueError: If arguments are out of valid range.
         """
-        try:
-            header = bytearray()
-            header += (user_id & 0xFF).to_bytes(1,
-                                                byteorder='big')      # User ID
-            header += (session_id & 0xFF).to_bytes(1,
-                                                   byteorder='big')   # Session ID
-            combined = ((flags & 0x0F) << 4) | (packet_type & 0x0F)
-            header += (combined & 0xFF).to_bytes(1,
-                                                 byteorder='big')     # Packet Type + Flags
+        # Input validation
+        if not (0 <= session_id <= 0xFF):
+            raise ValueError("session_id must be in 0-255.")
+        if not (0 <= packet_type <= 0x0F):
+            raise ValueError("packet_type must be in 0-15 (4 bits).")
+        if not (0 <= packet_id <= 0xFFFF):
+            raise ValueError("packet_id must be in 0-65535 (16 bits).")
+        if not (0 <= chunk_id <= 0xFFFF):
+            raise ValueError("chunk_id must be in 0-65535 (16 bits).")
 
-            if packet_type == 0x03:  # Data Packet
-                header += (packet_id & 0xFFFF).to_bytes(2,
-                                                        byteorder='big')    # Packet ID
-                header += (part_id & 0xFFFF).to_bytes(2,
-                                                      byteorder='big')      # Data Part ID
-                header += (total_parts & 0xFFFF).to_bytes(2,
-                                                          byteorder='big')  # Total Parts
+        # Compose flags
+        flags = 0
+        if is_new_packet:
+            flags |= self.FLAG_NEW_PACKET
+        if is_last_packet:
+            flags |= self.FLAG_LAST_PACKET
 
-            header_encrypted = self.data_encrypt(
-                bytes(header), self.global_key, self.global_encrypt)
-            base36_header = self.base36_encode(header_encrypted)
-            return base36_header
-        except Exception as e:
-            if self.logger:
-                self.logger.error(f"Failed to create packet headers: {e}")
-            return ''
+        # Compose header
+        header = bytearray()
+        header.append(session_id)
+        header.append((flags & 0xF0) | (packet_type & 0x0F))
+
+        if packet_type == self.PACKET_TYPE_DATA_PACKET:
+            header += packet_id.to_bytes(2, byteorder='big')
+            header += chunk_id.to_bytes(2, byteorder='big')
+
+        if header_payload:
+            header += header_payload
+        return bytes(header)
