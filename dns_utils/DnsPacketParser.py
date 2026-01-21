@@ -85,28 +85,26 @@ class DnsPacketParser:
         Returns a tuple (question_dict, new_offset).
         """
         try:
-            qname = []
             if headers.get('qdcount', 0) == 0:
                 return None, offset
 
-            while True:
-                length = data[offset]
-                if length == 0:
-                    offset += 1
-                    break
-                offset += 1
-                qname.append(data[offset:offset + length].decode('utf-8'))
-                offset += length
-            qtype = int.from_bytes(data[offset:offset + 2], byteorder='big')
-            offset += 2
-            qclass = int.from_bytes(data[offset:offset + 2], byteorder='big')
-            offset += 2
-            question = {
-                'qname': '.'.join(qname),
-                'qtype': qtype,
-                'qclass': qclass
-            }
-            return question, offset
+            questions = []
+            for _ in range(headers['qdcount']):
+                name, offset = self._parse_name(data, offset)
+                qtype = int.from_bytes(
+                    data[offset:offset + 2], byteorder='big')
+                offset += 2
+                qclass = int.from_bytes(
+                    data[offset:offset + 2], byteorder='big')
+                offset += 2
+                question = {
+                    'qname': name,
+                    'qtype': qtype,
+                    'qclass': qclass
+                }
+                questions.append(question)
+
+            return questions, offset
         except Exception as e:
             if self.logger:
                 self.logger.error(f"Failed to parse DNS question: {e}")

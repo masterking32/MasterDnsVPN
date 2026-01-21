@@ -81,22 +81,7 @@ class MasterDnsVPNServer:
                 f"Failed to get response from {dns_server}: {e}")
         return b''
 
-    async def is_vpn_packet(self, parsed_packet: dict) -> bool:
-        """
-        Check if the DNS packet is a VPN packet based on a specific signature.
-        """
-
-        if not parsed_packet.get('additionals'):
-            return False
-
-        for additional in parsed_packet['additionals']:
-            rdata = additional.get('rdata', b'')
-            if len(rdata) >= 2 and rdata[-2:].hex() == self.vpn_packet_sign:
-                return True
-
-        return False
-
-    async def handle_vpn_packet(self, parsed_packet: dict, addr) -> None:
+    async def handle_vpn_packet(self, parsed_packet: dict, addr) -> tuple:
         """
         Handle VPN packet logic.
         """
@@ -105,27 +90,37 @@ class MasterDnsVPNServer:
             if not parsed_packet.get('questions'):
                 self.logger.error(
                     f"No questions found in VPN packet from {addr}")
-                return
+                return False, None
 
             packet_main_domain = ''
-            packet_domain = parsed_packet['questions']['qname']
+            packet_domain = parsed_packet['questions'][0]['qname']
 
             for domain in self.allowed_domains:
                 if packet_domain.endswith(domain):
                     packet_main_domain = domain
                     break
 
+            if parsed_packet['questions'][0]['qtype'] != 16:
+                self.logger.warning(
+                    f"Invalid DNS query type for VPN packet from {addr}: {parsed_packet['questions'][0]['qtype']}")
+                return False, None
+
             if not packet_main_domain:
                 self.logger.warning(
                     f"Domain {packet_domain} not allowed for VPN packets from {addr}")
-                return
+                return False, None
 
             input_data = packet_domain.replace('.' + packet_main_domain, '')
             self.logger.debug(
                 f"Extracted VPN data from domain {packet_domain}: {input_data}")
 
+            # TODO: parse input_data as VPN packet and handle accordingly
+            # TODO: 1) Check has header and validate
+            # TODO: 2) Decrypt data if needed
+            return True, None
         except Exception as e:
             self.logger.error(f"Error handling VPN packet from {addr}: {e}")
+            return False, None
 
     async def handle_single_request(self, data, addr):
         """
@@ -140,10 +135,18 @@ class MasterDnsVPNServer:
         self.logger.debug(
             f"Parsed DNS packet from {addr}: {parsed_packet}")
 
-        if await self.is_vpn_packet(parsed_packet):
-            self.logger.debug(
-                f"VPN packet detected from {addr}, processing accordingly.")
-            await self.handle_vpn_packet(parsed_packet, addr)
+        # Check for VPN packet
+        vpn_packet, vpn_response = await self.handle_vpn_packet(parsed_packet, addr)
+        if vpn_response:
+            try:
+                self.udp_sock.sendto(vpn_response, addr)
+                self.logger.debug(f"Sent VPN DNS response to {addr}")
+            except Exception as e:
+                self.logger.error(
+                    f"Failed to send VPN DNS response to {addr}: {e}")
+            return
+
+        if vpn_packet:
             return
 
         # Normal DNS query processing
