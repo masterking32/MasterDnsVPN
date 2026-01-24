@@ -107,7 +107,7 @@ class MasterDnsVPNServer:
                     packet_main_domain = domain
                     break
 
-            if parsed_packet['questions'][0]['qtype'] != 16:
+            if parsed_packet['questions'][0]['qtype'] != 16:  # TXT record
                 self.logger.warning(
                     f"Invalid DNS query type for VPN packet from {addr}: {parsed_packet['questions'][0]['qtype']}")
                 return False, None
@@ -139,19 +139,25 @@ class MasterDnsVPNServer:
                     f"Invalid VPN header length from labels for packet from {addr}: {len(extracted_header)}")
                 return False, None
 
+            packet_type = extracted_header[1]
+            if packet_type not in self.dns_parser.PACKET_TYPES.values():
+                self.logger.warning(
+                    f"Invalid VPN packet type from labels for packet from {addr}: {packet_type}")
+                return False, None
+
             self.logger.debug(
                 f"Extracted VPN header from labels: {extracted_header}")
 
             extracted_data = self.dns_parser.extract_vpn_data_from_labels(
                 labels)
 
-            if extracted_data is None:
-                self.logger.warning(
-                    f"Failed to extract VPN data from labels for packet from {addr}")
-                return False, None
+            # if extracted_data is None:
+            #     self.logger.warning(
+            #         f"Failed to extract VPN data from labels for packet from {addr}")
+            #     return False, None
 
-            self.logger.debug(
-                f"Extracted VPN data from labels: {extracted_data}")
+            # self.logger.debug(
+            #     f"Extracted VPN data from labels: {extracted_data}")
 
             # TODO: parse input_data as VPN packet and handle accordingly
             # TODO: 1) Check has header and validate

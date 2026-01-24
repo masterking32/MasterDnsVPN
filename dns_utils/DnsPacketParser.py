@@ -20,6 +20,15 @@ class DnsPacketParser:
         self.encryption_key = encryption_key.encode('utf-8')
         self.encryption_method = encryption_method
 
+        # Packet Types
+        self.PACKET_TYPES = {
+            "SERVER_TEST": 0x00,
+            "SET_READ_MTU": 0x01,
+            "SET_WRITE_MTU": 0x02,
+            "NEW_SESSION": 0x03,
+            "QUIC_PACKET": 0x04,
+        }
+
         if self.encryption_method not in (0, 1, 2, 3, 4, 5):
             if self.logger:
                 self.logger.error(
@@ -766,14 +775,6 @@ class DnsPacketParser:
     #   [0]  1 byte  (uint8)  : Session ID
     #   [1]  1 byte  (uint8)  : Packet Type
     #
-
-    # Packet Types
-    PACKET_TYPE_SERVER_TEST = 0x00
-    PACKET_TYPE_SET_READ_MTU = 0x01
-    PACKET_TYPE_SET_WRITE_MTU = 0x02
-    PACKET_TYPE_NEW_SESSION = 0x03
-    PACKET_TYPE_QUIC_PACKET = 0x04
-
     def create_vpn_header(
         self,
         session_id: int,

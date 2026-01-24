@@ -134,7 +134,7 @@ class MasterDnsVPNClient:
 
         header_packet = self.dns_packet_parser.create_vpn_header(
             session_id=1,
-            packet_type=self.dns_packet_parser.PACKET_TYPE_SERVER_TEST
+            packet_type=self.dns_packet_parser.PACKET_TYPES["SERVER_TEST"],
         )
 
         header_packet = self.dns_packet_parser.data_encrypt(header_packet)
