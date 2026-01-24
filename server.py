@@ -117,9 +117,41 @@ class MasterDnsVPNServer:
                     f"Domain {packet_domain} not allowed for VPN packets from {addr}")
                 return False, None
 
-            input_data = packet_domain.replace('.' + packet_main_domain, '')
+            if packet_domain.count('.') < 3:
+                self.logger.warning(
+                    f"Invalid domain format for VPN packet from {addr}: {packet_domain}")
+                return False, None
+
+            labels = packet_domain.replace('.' + packet_main_domain, '')
             self.logger.debug(
-                f"Extracted VPN data from domain {packet_domain}: {input_data}")
+                f"Extracted VPN data from domain {packet_main_domain}: {labels}")
+
+            extracted_header = self.dns_parser.extract_vpn_header_from_labels(
+                labels)
+
+            if not extracted_header:
+                self.logger.warning(
+                    f"Failed to extract VPN header from labels for packet from {addr}")
+                return False, None
+
+            if len(extracted_header) != 2:
+                self.logger.warning(
+                    f"Invalid VPN header length from labels for packet from {addr}: {len(extracted_header)}")
+                return False, None
+
+            self.logger.debug(
+                f"Extracted VPN header from labels: {extracted_header}")
+
+            extracted_data = self.dns_parser.extract_vpn_data_from_labels(
+                labels)
+
+            if extracted_data is None:
+                self.logger.warning(
+                    f"Failed to extract VPN data from labels for packet from {addr}")
+                return False, None
+
+            self.logger.debug(
+                f"Extracted VPN data from labels: {extracted_data}")
 
             # TODO: parse input_data as VPN packet and handle accordingly
             # TODO: 1) Check has header and validate

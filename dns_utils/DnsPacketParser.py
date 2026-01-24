@@ -486,6 +486,23 @@ class DnsPacketParser:
             encoded = alphabet[rem] + encoded
         return encoded
 
+    def base_decode(self, encoded_str: str, lowerCaseOnly: bool = True) -> bytes:
+        """
+        Decode base lowercase (0-9, a-z) or mixed case string to bytes.
+        """
+        alphabet = '0123456789abcdefghijklmnopqrstuvwxyz'  # base36
+        if lowerCaseOnly is False:
+            # base94
+            alphabet = r'0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!#$%&\()*+,-/:;<=>?@[\\]^_`{|}~ '
+
+        base = len(alphabet)
+        num = 0
+        for char in encoded_str:
+            num = num * base + alphabet.index(char)
+
+        byte_length = (num.bit_length() + 7) // 8
+        return num.to_bytes(byte_length, byteorder='big')
+
     def xor_data(self, data: bytes, key: bytes) -> bytes:
         """
         XOR the data with the given key.
@@ -550,6 +567,55 @@ class DnsPacketParser:
                 self.logger.error(f"Failed to encrypt data: {e}")
             return b''
 
+    def data_decrypt(self, data: bytes, key: bytes = None, method: int = None) -> bytes:
+        """
+        Decrypt data based on the selected method.
+        Supported methods:
+            0: None, 1: XOR, 2: ChaCha20, 3: AES-128-CTR, 4: AES-192-CTR, 5: AES-256-CTR
+        """
+        try:
+            if key is None:
+                key = self.encryption_key
+            if method is None:
+                method = self.encryption_method
+
+            if method == 0:
+                return data
+            elif method == 1:
+                return self.xor_data(data, key)
+            elif method == 2:
+                from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
+                from cryptography.hazmat.backends import default_backend
+                nonce = data[:16]
+                encrypted_data = data[16:]
+                algorithm = algorithms.ChaCha20(key, nonce)
+                cipher = Cipher(algorithm, mode=None,
+                                backend=default_backend())
+                decryptor = cipher.decryptor()
+                decrypted_data = decryptor.update(encrypted_data)
+                return decrypted_data
+            elif method in (3, 4, 5):
+                from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+                from cryptography.hazmat.backends import default_backend
+                nonce = data[:16]
+                encrypted_data = data[16:]
+                algorithm = algorithms.AES(key)
+                cipher = Cipher(algorithm, modes.CTR(
+                    nonce), backend=default_backend())
+                decryptor = cipher.decryptor()
+                decrypted_data = decryptor.update(
+                    encrypted_data) + decryptor.finalize()
+                return decrypted_data
+            else:
+                if self.logger:
+                    self.logger.error(f"Unknown decryption method: {method}")
+                return data
+        except Exception as e:
+            if self.logger:
+                self.logger.error(
+                    f"Failed to decrypt data <red>Maybe encryption key/method is wrong?</red>: {e}")
+            return b''
+
     def calculate_upload_mtu(self, domain: str, mtu: int = 0) -> int:
         """
         Calculate the maximum upload MTU based on the domain length and DNS constraints.
@@ -567,7 +633,7 @@ class DnsPacketParser:
         # Create a dummy header to measure its exact encoded size
         # We assume worst-case scenario (encryption adds size + max base36 expansion)
         test_header = self.data_encrypt(
-            self.create_chunk_header(session_id=255, packet_type=0xFF),
+            self.create_vpn_header(session_id=255, packet_type=0xFF),
             key=self.encryption_key,
             method=self.encryption_method
         )
@@ -636,6 +702,58 @@ class DnsPacketParser:
             labels.append(encoded_str[i:i + MAX_LABEL_LEN])
         return '.'.join(labels)
 
+    def extract_vpn_header_from_labels(self, labels: str) -> bytes:
+        """
+        Extract and decode the VPN header from DNS labels.
+
+        Args:
+            labels (str): The DNS labels containing the encoded header.
+        Returns:
+            bytes: Decoded VPN header bytes.
+        """
+
+        try:
+            label_parts = labels.split('.')
+            # last part is the header
+            header_encoded = label_parts[-1]
+            header_encrypted = self.base_decode(
+                header_encoded, lowerCaseOnly=True)
+            header_decrypted = self.data_decrypt(
+                header_encrypted
+            )
+            return header_decrypted
+        except Exception as e:
+            if self.logger:
+                self.logger.error(
+                    f"Failed to extract VPN header <red>Maybe encryption key/method is wrong?</red>: {e}")
+            return b''
+
+    def extract_vpn_data_from_labels(self, labels: str) -> bytes:
+        """
+        Extract and decode the VPN data from DNS labels.
+
+        Args:
+            labels (str): The DNS labels containing the encoded data.
+        Returns:
+            bytes: Decoded VPN data bytes.
+        """
+
+        try:
+            label_parts = labels.split('.')
+            # all parts except last are data
+            data_encoded = ''.join(label_parts[:-1])
+            data_encrypted = self.base_decode(
+                data_encoded, lowerCaseOnly=True)
+            data_decrypted = self.data_decrypt(
+                data_encrypted
+            )
+            return data_decrypted
+        except Exception as e:
+            if self.logger:
+                self.logger.error(
+                    f"Failed to extract VPN data <red>Maybe encryption key/method is wrong?</red>: {e}")
+            return b''
+
     #
     # Custom VPN Packet Header Structure (for data fragmentation over DNS)
     #
@@ -656,7 +774,7 @@ class DnsPacketParser:
     PACKET_TYPE_NEW_SESSION = 0x03
     PACKET_TYPE_QUIC_PACKET = 0x04
 
-    def create_chunk_header(
+    def create_vpn_header(
         self,
         session_id: int,
         packet_type: int,

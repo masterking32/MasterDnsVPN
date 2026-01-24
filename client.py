@@ -97,40 +97,62 @@ class MasterDnsVPNClient:
             return
 
         self.logger.debug(f"Configuration looks good.")
+        self.logger.info("MasterDnsVPN Client started successfully.")
 
+        # ---------- Start Test NORMAL DNS Request ----------
         # test_packet = await self.dns_packet_parser.simple_question_packet(
         #     domain="google.com",
         #     qtype="A"
         # )
 
-        # self.logger.info("MasterDnsVPN Client started successfully.")
         # response_bytes, response_parsed, addr = await self.dns_request('127.0.0.1', 53, test_packet)
         # self.logger.debug(f"Test DNS question packet: {test_packet}")
         # self.logger.debug(f"Response bytes: {response_bytes}")
         # self.logger.debug(f"Response parsed: {response_parsed}")
+        # ---------- End Test NORMAL DNS Request ----------
 
+        # ---------- Start CALCULATE MTU ----------
         mtu_char_len, mtu_bytes = self.dns_packet_parser.calculate_upload_mtu(
             domain=self.domains[0],
             mtu=0
         )
-
         self.logger.info(
             f"<green>Calculated upload MTU: {mtu_bytes} bytes ({mtu_char_len} characters) for domain {self.domains[0]}</green>")
+        # ---------- End CALCULATE MTU ----------
 
+        # ---------- Start Test DNS SENDING A VPN PACKET ----------
         fresh_data = "MasterDnsVPN Testing String, Lorem ipsum dolor sit amet, consectetur adipiscing elit. (MasterkinG32.CoM)"
         fresh_data_bytes = fresh_data.encode("utf-8")
         encrypted_data = self.dns_packet_parser.data_encrypt(
             fresh_data_bytes)
-        self.logger.debug(f"Original Data: {fresh_data_bytes}")
-        self.logger.debug(f"Encrypted Data: {encrypted_data}")
+
         encoded_data = self.dns_packet_parser.base_encode(
             encrypted_data, lowerCaseOnly=True)
-        self.logger.debug(f"Encoded Data: {encoded_data}")
+
         labels = self.dns_packet_parser.data_to_labels(
             encoded_data)
-        labels += ".PACKET-HEADER." + self.domains[0]
-        self.logger.info(
-            f"Data converted: <green>{labels.replace('.', '<red> . </red>')}</green>")
+
+        header_packet = self.dns_packet_parser.create_vpn_header(
+            session_id=1,
+            packet_type=self.dns_packet_parser.PACKET_TYPE_SERVER_TEST
+        )
+
+        header_packet = self.dns_packet_parser.data_encrypt(header_packet)
+        header_packet = self.dns_packet_parser.base_encode(
+            header_packet, lowerCaseOnly=True)
+
+        labels += "." + header_packet + "." + self.domains[0]
+
+        test_packet = await self.dns_packet_parser.simple_question_packet(
+            domain=labels,
+            qtype="TXT"
+        )
+
+        response_bytes, response_parsed, addr = await self.dns_request('127.0.0.1', 53, test_packet)
+        self.logger.debug(f"Test DNS question packet: {test_packet}")
+        self.logger.debug(f"Response bytes: {response_bytes}")
+        self.logger.debug(f"Response parsed: {response_parsed}")
+        # ---------- End Test DNS SENDING A VPN PACKET ----------
 
         # @TODO: TEST connectivity to resolvers and domains
         # @TODO: Find MTU for each resolver
