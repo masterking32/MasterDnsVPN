@@ -1,4 +1,3 @@
-
 # MasterDnsVPN Server
 # Author: MasterkinG32
 # Github: https://github.com/masterking32
@@ -7,6 +6,8 @@
 from typing import Any
 import random
 import math
+
+from dns_utils.DNS_ENUMS import PACKET_TYPES, RESOURCE_RECORDS, R_CODES, Q_CLASSES
 
 
 class DnsPacketParser:
@@ -19,15 +20,6 @@ class DnsPacketParser:
         self.logger = logger
         self.encryption_key = encryption_key.encode('utf-8')
         self.encryption_method = encryption_method
-
-        # Packet Types
-        self.PACKET_TYPES = {
-            "SERVER_TEST": 0x00,
-            "SET_READ_MTU": 0x01,
-            "SET_WRITE_MTU": 0x02,
-            "NEW_SESSION": 0x03,
-            "QUIC_PACKET": 0x04,
-        }
 
         if self.encryption_method not in (0, 1, 2, 3, 4, 5):
             if self.logger:
@@ -72,17 +64,17 @@ class DnsPacketParser:
             headers = {
                 'id': int.from_bytes(data[0:2], byteorder='big'),
                 'qr': (int.from_bytes(data[2:4], byteorder='big') >> 15) & 0x1,
-                'opcode': (int.from_bytes(data[2:4], byteorder='big') >> 11) & 0xF,
+                'OpCode': (int.from_bytes(data[2:4], byteorder='big') >> 11) & 0xF,
                 'aa': (int.from_bytes(data[2:4], byteorder='big') >> 10) & 0x1,
                 'tc': (int.from_bytes(data[2:4], byteorder='big') >> 9) & 0x1,
                 'rd': (int.from_bytes(data[2:4], byteorder='big') >> 8) & 0x1,
                 'ra': (int.from_bytes(data[2:4], byteorder='big') >> 7) & 0x1,
                 'z': (int.from_bytes(data[2:4], byteorder='big') >> 4) & 0x7,
-                'rcode': int.from_bytes(data[2:4], byteorder='big') & 0xF,
-                'qdcount': int.from_bytes(data[4:6], byteorder='big'),
-                'ancount': int.from_bytes(data[6:8], byteorder='big'),
-                'nscount': int.from_bytes(data[8:10], byteorder='big'),
-                'arcount': int.from_bytes(data[10:12], byteorder='big'),
+                'rCode': int.from_bytes(data[2:4], byteorder='big') & 0xF,
+                'QdCount': int.from_bytes(data[4:6], byteorder='big'),
+                'AnCount': int.from_bytes(data[6:8], byteorder='big'),
+                'NsCount': int.from_bytes(data[8:10], byteorder='big'),
+                'ArCount': int.from_bytes(data[10:12], byteorder='big'),
             }
             return headers
         except Exception as e:
@@ -96,22 +88,22 @@ class DnsPacketParser:
         Returns a tuple (question_dict, new_offset).
         """
         try:
-            if headers.get('qdcount', 0) == 0:
+            if headers.get('QdCount', 0) == 0:
                 return None, offset
 
             questions = []
-            for _ in range(headers['qdcount']):
+            for _ in range(headers['QdCount']):
                 name, offset = self._parse_name(data, offset)
-                qtype = int.from_bytes(
+                qType = int.from_bytes(
                     data[offset:offset + 2], byteorder='big')
                 offset += 2
-                qclass = int.from_bytes(
+                qClass = int.from_bytes(
                     data[offset:offset + 2], byteorder='big')
                 offset += 2
                 question = {
                     'qname': name,
-                    'qtype': qtype,
-                    'qclass': qclass
+                    'qType': qType,
+                    'qClass': qClass
                 }
                 questions.append(question)
 
@@ -156,31 +148,31 @@ class DnsPacketParser:
         Returns a tuple (answers_list, new_offset).
         """
         try:
-            if headers.get('ancount', 0) == 0:
+            if headers.get('AnCount', 0) == 0:
                 return None, offset
 
             answers = []
-            for _ in range(headers['ancount']):
+            for _ in range(headers['AnCount']):
                 name, offset = self._parse_name(data, offset)
-                atype = int.from_bytes(
+                aType = int.from_bytes(
                     data[offset:offset + 2], byteorder='big')
                 offset += 2
-                aclass = int.from_bytes(
+                aClass = int.from_bytes(
                     data[offset:offset + 2], byteorder='big')
                 offset += 2
-                ttl = int.from_bytes(data[offset:offset + 4], byteorder='big')
+                TTL = int.from_bytes(data[offset:offset + 4], byteorder='big')
                 offset += 4
-                rdlength = int.from_bytes(
+                RdLength = int.from_bytes(
                     data[offset:offset + 2], byteorder='big')
                 offset += 2
-                rdata = data[offset:offset + rdlength]
-                offset += rdlength
+                rData = data[offset:offset + RdLength]
+                offset += RdLength
                 answer = {
                     'name': name,
-                    'type': atype,
-                    'class': aclass,
-                    'ttl': ttl,
-                    'rdata': rdata
+                    'type': aType,
+                    'class': aClass,
+                    'TTL': TTL,
+                    'rData': rData
                 }
                 answers.append(answer)
 
@@ -196,11 +188,11 @@ class DnsPacketParser:
         Returns a tuple (authorities_list, new_offset).
         """
         try:
-            if headers.get('nscount', 0) == 0:
+            if headers.get('NsCount', 0) == 0:
                 return None, offset
 
             authorities = []
-            for _ in range(headers['nscount']):
+            for _ in range(headers['NsCount']):
                 name = []
                 while True:
                     length = data[offset]
@@ -210,25 +202,25 @@ class DnsPacketParser:
                     offset += 1
                     name.append(data[offset:offset + length].decode('utf-8'))
                     offset += length
-                atype = int.from_bytes(
+                aType = int.from_bytes(
                     data[offset:offset + 2], byteorder='big')
                 offset += 2
-                aclass = int.from_bytes(
+                aClass = int.from_bytes(
                     data[offset:offset + 2], byteorder='big')
                 offset += 2
-                ttl = int.from_bytes(data[offset:offset + 4], byteorder='big')
+                TTL = int.from_bytes(data[offset:offset + 4], byteorder='big')
                 offset += 4
-                rdlength = int.from_bytes(
+                RdLength = int.from_bytes(
                     data[offset:offset + 2], byteorder='big')
                 offset += 2
-                rdata = data[offset:offset + rdlength]
-                offset += rdlength
+                rData = data[offset:offset + RdLength]
+                offset += RdLength
                 authority = {
                     'name': '.'.join(name),
-                    'type': atype,
-                    'class': aclass,
-                    'ttl': ttl,
-                    'rdata': rdata
+                    'type': aType,
+                    'class': aClass,
+                    'TTL': TTL,
+                    'rData': rData
                 }
                 authorities.append(authority)
             return authorities, offset
@@ -240,14 +232,14 @@ class DnsPacketParser:
     async def parse_dns_additional(self, headers: dict, data: bytes, offset: int) -> tuple:
         """
         Parse the DNS additional section from the packet data.
-        Returns a tuple (additionals_list, new_offset).
+        Returns a tuple (additional_list, new_offset).
         """
         try:
-            if headers.get('arcount', 0) == 0:
+            if headers.get('ArCount', 0) == 0:
                 return None, offset
 
-            additionals = []
-            for _ in range(headers['arcount']):
+            additional = []
+            for _ in range(headers['ArCount']):
                 name = []
                 while True:
                     length = data[offset]
@@ -257,28 +249,28 @@ class DnsPacketParser:
                     offset += 1
                     name.append(data[offset:offset + length].decode('utf-8'))
                     offset += length
-                atype = int.from_bytes(
+                aType = int.from_bytes(
                     data[offset:offset + 2], byteorder='big')
                 offset += 2
-                aclass = int.from_bytes(
+                aClass = int.from_bytes(
                     data[offset:offset + 2], byteorder='big')
                 offset += 2
-                ttl = int.from_bytes(data[offset:offset + 4], byteorder='big')
+                TTL = int.from_bytes(data[offset:offset + 4], byteorder='big')
                 offset += 4
-                rdlength = int.from_bytes(
+                RdLength = int.from_bytes(
                     data[offset:offset + 2], byteorder='big')
                 offset += 2
-                rdata = data[offset:offset + rdlength]
-                offset += rdlength
+                rData = data[offset:offset + RdLength]
+                offset += RdLength
                 additional = {
                     'name': '.'.join(name),
-                    'type': atype,
-                    'class': aclass,
-                    'ttl': ttl,
-                    'rdata': rdata
+                    'type': aType,
+                    'class': aClass,
+                    'TTL': TTL,
+                    'rData': rData
                 }
-                additionals.append(additional)
-            return additionals, offset
+                additional.append(additional)
+            return additional, offset
         except Exception as e:
             if self.logger:
                 self.logger.error(f"Failed to parse DNS additional: {e}")
@@ -295,13 +287,13 @@ class DnsPacketParser:
             questions, offset = await self.parse_dns_question(headers, data, offset)
             answers, offset = await self.parse_dns_answer(headers, data, offset)
             authorities, offset = await self.parse_dns_authority(headers, data, offset)
-            additionals, offset = await self.parse_dns_additional(headers, data, offset)
+            additional, offset = await self.parse_dns_additional(headers, data, offset)
             dns_packet = {
                 'headers': headers,
                 'questions': questions,
                 'answers': answers,
                 'authorities': authorities,
-                'additionals': additionals
+                'additional': additional
             }
             return dns_packet
         except Exception as e:
@@ -326,10 +318,10 @@ class DnsPacketParser:
             flags |= 0x0002  # Set RCODE to 2
             response[2:4] = flags.to_bytes(2, byteorder='big')
 
-            # Set ANCOUNT, NSCOUNT, ARCOUNT to 0
-            response[6:8] = (0).to_bytes(2, byteorder='big')  # ANCOUNT
-            response[8:10] = (0).to_bytes(2, byteorder='big')  # NSCOUNT
-            response[10:12] = (0).to_bytes(2, byteorder='big')  # ARCOUNT
+            # Set AnCount, NsCount, ArCount to 0
+            response[6:8] = (0).to_bytes(2, byteorder='big')  # AnCount
+            response[8:10] = (0).to_bytes(2, byteorder='big')  # NsCount
+            response[10:12] = (0).to_bytes(2, byteorder='big')  # ArCount
 
             return bytes(response)
         except Exception as e:
@@ -338,41 +330,66 @@ class DnsPacketParser:
                     f"Failed to create Server Failure response: {e}")
             return b''
 
-    async def simple_question_packet(self, domain: str, qtype: str = 'A') -> bytes:
+    async def simple_answer_packet(self, answers: list, question_packet: bytes) -> bytes:
         """
-        Create a simple DNS question packet for the given domain and type.
-        type: 'A' = 1, 'AAAA' = 28, 'CNAME' = 5, etc.
+        Create a simple DNS answer packet for the given answers based on the question packet.
+        answers: list of answer dicts with keys: name, type, class, TTL, rData
         """
         try:
-            qtype_map = {
-                'A': 1,
-                'AAAA': 28,
-                'CNAME': 5,
-                'MX': 15,
-                'TXT': 16,
-                'NS': 2,
-                'SOA': 6,
-                'PTR': 12,
+            # Parse question section from the question_packet
+            headers = await self.parse_dns_headers(question_packet)
+            offset = 12
+            questions, offset = await self.parse_dns_question(headers, question_packet, offset)
+
+            # Build sections
+            section = {
+                'headers': {
+                    'id': headers['id'],
+                    'QdCount': headers['QdCount'],
+                    'AnCount': len(answers),
+                    'NsCount': 0,
+                    'ArCount': 0
+                },
+                'questions': questions,
+                'answers': answers,
+                'authorities': [],
+                'additional': []
             }
-            qtype = qtype_map.get(qtype.upper(), 1)
+
+            packet = await self.create_packet(section, question_packet)
+            return packet
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Failed to create answer packet: {e}")
+            return b''
+
+    async def simple_question_packet(self, domain: str, qType: int) -> bytes:
+        """
+        Create a simple DNS question packet for the given domain and type.
+        """
+        try:
+
+            if qType is None or qType not in RESOURCE_RECORDS.values():
+                self.logger.error(f"Invalid qType value: {qType}.")
+                return b''
 
             random_id = random.randint(0, 65535)
             section = {
                 'headers': {
                     'id': random_id,
-                    'qdcount': 1,
-                    'ancount': 0,
-                    'nscount': 0,
-                    'arcount': 0
+                    'QdCount': 1,  # Question count
+                    'AnCount': 0,
+                    'NsCount': 0,
+                    'ArCount': 0
                 },
                 'questions': [{
                     'qname': domain,
-                    'qtype': qtype,
-                    'qclass': 1
+                    'qType': qType,
+                    'qClass': Q_CLASSES["IN"]  # Internet
                 }],
                 'answers': [],
                 'authorities': [],
-                'additionals': []
+                'additional': []
             }
 
             packet = await self.create_packet(section)
@@ -390,7 +407,7 @@ class DnsPacketParser:
             'questions': list,
             'answers': list,
             'authorities': list,
-            'additionals': list
+            'additional': list
         }
         question_packet: original packet with question section for ID and flags (optional)
         """
@@ -404,65 +421,87 @@ class DnsPacketParser:
                     question_packet[2:4], byteorder='big')
                 packet += flags.to_bytes(2, byteorder='big')  # Flags
             else:
-                packet += sections['headers']['id'].to_bytes(
-                    2, byteorder='big')
+                # Ensure all header fields are integers
+                id_val = int(sections['headers']['id'])
+                QdCount_val = int(sections['headers']['QdCount'])
+                AnCount_val = int(sections['headers']['AnCount'])
+                NsCount_val = int(sections['headers']['NsCount'])
+                ArCount_val = int(sections['headers']['ArCount'])
+                packet += id_val.to_bytes(2, byteorder='big')
                 # Set flags for a standard query: QR=0, RD=1 (0x0100)
                 flags = 0x0100
                 packet += flags.to_bytes(2, byteorder='big')
 
-            packet += sections['headers']['qdcount'].to_bytes(
-                2, byteorder='big')
-            packet += sections['headers']['ancount'].to_bytes(
-                2, byteorder='big')
-            packet += sections['headers']['nscount'].to_bytes(
-                2, byteorder='big')
-            packet += sections['headers']['arcount'].to_bytes(
-                2, byteorder='big')
+            # Always ensure these are integers
+            if question_packet and len(question_packet) >= 12:
+                # Use counts from question_packet if present
+                packet += int(sections['headers']['QdCount']
+                              ).to_bytes(2, byteorder='big')
+                packet += int(sections['headers']['AnCount']
+                              ).to_bytes(2, byteorder='big')
+                packet += int(sections['headers']['NsCount']
+                              ).to_bytes(2, byteorder='big')
+                packet += int(sections['headers']['ArCount']
+                              ).to_bytes(2, byteorder='big')
+            else:
+                packet += QdCount_val.to_bytes(2, byteorder='big')
+                packet += AnCount_val.to_bytes(2, byteorder='big')
+                packet += NsCount_val.to_bytes(2, byteorder='big')
+                packet += ArCount_val.to_bytes(2, byteorder='big')
 
             # Questions
+
             for question in sections.get('questions', []):
                 for label in question['qname'].split('.'):
-                    packet.append(len(label))
-                    packet += label.encode('utf-8')
+                    label_bytes = label.encode(
+                        'utf-8') if not isinstance(label, bytes) else label
+                    packet.append(len(label_bytes))
+                    packet += label_bytes
                 packet.append(0)  # End of name
-                packet += question['qtype'].to_bytes(2, byteorder='big')
-                packet += question['qclass'].to_bytes(2, byteorder='big')
+                packet += int(question['qType']).to_bytes(2, byteorder='big')
+                packet += int(question['qClass']).to_bytes(2, byteorder='big')
 
             # Answers
             for answer in sections.get('answers', []):
                 for label in answer['name'].split('.'):
-                    packet.append(len(label))
-                    packet += label.encode('utf-8')
+                    label_bytes = label.encode(
+                        'utf-8') if not isinstance(label, bytes) else label
+                    packet.append(len(label_bytes))
+                    packet += label_bytes
                 packet.append(0)  # End of name
-                packet += answer['type'].to_bytes(2, byteorder='big')
-                packet += answer['class'].to_bytes(2, byteorder='big')
-                packet += answer['ttl'].to_bytes(4, byteorder='big')
-                packet += len(answer['rdata']).to_bytes(2, byteorder='big')
-                packet += answer['rdata']
+                packet += int(answer['type']).to_bytes(2, byteorder='big')
+                packet += int(answer['class']).to_bytes(2, byteorder='big')
+                packet += int(answer['TTL']).to_bytes(4, byteorder='big')
+                packet += len(answer['rData']).to_bytes(2, byteorder='big')
+                packet += answer['rData']
 
             # Authorities
             for authority in sections.get('authorities', []):
                 for label in authority['name'].split('.'):
-                    packet.append(len(label))
-                    packet += label.encode('utf-8')
+                    label_bytes = label.encode(
+                        'utf-8') if not isinstance(label, bytes) else label
+                    packet.append(len(label_bytes))
+                    packet += label_bytes
                 packet.append(0)  # End of name
-                packet += authority['type'].to_bytes(2, byteorder='big')
-                packet += authority['class'].to_bytes(2, byteorder='big')
-                packet += authority['ttl'].to_bytes(4, byteorder='big')
-                packet += len(authority['rdata']).to_bytes(2, byteorder='big')
-                packet += authority['rdata']
+                packet += int(authority['type']).to_bytes(2, byteorder='big')
+                packet += int(authority['class']).to_bytes(2, byteorder='big')
+                packet += int(authority['TTL']).to_bytes(4, byteorder='big')
+                packet += len(authority['rData']).to_bytes(2, byteorder='big')
+                packet += authority['rData']
 
             # Additionals
-            for additional in sections.get('additionals', []):
+            for additional in sections.get('additional', []):
                 for label in additional['name'].split('.'):
-                    packet.append(len(label))
-                    packet += label.encode('utf-8')
+                    label_bytes = label.encode(
+                        'utf-8') if not isinstance(label, bytes) else label
+                    packet.append(len(label_bytes))
+                    packet += label_bytes
                 packet.append(0)  # End of name
-                packet += additional['type'].to_bytes(2, byteorder='big')
-                packet += additional['class'].to_bytes(2, byteorder='big')
-                packet += additional['ttl'].to_bytes(4, byteorder='big')
-                packet += len(additional['rdata']).to_bytes(2, byteorder='big')
-                packet += additional['rdata']
+                packet += int(additional['type']).to_bytes(2, byteorder='big')
+                packet += int(additional['class']).to_bytes(2, byteorder='big')
+                packet += int(additional['TTL']).to_bytes(4, byteorder='big')
+                packet += len(additional['rData']).to_bytes(2, byteorder='big')
+                packet += additional['rData']
 
             return bytes(packet)
         except Exception as e:
@@ -641,15 +680,10 @@ class DnsPacketParser:
         # 2. Prepare Header Overhead
         # Create a dummy header to measure its exact encoded size
         # We assume worst-case scenario (encryption adds size + max base36 expansion)
-        test_header = self.data_encrypt(
-            self.create_vpn_header(session_id=255, packet_type=0xFF),
-            key=self.encryption_key,
-            method=self.encryption_method
-        )
-        encoded_header = self.base_encode(test_header, lowerCaseOnly=True)
+        test_header = self.create_vpn_header(session_id=255, packet_type=255)
 
         # Header Overhead = Encoded Header + 1 dot separator
-        header_overhead_chars = len(encoded_header) + 1
+        header_overhead_chars = len(test_header) + 1
 
         # 3. Domain Overhead
         # Domain Overhead = length of domain + 1 dot separator (before domain)
@@ -779,6 +813,7 @@ class DnsPacketParser:
         self,
         session_id: int,
         packet_type: int,
+        base36_encode: bool = True
     ) -> bytes:
         """
         Construct custom VPN header for a DNS packet.
@@ -803,4 +838,11 @@ class DnsPacketParser:
         header.append(session_id)
         header.append(packet_type)
 
-        return bytes(header)
+        encrypted_header = self.data_encrypt(
+            bytes(header)
+        )
+
+        if base36_encode:
+            return self.base_encode(encrypted_header, lowerCaseOnly=True)
+        else:
+            return self.base_encode(encrypted_header, lowerCaseOnly=False)

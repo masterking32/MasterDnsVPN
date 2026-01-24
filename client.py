@@ -3,16 +3,17 @@
 # Github: https://github.com/masterking32
 # Year: 2026
 
+import random
 import sys
 import socket
 import asyncio
-import signal
-from typing import Optional, Any
+from typing import Optional
 
-from dns_utils.utils import getLogger
+from dns_utils.utils import getLogger, generate_random_hex_text
 from client_config import master_dns_vpn_config
 from dns_utils.DnsPacketParser import DnsPacketParser
 from dns_utils.UDPClient import UDPClient
+from dns_utils.DNS_ENUMS import PACKET_TYPES, RESOURCE_RECORDS
 
 # Ensure UTF-8 output for consistent logging
 try:
@@ -34,7 +35,7 @@ class MasterDnsVPNClient:
         self.config = master_dns_vpn_config.__dict__
         self.logger = getLogger(log_level=self.config.get("LOG_LEVEL", "INFO"))
         self.resolvers = self.config.get("RESOLVER_DNS_SERVERS", [])
-        self.domains = self.config.get("DOMAIN")
+        self.domains = self.config.get("DOMAINS", [])
         self.encryption_method = self.config.get(
             "DATA_ENCRYPTION_METHOD", 1)
         self.encryption_key = self.config.get("ENCRYPTION_KEY", None)
@@ -47,6 +48,13 @@ class MasterDnsVPNClient:
             encryption_method=self.encryption_method,
             encryption_key=self.encryption_key,
         )
+
+        # Build a map of all domain-resolver combinations
+        self.connections_map = [
+            {"domain": domain, "resolver": resolver}
+            for domain in self.domains
+            for resolver in self.resolvers
+        ]
 
     async def dns_request(self, server_host: str, server_port: int, data: bytes, timeout: float = 5.0):
         """Send a DNS request to the specified server and port using asyncio DatagramProtocol."""
@@ -79,6 +87,62 @@ class MasterDnsVPNClient:
         udp_client.close()
         return response_bytes, response_parsed, addr
 
+    async def test_upload_mtu(self, domain, dns_server: str, dns_port: int, default_mtu: int) -> None:
+        """Test and determine the optimal upload MTU for DNS tunneling."""
+        try:
+            mtu_char_len, mtu_bytes = self.dns_packet_parser.calculate_upload_mtu(
+                domain=domain,
+                mtu=default_mtu
+            )
+
+            while True:
+                self.logger.debug(
+                    f"Testing upload MTU: {mtu_bytes} bytes ({mtu_char_len} characters) to {dns_server}:{dns_port} for domain {domain}")
+
+                random_hex = generate_random_hex_text(mtu_char_len).lower()
+                labels = self.dns_packet_parser.data_to_labels(random_hex)
+
+                header_packet = self.dns_packet_parser.create_vpn_header(
+                    session_id=random.randint(0, 255),
+                    packet_type=PACKET_TYPES["SERVER_TEST"],
+                )
+
+                labels += "." + header_packet + "." + domain
+                test_packet = await self.dns_packet_parser.simple_question_packet(
+                    domain=labels,
+                    qType=RESOURCE_RECORDS["TXT"]
+                )
+
+                response_bytes, response_parsed, addr = await self.dns_request(
+                    dns_server, dns_port, test_packet)
+                self.logger.debug(
+                    f"Upload MTU test response bytes: {response_bytes}")
+
+                # validate response
+                if True:
+                    return
+                mtu_char_len = mtu_char_len - 1
+                return
+
+        except Exception as e:
+            self.logger.error(f"Error during upload MTU test: {e}")
+
+    async def test_all_mtu(self) -> None:
+        """Test MTU for all domain-resolver combinations."""
+        for connection in self.connections_map:
+            domain = connection.get("domain")
+            resolver = connection.get("resolver")
+            dns_server = resolver.get("address")
+            dns_port = resolver.get("port", 53)
+            mtu = resolver.get("WRITE_MTU", 0)
+
+            await self.test_upload_mtu(
+                domain=domain,
+                dns_server=dns_server,
+                dns_port=dns_port,
+                default_mtu=mtu
+            )
+
     async def start(self) -> None:
         """Start the MasterDnsVPN Client."""
         self.logger.info("Starting MasterDnsVPN Client...")
@@ -99,63 +163,9 @@ class MasterDnsVPNClient:
         self.logger.debug(f"Configuration looks good.")
         self.logger.info("MasterDnsVPN Client started successfully.")
 
-        # ---------- Start Test NORMAL DNS Request ----------
-        # test_packet = await self.dns_packet_parser.simple_question_packet(
-        #     domain="google.com",
-        #     qtype="A"
-        # )
-
-        # response_bytes, response_parsed, addr = await self.dns_request('127.0.0.1', 53, test_packet)
-        # self.logger.debug(f"Test DNS question packet: {test_packet}")
-        # self.logger.debug(f"Response bytes: {response_bytes}")
-        # self.logger.debug(f"Response parsed: {response_parsed}")
-        # ---------- End Test NORMAL DNS Request ----------
-
-        # ---------- Start CALCULATE MTU ----------
-        mtu_char_len, mtu_bytes = self.dns_packet_parser.calculate_upload_mtu(
-            domain=self.domains[0],
-            mtu=0
-        )
         self.logger.info(
-            f"<green>Calculated upload MTU: {mtu_bytes} bytes ({mtu_char_len} characters) for domain {self.domains[0]}</green>")
-        # ---------- End CALCULATE MTU ----------
-
-        # ---------- Start Test DNS SENDING A VPN PACKET ----------
-        fresh_data = "MasterDnsVPN Testing String, Lorem ipsum dolor sit amet, consectetur adipiscing elit. (MasterkinG32.CoM)"
-        fresh_data_bytes = fresh_data.encode("utf-8")
-        encrypted_data = self.dns_packet_parser.data_encrypt(
-            fresh_data_bytes)
-
-        encoded_data = self.dns_packet_parser.base_encode(
-            encrypted_data, lowerCaseOnly=True)
-
-        labels = self.dns_packet_parser.data_to_labels(
-            encoded_data)
-
-        header_packet = self.dns_packet_parser.create_vpn_header(
-            session_id=1,
-            packet_type=self.dns_packet_parser.PACKET_TYPES["SERVER_TEST"],
-        )
-
-        header_packet = self.dns_packet_parser.data_encrypt(header_packet)
-        header_packet = self.dns_packet_parser.base_encode(
-            header_packet, lowerCaseOnly=True)
-
-        labels += "." + header_packet + "." + self.domains[0]
-
-        test_packet = await self.dns_packet_parser.simple_question_packet(
-            domain=labels,
-            qtype="TXT"
-        )
-
-        response_bytes, response_parsed, addr = await self.dns_request('127.0.0.1', 53, test_packet)
-        self.logger.debug(f"Test DNS question packet: {test_packet}")
-        self.logger.debug(f"Response bytes: {response_bytes}")
-        self.logger.debug(f"Response parsed: {response_parsed}")
-        # ---------- End Test DNS SENDING A VPN PACKET ----------
-
-        # @TODO: TEST connectivity to resolvers and domains
-        # @TODO: Find MTU for each resolver
+            "Beginning MTU tests for all domain-resolver combinations...")
+        await self.test_all_mtu()
 
 
 def main():
