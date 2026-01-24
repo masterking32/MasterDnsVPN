@@ -6,6 +6,7 @@
 
 from typing import Any
 import random
+import math
 
 
 class DnsPacketParser:
@@ -16,7 +17,7 @@ class DnsPacketParser:
 
     def __init__(self, logger: Any = None, encryption_key: bytes = b"", encryption_method: int = 1):
         self.logger = logger
-        self.encryption_key = encryption_key
+        self.encryption_key = encryption_key.encode('utf-8')
         self.encryption_method = encryption_method
 
         if self.encryption_method not in (0, 1, 2, 3, 4, 5):
@@ -502,13 +503,18 @@ class DnsPacketParser:
                 self.logger.error(f"Failed to XOR data: {e}")
             return b''
 
-    def data_encrypt(self, data: bytes, key: bytes, method: int) -> bytes:
+    def data_encrypt(self, data: bytes, key: bytes = None, method: int = None) -> bytes:
         """
         Encrypt data based on the selected method.
         Supported methods:
             0: None, 1: XOR, 2: ChaCha20, 3: AES-128-CTR, 4: AES-192-CTR, 5: AES-256-CTR
         """
         try:
+            if key is None:
+                key = self.encryption_key
+            if method is None:
+                method = self.encryption_method
+
             if method == 0:
                 return data
             elif method == 1:
@@ -544,6 +550,92 @@ class DnsPacketParser:
                 self.logger.error(f"Failed to encrypt data: {e}")
             return b''
 
+    def calculate_upload_mtu(self, domain: str, mtu: int = 0) -> int:
+        """
+        Calculate the maximum upload MTU based on the domain length and DNS constraints.
+        Args:
+            domain (str): The domain name used for DNS tunneling.
+            mtu (int): The desired MTU size. If 0, defaults to 512 bytes.
+        Returns:
+            int: Maximum upload MTU in bytes.
+        """
+        # 1. Hard Limits of DNS Protocol
+        MAX_DNS_TOTAL = 253  # Max length of full domain name
+        MAX_LABEL_LEN = 63   # Max length between dots
+
+        # 2. Prepare Header Overhead
+        # Create a dummy header to measure its exact encoded size
+        # We assume worst-case scenario (encryption adds size + max base36 expansion)
+        test_header = self.data_encrypt(
+            self.create_chunk_header(session_id=255, packet_type=0xFF),
+            key=self.encryption_key,
+            method=self.encryption_method
+        )
+        encoded_header = self.base_encode(test_header, lowerCaseOnly=True)
+
+        # Header Overhead = Encoded Header + 1 dot separator
+        header_overhead_chars = len(encoded_header) + 1
+
+        # 3. Domain Overhead
+        # Domain Overhead = length of domain + 1 dot separator (before domain)
+        domain_overhead_chars = len(domain) + 1
+
+        # 4. Calculate Remaining Space for Payload Characters
+        # We subtract 1 extra byte for safety/null terminator
+        total_overhead = header_overhead_chars + domain_overhead_chars + 1
+        available_chars_space = MAX_DNS_TOTAL - total_overhead
+
+        if available_chars_space <= 0:
+            if self.logger:
+                self.logger.error(
+                    f"Domain {domain} is too long, no space for data.")
+            return 0, 0
+
+        # 5. Calculate Max Usable Characters (accounting for forced dots)
+        # We need to find 'N' such that: N + dots_needed(N) <= available_chars_space
+        max_payload_chars = 0
+        for chars in range(available_chars_space, 0, -1):
+            # Calculate how many dots are needed for this many characters
+            # (One dot every 63 chars)
+            needed_dots = (chars - 1) // MAX_LABEL_LEN
+            total_len_needed = chars + needed_dots
+
+            if total_len_needed <= available_chars_space:
+                max_payload_chars = chars
+                break
+
+        # 6. Convert Max Characters to Max Bytes (Base36 Logic)
+        # log2(36) ≈ 5.1699 bits per character
+        bits_capacity = max_payload_chars * math.log2(36)
+        safe_bytes_capacity = int(bits_capacity / 8)
+
+        # 7. Respect User's Requested MTU (if provided and smaller)
+        if mtu > 0 and mtu < safe_bytes_capacity:
+            final_mtu_bytes = mtu
+            # Recalculate chars for the report (approximation)
+            final_mtu_chars = int((mtu * 8) / math.log2(36))
+        else:
+            final_mtu_bytes = safe_bytes_capacity
+            final_mtu_chars = max_payload_chars
+
+        return final_mtu_chars, final_mtu_bytes
+
+    def data_to_labels(self, encoded_str: str) -> str:
+        """
+        Convert encoded string into DNS labels (max 63 chars each).
+
+        Args:
+            encoded_str (str): The base-encoded string to convert.
+
+        Returns:
+            str: The encoded string split into DNS labels separated by dots.
+        """
+        MAX_LABEL_LEN = 63
+        labels = []
+        for i in range(0, len(encoded_str), MAX_LABEL_LEN):
+            labels.append(encoded_str[i:i + MAX_LABEL_LEN])
+        return '.'.join(labels)
+
     #
     # Custom VPN Packet Header Structure (for data fragmentation over DNS)
     #
@@ -555,7 +647,6 @@ class DnsPacketParser:
     # Byte Layout:
     #   [0]  1 byte  (uint8)  : Session ID
     #   [1]  1 byte  (uint8)  : Packet Type
-    #   [...]  Variable Length   : Optional payload (e.g., additional headers)
     #
 
     # Packet Types
@@ -569,7 +660,6 @@ class DnsPacketParser:
         self,
         session_id: int,
         packet_type: int,
-        header_payload: bytes = b""
     ) -> bytes:
         """
         Construct custom VPN header for a DNS packet.
@@ -577,7 +667,6 @@ class DnsPacketParser:
         Args:
             session_id (int): VPN session identifier (0-255).
             packet_type (int): Type of VPN packet (0-255).
-            header_payload (bytes, optional): Additional header payload. Defaults to b"".
         Returns:
             bytes: Encoded VPN header.
 
@@ -595,6 +684,4 @@ class DnsPacketParser:
         header.append(session_id)
         header.append(packet_type)
 
-        if header_payload:
-            header += header_payload
         return bytes(header)

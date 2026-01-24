@@ -36,8 +36,12 @@ class MasterDnsVPNClient:
         self.resolvers = self.config.get("RESOLVER_DNS_SERVERS", [])
         self.domains = self.config.get("DOMAIN")
         self.encryption_method = self.config.get(
-            "DATA_ENCRYPTION_METHOD", None)
+            "DATA_ENCRYPTION_METHOD", 1)
         self.encryption_key = self.config.get("ENCRYPTION_KEY", None)
+        if not self.encryption_key:
+            self.logger.error("No encryption key provided in configuration.")
+            sys.exit(1)
+
         self.dns_packet_parser = DnsPacketParser(
             logger=self.logger,
             encryption_method=self.encryption_method,
@@ -94,18 +98,40 @@ class MasterDnsVPNClient:
 
         self.logger.debug(f"Configuration looks good.")
 
-        test_packet = await self.dns_packet_parser.simple_question_packet(
-            domain="google.com",
-            qtype="A"
+        # test_packet = await self.dns_packet_parser.simple_question_packet(
+        #     domain="google.com",
+        #     qtype="A"
+        # )
+
+        # self.logger.info("MasterDnsVPN Client started successfully.")
+        # response_bytes, response_parsed, addr = await self.dns_request('127.0.0.1', 53, test_packet)
+        # self.logger.debug(f"Test DNS question packet: {test_packet}")
+        # self.logger.debug(f"Response bytes: {response_bytes}")
+        # self.logger.debug(f"Response parsed: {response_parsed}")
+
+        mtu_char_len, mtu_bytes = self.dns_packet_parser.calculate_upload_mtu(
+            domain=self.domains[0],
+            mtu=0
         )
 
-        # server ip : 127.0.0.1:53
+        self.logger.info(
+            f"<green>Calculated upload MTU: {mtu_bytes} bytes ({mtu_char_len} characters) for domain {self.domains[0]}</green>")
 
-        self.logger.info("MasterDnsVPN Client started successfully.")
-        response_bytes, response_parsed, addr = await self.dns_request('127.0.0.1', 53, test_packet)
-        self.logger.debug(f"Test DNS question packet: {test_packet}")
-        self.logger.debug(f"Response bytes: {response_bytes}")
-        self.logger.debug(f"Response parsed: {response_parsed}")
+        fresh_data = "MasterDnsVPN Testing String, Lorem ipsum dolor sit amet, consectetur adipiscing elit. (MasterkinG32.CoM)"
+        fresh_data_bytes = fresh_data.encode("utf-8")
+        encrypted_data = self.dns_packet_parser.data_encrypt(
+            fresh_data_bytes)
+        self.logger.debug(f"Original Data: {fresh_data_bytes}")
+        self.logger.debug(f"Encrypted Data: {encrypted_data}")
+        encoded_data = self.dns_packet_parser.base_encode(
+            encrypted_data, lowerCaseOnly=True)
+        self.logger.debug(f"Encoded Data: {encoded_data}")
+        labels = self.dns_packet_parser.data_to_labels(
+            encoded_data)
+        labels += ".PACKET-HEADER." + self.domains[0]
+        self.logger.info(
+            f"Data converted: <green>{labels.replace('.', '<red> . </red>')}</green>")
+
         # @TODO: TEST connectivity to resolvers and domains
         # @TODO: Find MTU for each resolver
 
