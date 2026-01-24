@@ -5,6 +5,7 @@
 # Year: 2026
 
 from typing import Any
+import random
 
 
 class DnsPacketParser:
@@ -327,93 +328,137 @@ class DnsPacketParser:
                     f"Failed to create Server Failure response: {e}")
             return b''
 
-    async def create_packet(self, dns_type: str = "A", domain: str = "google.com", is_request: bool = True) -> tuple:
+    async def simple_question_packet(self, domain: str, qtype: str = 'A') -> bytes:
         """
-        Create a DNS packet for the given domain and type.
-        Returns (packet_bytes, packet_bytearray).
+        Create a simple DNS question packet for the given domain and type.
+        type: 'A' = 1, 'AAAA' = 28, 'CNAME' = 5, etc.
         """
         try:
-            if is_request:
-                # Create DNS query packet
-                packet = bytearray()
-                packet += (0x1234).to_bytes(2, byteorder='big')  # ID
-                packet += (0x0100).to_bytes(2, byteorder='big')  # Flags
-                packet += (1).to_bytes(2, byteorder='big')       # QDCOUNT
-                packet += (0).to_bytes(2, byteorder='big')       # ANCOUNT
-                packet += (0).to_bytes(2, byteorder='big')       # NSCOUNT
-                packet += (0).to_bytes(2, byteorder='big')       # ARCOUNT
+            qtype_map = {
+                'A': 1,
+                'AAAA': 28,
+                'CNAME': 5,
+                'MX': 15,
+                'TXT': 16,
+                'NS': 2,
+                'SOA': 6,
+                'PTR': 12,
+            }
+            qtype = qtype_map.get(qtype.upper(), 1)
 
-                # Question Section
-                for part in domain.split('.'):
-                    packet += bytes([len(part)])
-                    packet += part.encode('utf-8')
-                packet += bytes([0])  # End of QNAME
+            random_id = random.randint(0, 65535)
+            section = {
+                'headers': {
+                    'id': random_id,
+                    'qdcount': 1,
+                    'ancount': 0,
+                    'nscount': 0,
+                    'arcount': 0
+                },
+                'questions': [{
+                    'qname': domain,
+                    'qtype': qtype,
+                    'qclass': 1
+                }],
+                'answers': [],
+                'authorities': [],
+                'additionals': []
+            }
 
-                qtype_map = {
-                    "A": 1,
-                    "AAAA": 28,
-                    "CNAME": 5,
-                    "MX": 15,
-                    "TXT": 16,
-                    "NS": 2,
-                    "SOA": 6
-                }
-                qtype = qtype_map.get(dns_type.upper(), 1)
+            packet = await self.create_packet(section)
+            return packet
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Failed to create question packet: {e}")
+            return b''
 
-                packet += qtype.to_bytes(2, byteorder='big')  # QTYPE
-                packet += (1).to_bytes(2, byteorder='big')    # QCLASS
-                return bytes(packet), packet
+    async def create_packet(self, sections: dict, question_packet: bytes = b'') -> bytes:
+        """
+        Create a DNS packet from the given sections for question or answer.
+        sections: {
+            'headers': dict,
+            'questions': list,
+            'answers': list,
+            'authorities': list,
+            'additionals': list
+        }
+        question_packet: original packet with question section for ID and flags (optional)
+        """
+        try:
+            packet = bytearray()
+
+            # Headers
+            if question_packet and len(question_packet) >= 12:
+                packet += question_packet[0:2]  # ID
+                flags = int.from_bytes(
+                    question_packet[2:4], byteorder='big')
+                packet += flags.to_bytes(2, byteorder='big')  # Flags
             else:
-                # Create DNS response packet with TTL=0 (no cache)
-                packet = bytearray()
-                packet += (0x1234).to_bytes(2, byteorder='big')  # ID
-                # Flags (standard response)
-                packet += (0x8180).to_bytes(2, byteorder='big')
-                packet += (1).to_bytes(2, byteorder='big')       # QDCOUNT
-                packet += (1).to_bytes(2, byteorder='big')       # ANCOUNT
-                packet += (0).to_bytes(2, byteorder='big')       # NSCOUNT
-                packet += (0).to_bytes(2, byteorder='big')       # ARCOUNT
+                packet += sections['headers']['id'].to_bytes(
+                    2, byteorder='big')
+                # Set flags for a standard query: QR=0, RD=1 (0x0100)
+                flags = 0x0100
+                packet += flags.to_bytes(2, byteorder='big')
 
-                # Question Section
-                for part in domain.split('.'):
-                    packet += bytes([len(part)])
-                    packet += part.encode('utf-8')
-                packet += bytes([0])  # End of QNAME
+            packet += sections['headers']['qdcount'].to_bytes(
+                2, byteorder='big')
+            packet += sections['headers']['ancount'].to_bytes(
+                2, byteorder='big')
+            packet += sections['headers']['nscount'].to_bytes(
+                2, byteorder='big')
+            packet += sections['headers']['arcount'].to_bytes(
+                2, byteorder='big')
 
-                qtype_map = {
-                    "A": 1,
-                    "AAAA": 28,
-                    "CNAME": 5,
-                    "MX": 15,
-                    "TXT": 16,
-                    "NS": 2,
-                    "SOA": 6
-                }
-                qtype = qtype_map.get(dns_type.upper(), 1)
+            # Questions
+            for question in sections.get('questions', []):
+                for label in question['qname'].split('.'):
+                    packet.append(len(label))
+                    packet += label.encode('utf-8')
+                packet.append(0)  # End of name
+                packet += question['qtype'].to_bytes(2, byteorder='big')
+                packet += question['qclass'].to_bytes(2, byteorder='big')
 
-                packet += qtype.to_bytes(2, byteorder='big')  # QTYPE
-                packet += (1).to_bytes(2, byteorder='big')    # QCLASS
+            # Answers
+            for answer in sections.get('answers', []):
+                for label in answer['name'].split('.'):
+                    packet.append(len(label))
+                    packet += label.encode('utf-8')
+                packet.append(0)  # End of name
+                packet += answer['type'].to_bytes(2, byteorder='big')
+                packet += answer['class'].to_bytes(2, byteorder='big')
+                packet += answer['ttl'].to_bytes(4, byteorder='big')
+                packet += len(answer['rdata']).to_bytes(2, byteorder='big')
+                packet += answer['rdata']
 
-                # Answer Section
-                # Name: pointer to offset 12 (0xC00C)
-                packet += (0xC00C).to_bytes(2, byteorder='big')
-                packet += qtype.to_bytes(2, byteorder='big')  # TYPE
-                packet += (1).to_bytes(2, byteorder='big')    # CLASS
-                # TTL = 0 (no cache)
-                packet += (0).to_bytes(4, byteorder='big')
-                if qtype == 1:  # A
-                    packet += (4).to_bytes(2, byteorder='big')  # RDLENGTH
-                    packet += bytes([127, 0, 0, 1])  # RDATA: 127.0.0.1
-                elif qtype == 28:  # AAAA
-                    packet += (16).to_bytes(2, byteorder='big')  # RDLENGTH
-                    packet += bytes([0]*15 + [1])  # ::1
-                else:
-                    packet += (0).to_bytes(2, byteorder='big')  # RDLENGTH
-                return bytes(packet), packet
+            # Authorities
+            for authority in sections.get('authorities', []):
+                for label in authority['name'].split('.'):
+                    packet.append(len(label))
+                    packet += label.encode('utf-8')
+                packet.append(0)  # End of name
+                packet += authority['type'].to_bytes(2, byteorder='big')
+                packet += authority['class'].to_bytes(2, byteorder='big')
+                packet += authority['ttl'].to_bytes(4, byteorder='big')
+                packet += len(authority['rdata']).to_bytes(2, byteorder='big')
+                packet += authority['rdata']
+
+            # Additionals
+            for additional in sections.get('additionals', []):
+                for label in additional['name'].split('.'):
+                    packet.append(len(label))
+                    packet += label.encode('utf-8')
+                packet.append(0)  # End of name
+                packet += additional['type'].to_bytes(2, byteorder='big')
+                packet += additional['class'].to_bytes(2, byteorder='big')
+                packet += additional['ttl'].to_bytes(4, byteorder='big')
+                packet += len(additional['rdata']).to_bytes(2, byteorder='big')
+                packet += additional['rdata']
+
+            return bytes(packet)
         except Exception as e:
             if self.logger:
                 self.logger.error(f"Failed to create DNS packet: {e}")
-            return b'', b''
+            return b''
 
     """
     VPN over DNS Utilities
