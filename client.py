@@ -265,53 +265,57 @@ class MasterDnsVPNClient:
             return False
 
     async def test_download_mtu(self, domain: str, dns_server: str, dns_port: int, max_mtu: int, max_upload_chars: int) -> int:
-
-        low = 0
-        high = max_mtu
-        best_mtu = 0
-        valid_mtu_found = False
+        """
+        Determine the optimal download MTU for DNS tunneling using binary search.
+        Returns the highest MTU value that succeeds, or 0 if none succeed.
+        """
+        min_mtu = 0
+        max_mtu_candidate = max_mtu
+        optimal_mtu = 0
 
         try:
-            # Try with max_mtu first
+            # Initial attempt with the maximum MTU
             self.logger.debug(
-                f"Testing download MTU: {max_mtu} bytes to {dns_server}:{dns_port} for domain {domain} (first try)")
-            is_success = await self.perform_download_mtu_test(
-                domain, dns_server, dns_port, max_mtu, max_upload_chars)
-            if is_success:
-                return max_mtu
-            else:
-                high = max_mtu - 1
-
-            while low <= high:
-                mid = (low + high) // 2
-                self.logger.debug(
-                    f"Testing download MTU: {mid} bytes to {dns_server}:{dns_port} for domain {domain}")
-
-                is_success = await self.perform_download_mtu_test(
-                    domain, dns_server, dns_port, mid, max_upload_chars)
-
-                if is_success:
-                    valid_mtu_found = True
-                    best_mtu = mid
-                    low = mid + 1
-                    self.logger.debug(
-                        f"Download MTU test successful for {mid} bytes. Trying higher...")
-                else:
-                    high = mid - 1
-                    self.logger.debug(
-                        f"Download MTU test failed for {mid} bytes. Trying lower...")
-
-            if valid_mtu_found:
+                f"[Download MTU Test] Attempting initial test with {max_mtu_candidate} bytes to {dns_server}:{dns_port} for domain '{domain}'")
+            if await self.perform_download_mtu_test(domain, dns_server, dns_port, max_mtu_candidate, max_upload_chars):
                 self.logger.success(
-                    f"Download MTU test successful: <g>{best_mtu}</g> bytes to <g>{dns_server}:{dns_port}</g> for domain <g>{domain}</g>")
-                return best_mtu
+                    f"[Download MTU Test] Maximum MTU {max_mtu_candidate} bytes is supported by {dns_server}:{dns_port} for domain '{domain}'")
+                return max_mtu_candidate
+            else:
+                max_mtu_candidate -= 1
+
+            # Binary search for the highest working MTU
+            while min_mtu <= max_mtu_candidate:
+                current_mtu = (min_mtu + max_mtu_candidate) // 2
+                self.logger.debug(
+                    f"[Download MTU Test] Testing {current_mtu} bytes to {dns_server}:{dns_port} for domain '{domain}'")
+
+                if current_mtu < 30:
+                    self.logger.debug(
+                        f"[Download MTU Test] Current MTU {current_mtu} bytes is below minimum threshold. Ending test.")
+                    break
+
+                if await self.perform_download_mtu_test(domain, dns_server, dns_port, current_mtu, max_upload_chars):
+                    optimal_mtu = current_mtu
+                    min_mtu = current_mtu + 1
+                    self.logger.debug(
+                        f"[Download MTU Test] Success at {current_mtu} bytes. Trying higher...")
+                else:
+                    max_mtu_candidate = current_mtu - 1
+                    self.logger.debug(
+                        f"[Download MTU Test] Failure at {current_mtu} bytes. Trying lower...")
+
+            if optimal_mtu > 29:
+                self.logger.success(
+                    f"[Download MTU Test] Optimal download MTU determined: <g>{optimal_mtu}</g> bytes to <g>{dns_server}:{dns_port}</g> for domain <g>{domain}</g>")
+                return optimal_mtu
 
             self.logger.error(
-                f"Download MTU test failed: Could not determine optimal MTU to {dns_server}:{dns_port} for domain {domain}")
+                f"[Download MTU Test] Failed to determine a valid download MTU for {dns_server}:{dns_port} and domain '{domain}'")
             return 0
-        except Exception as e:
+        except Exception as exc:
             self.logger.error(
-                f"Error during download MTU test to {dns_server}:{dns_port} for domain {domain}: {e}")
+                f"[Download MTU Test] Exception occurred while testing download MTU to {dns_server}:{dns_port} for domain '{domain}': {exc}")
             return 0
 
     async def test_all_mtu(self) -> None:
