@@ -103,7 +103,7 @@ class MasterDnsVPNServer:
                 self.logger.error(
                     f"No questions found in VPN packet from {addr}")
                 return False, None
-            packet_domain = questions[0]['qname']
+            packet_domain = questions[0]['qName']
             packet_main_domain = next(
                 (domain for domain in self.allowed_domains if packet_domain.endswith(domain)), '')
             if questions[0]['qType'] != RESOURCE_RECORDS["TXT"]:

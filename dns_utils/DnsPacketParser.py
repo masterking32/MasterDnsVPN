@@ -22,9 +22,8 @@ class DnsPacketParser:
             'utf-8') if isinstance(encryption_key, str) else encryption_key
         self.encryption_method = encryption_method
         if self.encryption_method not in (0, 1, 2, 3, 4, 5):
-            if self.logger:
-                self.logger.error(
-                    f"Invalid encryption_method value: {self.encryption_method}. Defaulting to 1 (XOR encryption).")
+            self.logger.error(
+                f"Invalid encryption_method value: {self.encryption_method}. Defaulting to 1 (XOR encryption).")
             self.encryption_method = 1
         # Adjust key length for encryption methods
         if self.encryption_method == 2:
@@ -76,8 +75,7 @@ class DnsPacketParser:
             }
             return headers
         except Exception as e:
-            if self.logger:
-                self.logger.error(f"Failed to parse DNS headers: {e}")
+            self.logger.error(f"Failed to parse DNS headers: {e}")
             return {}
 
     async def parse_dns_question(self, headers: dict, data: bytes, offset: int) -> tuple:
@@ -91,7 +89,8 @@ class DnsPacketParser:
 
             questions = []
             for _ in range(headers['QdCount']):
-                name, offset = self._parse_name(data, offset)
+                name, offset = self._parse_dns_name_from_bytes(
+                    data, offset)
                 qType = int.from_bytes(
                     data[offset:offset + 2], byteorder='big')
                 offset += 2
@@ -99,7 +98,7 @@ class DnsPacketParser:
                     data[offset:offset + 2], byteorder='big')
                 offset += 2
                 question = {
-                    'qname': name,
+                    'qName': name,
                     'qType': qType,
                     'qClass': qClass
                 }
@@ -107,14 +106,51 @@ class DnsPacketParser:
 
             return questions, offset
         except Exception as e:
-            if self.logger:
-                self.logger.error(f"Failed to parse DNS question: {e}")
+            self.logger.error(f"Failed to parse DNS question: {e}")
             return None, offset
 
-    def _parse_name(self, data: bytes, offset: int) -> tuple:
+    async def _parse_resource_records_section(self, headers: dict, data: bytes, offset: int, count_key: str, section_name: str) -> tuple:
         """
-        Parse a domain name from DNS packet data, handling compression pointers.
-        Returns (name, new_offset).
+        Generic parser for DNS resource record sections (answers, authorities, additional).
+        Returns a tuple (records_list, new_offset).
+        """
+        try:
+            count = headers.get(count_key, 0)
+            if count == 0:
+                return None, offset
+
+            records = []
+            for _ in range(count):
+                name, offset = self._parse_dns_name_from_bytes(data, offset)
+                r_type = int.from_bytes(
+                    data[offset:offset + 2], byteorder='big')
+                offset += 2
+                r_class = int.from_bytes(
+                    data[offset:offset + 2], byteorder='big')
+                offset += 2
+                ttl = int.from_bytes(data[offset:offset + 4], byteorder='big')
+                offset += 4
+                rdlength = int.from_bytes(
+                    data[offset:offset + 2], byteorder='big')
+                offset += 2
+                rdata = data[offset:offset + rdlength]
+                offset += rdlength
+                record = {
+                    'name': name,
+                    'type': r_type,
+                    'class': r_class,
+                    'TTL': ttl,
+                    'rData': rdata
+                }
+                records.append(record)
+            return records, offset
+        except Exception as e:
+            self.logger.error(f"Failed to parse DNS authority: {e}")
+            return None, offset
+
+    def _parse_dns_name_from_bytes(self, data: bytes, offset: int) -> tuple:
+        """
+        Parse a DNS name from bytes, handling compression pointers. Returns (name, new_offset).
         """
         labels = []
         jumped = False
@@ -140,140 +176,6 @@ class DnsPacketParser:
         else:
             return '.'.join(labels), original_offset
 
-    async def parse_dns_answer(self, headers: dict, data: bytes, offset: int) -> tuple:
-        """
-        Parse the DNS answer section from the packet data.
-        Returns a tuple (answers_list, new_offset).
-        """
-        try:
-            if headers.get('AnCount', 0) == 0:
-                return None, offset
-
-            answers = []
-            for _ in range(headers['AnCount']):
-                name, offset = self._parse_name(data, offset)
-                aType = int.from_bytes(
-                    data[offset:offset + 2], byteorder='big')
-                offset += 2
-                aClass = int.from_bytes(
-                    data[offset:offset + 2], byteorder='big')
-                offset += 2
-                TTL = int.from_bytes(data[offset:offset + 4], byteorder='big')
-                offset += 4
-                RdLength = int.from_bytes(
-                    data[offset:offset + 2], byteorder='big')
-                offset += 2
-                rData = data[offset:offset + RdLength]
-                offset += RdLength
-                answer = {
-                    'name': name,
-                    'type': aType,
-                    'class': aClass,
-                    'TTL': TTL,
-                    'rData': rData
-                }
-                answers.append(answer)
-
-            return answers, offset
-        except Exception as e:
-            if self.logger:
-                self.logger.error(f"Failed to parse DNS answer: {e}")
-            return None, offset
-
-    async def parse_dns_authority(self, headers: dict, data: bytes, offset: int) -> tuple:
-        """
-        Parse the DNS authority section from the packet data.
-        Returns a tuple (authorities_list, new_offset).
-        """
-        try:
-            if headers.get('NsCount', 0) == 0:
-                return None, offset
-
-            authorities = []
-            for _ in range(headers['NsCount']):
-                name = []
-                while True:
-                    length = data[offset]
-                    if length == 0:
-                        offset += 1
-                        break
-                    offset += 1
-                    name.append(data[offset:offset + length].decode('utf-8'))
-                    offset += length
-                aType = int.from_bytes(
-                    data[offset:offset + 2], byteorder='big')
-                offset += 2
-                aClass = int.from_bytes(
-                    data[offset:offset + 2], byteorder='big')
-                offset += 2
-                TTL = int.from_bytes(data[offset:offset + 4], byteorder='big')
-                offset += 4
-                RdLength = int.from_bytes(
-                    data[offset:offset + 2], byteorder='big')
-                offset += 2
-                rData = data[offset:offset + RdLength]
-                offset += RdLength
-                authority = {
-                    'name': '.'.join(name),
-                    'type': aType,
-                    'class': aClass,
-                    'TTL': TTL,
-                    'rData': rData
-                }
-                authorities.append(authority)
-            return authorities, offset
-        except Exception as e:
-            if self.logger:
-                self.logger.error(f"Failed to parse DNS authority: {e}")
-            return None, offset
-
-    async def parse_dns_additional(self, headers: dict, data: bytes, offset: int) -> tuple:
-        """
-        Parse the DNS additional section from the packet data.
-        Returns a tuple (additional_list, new_offset).
-        """
-        try:
-            if headers.get('ArCount', 0) == 0:
-                return None, offset
-
-            additional = []
-            for _ in range(headers['ArCount']):
-                name = []
-                while True:
-                    length = data[offset]
-                    if length == 0:
-                        offset += 1
-                        break
-                    offset += 1
-                    name.append(data[offset:offset + length].decode('utf-8'))
-                    offset += length
-                aType = int.from_bytes(
-                    data[offset:offset + 2], byteorder='big')
-                offset += 2
-                aClass = int.from_bytes(
-                    data[offset:offset + 2], byteorder='big')
-                offset += 2
-                TTL = int.from_bytes(data[offset:offset + 4], byteorder='big')
-                offset += 4
-                RdLength = int.from_bytes(
-                    data[offset:offset + 2], byteorder='big')
-                offset += 2
-                rData = data[offset:offset + RdLength]
-                offset += RdLength
-                additional = {
-                    'name': '.'.join(name),
-                    'type': aType,
-                    'class': aClass,
-                    'TTL': TTL,
-                    'rData': rData
-                }
-                additional.append(additional)
-            return additional, offset
-        except Exception as e:
-            if self.logger:
-                self.logger.error(f"Failed to parse DNS additional: {e}")
-            return None, offset
-
     async def parse_dns_packet(self, data: bytes) -> dict:
         """
         Parse the entire DNS packet from the data.
@@ -283,9 +185,9 @@ class DnsPacketParser:
             headers = await self.parse_dns_headers(data)
             offset = 12
             questions, offset = await self.parse_dns_question(headers, data, offset)
-            answers, offset = await self.parse_dns_answer(headers, data, offset)
-            authorities, offset = await self.parse_dns_authority(headers, data, offset)
-            additional, offset = await self.parse_dns_additional(headers, data, offset)
+            answers, offset = await self._parse_resource_records_section(headers, data, offset, 'AnCount', 'answer')
+            authorities, offset = await self._parse_resource_records_section(headers, data, offset, 'NsCount', 'authority')
+            additional, offset = await self._parse_resource_records_section(headers, data, offset, 'ArCount', 'additional')
             dns_packet = {
                 'headers': headers,
                 'questions': questions,
@@ -295,8 +197,7 @@ class DnsPacketParser:
             }
             return dns_packet
         except Exception as e:
-            if self.logger:
-                self.logger.error(f"Failed to parse DNS packet: {e}")
+            self.logger.error(f"Failed to parse DNS packet: {e}")
             return {}
 
     async def server_fail_response(self, request_data: bytes) -> bytes:
@@ -323,9 +224,8 @@ class DnsPacketParser:
 
             return bytes(response)
         except Exception as e:
-            if self.logger:
-                self.logger.error(
-                    f"Failed to create Server Failure response: {e}")
+            self.logger.error(
+                f"Failed to create Server Failure response: {e}")
             return b''
 
     async def simple_answer_packet(self, answers: list, question_packet: bytes) -> bytes:
@@ -357,8 +257,7 @@ class DnsPacketParser:
             packet = await self.create_packet(section, question_packet)
             return packet
         except Exception as e:
-            if self.logger:
-                self.logger.error(f"Failed to create answer packet: {e}")
+            self.logger.error(f"Failed to create answer packet: {e}")
             return b''
 
     async def simple_question_packet(self, domain: str, qType: int) -> bytes:
@@ -381,7 +280,7 @@ class DnsPacketParser:
                     'ArCount': 0
                 },
                 'questions': [{
-                    'qname': domain,
+                    'qName': domain,
                     'qType': qType,
                     'qClass': Q_CLASSES["IN"]  # Internet
                 }],
@@ -393,8 +292,7 @@ class DnsPacketParser:
             packet = await self.create_packet(section)
             return packet
         except Exception as e:
-            if self.logger:
-                self.logger.error(f"Failed to create question packet: {e}")
+            self.logger.error(f"Failed to create question packet: {e}")
             return b''
 
     async def create_packet(self, sections: dict, question_packet: bytes = b'') -> bytes:
@@ -448,64 +346,61 @@ class DnsPacketParser:
                 packet += ArCount_val.to_bytes(2, byteorder='big')
 
             # Questions
-
             for question in sections.get('questions', []):
-                for label in question['qname'].split('.'):
-                    label_bytes = label.encode(
-                        'utf-8') if not isinstance(label, bytes) else label
-                    packet.append(len(label_bytes))
-                    packet += label_bytes
-                packet.append(0)  # End of name
-                packet += int(question['qType']).to_bytes(2, byteorder='big')
-                packet += int(question['qClass']).to_bytes(2, byteorder='big')
+                packet += self._serialize_dns_question(question)
 
             # Answers
             for answer in sections.get('answers', []):
-                for label in answer['name'].split('.'):
-                    label_bytes = label.encode(
-                        'utf-8') if not isinstance(label, bytes) else label
-                    packet.append(len(label_bytes))
-                    packet += label_bytes
-                packet.append(0)  # End of name
-                packet += int(answer['type']).to_bytes(2, byteorder='big')
-                packet += int(answer['class']).to_bytes(2, byteorder='big')
-                packet += int(answer['TTL']).to_bytes(4, byteorder='big')
-                packet += len(answer['rData']).to_bytes(2, byteorder='big')
-                packet += answer['rData']
+                packet += self._serialize_resource_record(answer)
 
             # Authorities
             for authority in sections.get('authorities', []):
-                for label in authority['name'].split('.'):
-                    label_bytes = label.encode(
-                        'utf-8') if not isinstance(label, bytes) else label
-                    packet.append(len(label_bytes))
-                    packet += label_bytes
-                packet.append(0)  # End of name
-                packet += int(authority['type']).to_bytes(2, byteorder='big')
-                packet += int(authority['class']).to_bytes(2, byteorder='big')
-                packet += int(authority['TTL']).to_bytes(4, byteorder='big')
-                packet += len(authority['rData']).to_bytes(2, byteorder='big')
-                packet += authority['rData']
+                packet += self._serialize_resource_record(authority)
 
-            # Additionals
+            # Additional
             for additional in sections.get('additional', []):
-                for label in additional['name'].split('.'):
-                    label_bytes = label.encode(
-                        'utf-8') if not isinstance(label, bytes) else label
-                    packet.append(len(label_bytes))
-                    packet += label_bytes
-                packet.append(0)  # End of name
-                packet += int(additional['type']).to_bytes(2, byteorder='big')
-                packet += int(additional['class']).to_bytes(2, byteorder='big')
-                packet += int(additional['TTL']).to_bytes(4, byteorder='big')
-                packet += len(additional['rData']).to_bytes(2, byteorder='big')
-                packet += additional['rData']
+                packet += self._serialize_resource_record(additional)
 
             return bytes(packet)
         except Exception as e:
-            if self.logger:
-                self.logger.error(f"Failed to create DNS packet: {e}")
+            self.logger.error(f"Failed to create DNS packet: {e}")
             return b''
+
+    def _serialize_dns_question(self, question: dict) -> bytes:
+        """
+        Serialize a DNS question section to bytes.
+        """
+        result = bytearray()
+        result += self._serialize_dns_name(question['qName'])
+        result += int(question['qType']).to_bytes(2, byteorder='big')
+        result += int(question['qClass']).to_bytes(2, byteorder='big')
+        return result
+
+    def _serialize_resource_record(self, record: dict) -> bytes:
+        """
+        Serialize a DNS resource record (answer, authority, additional) to bytes.
+        """
+        result = bytearray()
+        result += self._serialize_dns_name(record['name'])
+        result += int(record['type']).to_bytes(2, byteorder='big')
+        result += int(record['class']).to_bytes(2, byteorder='big')
+        result += int(record['TTL']).to_bytes(4, byteorder='big')
+        result += len(record['rData']).to_bytes(2, byteorder='big')
+        result += record['rData']
+        return result
+
+    def _serialize_dns_name(self, name: str) -> bytes:
+        """
+        Serialize a DNS name (labels) to bytes.
+        """
+        result = bytearray()
+        for label in name.split('.'):
+            label_bytes = label.encode(
+                'utf-8') if not isinstance(label, bytes) else label
+            result.append(len(label_bytes))
+            result += label_bytes
+        result.append(0)  # End of name
+        return result
 
     """
     VPN over DNS Utilities
@@ -562,8 +457,7 @@ class DnsPacketParser:
                 xored.append(data[i] ^ key[i % key_length])
             return bytes(xored)
         except Exception as e:
-            if self.logger:
-                self.logger.error(f"Failed to XOR data: {e}")
+            self.logger.error("Failed to XOR data", e)
             return b''
 
     def data_encrypt(self, data: bytes, key: bytes = None, method: int = None) -> bytes:
@@ -605,12 +499,10 @@ class DnsPacketParser:
                 encrypted_data = encryptor.update(data) + encryptor.finalize()
                 return nonce + encrypted_data
             else:
-                if self.logger:
-                    self.logger.error(f"Unknown encryption method: {method}")
+                self.logger.error(f"Unknown encryption method: {method}")
                 return data
         except Exception as e:
-            if self.logger:
-                self.logger.error(f"Failed to encrypt data: {e}")
+            self.logger.error(f"Failed to encrypt data: {e}")
             return b''
 
     def data_decrypt(self, data: bytes, key: bytes = None, method: int = None) -> bytes:
@@ -653,13 +545,11 @@ class DnsPacketParser:
                     encrypted_data) + decryptor.finalize()
                 return decrypted_data
             else:
-                if self.logger:
-                    self.logger.error(f"Unknown decryption method: {method}")
+                self.logger.error(f"Unknown decryption method: {method}")
                 return data
         except Exception as e:
-            if self.logger:
-                self.logger.error(
-                    f"Failed to decrypt data <red>Maybe encryption key/method is wrong?</red>: {e}")
+            self.logger.error(
+                f"Failed to decrypt data <red>Maybe encryption key/method is wrong?</red>: {e}")
             return b''
 
     def generate_labels(self, domain: str, session_id: int, packet_type: int, data: bytes, mtu_chars: int, encode_data: bool = True) -> str:
@@ -725,9 +615,8 @@ class DnsPacketParser:
         available_chars_space = MAX_DNS_TOTAL - total_overhead
 
         if available_chars_space <= 0:
-            if self.logger:
-                self.logger.error(
-                    f"Domain {domain} is too long, no space for data.")
+            self.logger.error(
+                f"Domain {domain} is too long, no space for data.")
             return 0, 0
 
         # 5. Calculate Max Usable Characters (accounting for forced dots)
@@ -793,9 +682,8 @@ class DnsPacketParser:
                 header_encoded, lowerCaseOnly=True)
             return header_decrypted
         except Exception as e:
-            if self.logger:
-                self.logger.error(
-                    f"Failed to extract VPN header <red>Maybe encryption key/method is wrong?</red>: {e}")
+            self.logger.error(
+                "Failed to extract VPN header <red>Maybe encryption key/method is wrong?</red>", e)
             return b''
 
     def decode_and_decrypt_data(self, encoded_str: str, lowerCaseOnly=True) -> bytes:
@@ -814,9 +702,8 @@ class DnsPacketParser:
                 data_encrypted)
             return data_decrypted
         except Exception as e:
-            if self.logger:
-                self.logger.error(
-                    f"Failed to decode and decrypt VPN data <red>Maybe encryption key/method is wrong?</red>: {e}")
+            self.logger.error(
+                "Failed to decode and decrypt VPN data <red>Maybe encryption key/method is wrong?</red>", e)
             return b''
 
     def extract_vpn_data_from_labels(self, labels: str) -> bytes:
@@ -837,9 +724,8 @@ class DnsPacketParser:
                 data_encoded, lowerCaseOnly=True)
             return data_decrypted
         except Exception as e:
-            if self.logger:
-                self.logger.error(
-                    f"Failed to extract VPN data <red>Maybe encryption key/method is wrong?</red>: {e}")
+            self.logger.error(
+                "Failed to extract VPN data <red>Maybe encryption key/method is wrong?</red>", e)
             return b''
 
     #
