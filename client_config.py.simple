@@ -34,14 +34,23 @@ class master_dns_vpn_config:
         "8.8.8.8",
     ]
 
+    # MTU Settings for DNS Tunneling
+    # --------------------------------
+    # These values define the Maximum Transmission Unit (MTU) for upload and download operations.
+    # Adjust these values based on your network conditions for optimal performance.
+    # Check the client logs after initial connection to see recommended MTU values.
+
+    # Maximum size of data packets sent to the server. (default: 512 bytes)
+    MAX_UPLOAD_MTU = 512
+    # Maximum size of data packets received from the server. (default: 4096 bytes)
+    MAX_DOWNLOAD_MTU = 4096
+
     # Domains used for DNS tunneling.
-    # Specify one or more domains that you own and have configured to resolve to this server's IP address.
-    # These domains will be used to encapsulate and transport VPN data via DNS queries.
-    # Adding multiple domains can improve reliability (redundancy) and distribute traffic (load balancing).
-    # For best performance, use domains with shorter names, as they reduce packet size and increase efficiency.
+    # These domains must be controlled by you and configured to point to this server.
+    # Add multiple domains for redundancy or load balancing.
     DOMAINS = [
         "t.example.com",  # Main tunnel domain
-        "b.example.com"   # Backup or secondary domain
+        # "b.example.com"   # Backup or secondary domain
     ]
 
     # Data Encryption Method
