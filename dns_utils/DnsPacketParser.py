@@ -130,17 +130,17 @@ class DnsPacketParser:
                 offset += 2
                 ttl = int.from_bytes(data[offset:offset + 4], byteorder='big')
                 offset += 4
-                rdlength = int.from_bytes(
+                rdLength = int.from_bytes(
                     data[offset:offset + 2], byteorder='big')
                 offset += 2
-                rdata = data[offset:offset + rdlength]
-                offset += rdlength
+                rData = data[offset:offset + rdLength]
+                offset += rdLength
                 record = {
                     'name': name,
                     'type': r_type,
                     'class': r_class,
                     'TTL': ttl,
-                    'rData': rdata
+                    'rData': rData
                 }
                 records.append(record)
             return records, offset
@@ -394,12 +394,18 @@ class DnsPacketParser:
         Serialize a DNS name (labels) to bytes.
         """
         result = bytearray()
-        for label in name.split('.'):
-            label_bytes = label.encode(
-                'utf-8') if not isinstance(label, bytes) else label
-            result.append(len(label_bytes))
-            result += label_bytes
-        result.append(0)  # End of name
+        try:
+            labels = name.split('.') if '.' in name else [name]
+            for label in labels:
+                label_bytes = label.encode(
+                    'utf-8') if not isinstance(label, bytes) else label
+                if len(label_bytes) > 63:
+                    raise ValueError("DNS label too long")
+                result.append(len(label_bytes))
+                result += label_bytes
+            result.append(0)  # End of name
+        except Exception as e:
+            self.logger.error(f"Failed to serialize DNS name: {e}")
         return result
 
     """
@@ -584,6 +590,58 @@ class DnsPacketParser:
 
         return data_labels
 
+    async def generate_vpn_response_packet(self, session_id: int, packet_type: int, data: bytes,  question_packet: bytes = b'') -> bytes:
+
+        MAX_ALLOWED_CHARS_PER_TXT = 191
+        header = self.create_vpn_header(
+            session_id, packet_type, base36_encode=True)
+
+        data = self.base_encode(data, lowerCaseOnly=False)
+        # split data into chunks
+        chunks = []
+        for i in range(0, len(data), MAX_ALLOWED_CHARS_PER_TXT):
+            chunk = data[i:i + MAX_ALLOWED_CHARS_PER_TXT]
+            chunks.append(chunk)
+
+        answers = []
+        answer_id = 0
+        for chunk in chunks:
+            name = ''
+            if answer_id == 0:
+                name = header + '.0'
+            else:
+                name = str(answer_id)
+            answer_id += 1
+            answer = {
+                'name': name,  # root
+                'type': RESOURCE_RECORDS['TXT'],
+                'class': Q_CLASSES['IN'],
+                'TTL': 0,
+                'rData': bytes([len(chunk)]) + chunk.encode('utf-8')
+            }
+            answers.append(answer)
+
+        packet = await self.simple_answer_packet(answers, question_packet)
+        return packet
+
+    def extract_txt_from_rData(self, rData: bytes) -> str:
+        """
+        Extract the TXT string from the rData field of a DNS TXT record.
+        Args:
+            rData (bytes): The rData field from a DNS TXT record.
+        Returns:
+            str: The extracted TXT string.
+            """
+        try:
+            if len(rData) == 0:
+                return ''
+            txt_length = rData[0]
+            txt_data = rData[1:1 + txt_length]
+            return txt_data.decode('utf-8')
+        except Exception as e:
+            self.logger.error(f"Failed to extract TXT from rData: {e}")
+            return ''
+
     def calculate_upload_mtu(self, domain: str, mtu: int = 0) -> int:
         """
         Calculate the maximum upload MTU based on the domain length and DNS constraints.
@@ -705,6 +763,26 @@ class DnsPacketParser:
             self.logger.error(
                 "Failed to decode and decrypt VPN data <red>Maybe encryption key/method is wrong?</red>", e)
             return b''
+
+    def encrypt_and_encode_data(self, data: bytes, lowerCaseOnly=True) -> str:
+        """
+        Encrypt and encode the VPN data to a string.
+
+        Args:
+            data (bytes): The raw VPN data bytes.
+        Returns:
+            str: Encoded VPN data string.
+        """
+
+        try:
+            data_encrypted = self.data_encrypt(data)
+            data_encoded = self.base_encode(
+                data_encrypted, lowerCaseOnly=lowerCaseOnly)
+            return data_encoded
+        except Exception as e:
+            self.logger.error(
+                "Failed to encrypt and encode VPN data <red>Maybe encryption key/method is wrong?</red>", e)
+            return ''
 
     def extract_vpn_data_from_labels(self, labels: str) -> bytes:
         """

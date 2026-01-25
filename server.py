@@ -173,6 +173,51 @@ class MasterDnsVPNServer:
                     question_packet=data
                 )
                 return True, response_packet
+            elif packet_type == PACKET_TYPES["SERVER_DOWNLOAD_TEST"]:
+                if '.' not in labels:
+                    self.logger.warning(
+                        f"Invalid SERVER_DOWNLOAD_TEST packet format from {addr}: {labels}")
+                    return False, None
+
+                first_part_of_data = labels.split('.')[0]
+                if not first_part_of_data:
+                    self.logger.warning(
+                        f"Empty data in SERVER_DOWNLOAD_TEST packet from {addr}")
+                    return False, None
+
+                download_size_bytes = self.dns_parser.decode_and_decrypt_data(
+                    first_part_of_data, lowerCaseOnly=True)
+                if download_size_bytes is None:
+                    self.logger.warning(
+                        f"Failed to decode download size in SERVER_DOWNLOAD_TEST packet from {addr}")
+                    return False, None
+
+                download_size = int.from_bytes(
+                    download_size_bytes, byteorder='big')
+
+                if download_size < 29:
+                    self.logger.warning(
+                        f"Download size too small in SERVER_DOWNLOAD_TEST packet from {addr}: {download_size}")
+                    return False, None
+
+                response = self.dns_parser.data_encrypt(
+                    download_size_bytes) + ".".encode()
+
+                random_bytes = response + random.randbytes(
+                    download_size - len(response))
+
+                if len(random_bytes) != download_size:
+                    self.logger.error(
+                        f"Generated download data size mismatch for packet from {addr}: expected {download_size}, got {len(random_bytes)}")
+                    return False, None
+                response_packet = await self.dns_parser.generate_vpn_response_packet(
+                    session_id=random.randint(0, 255),
+                    packet_type=PACKET_TYPES["SERVER_DOWNLOAD_TEST"],
+                    data=random_bytes,
+                    question_packet=data
+                )
+
+                return True, response_packet
             return True, None
         except Exception as e:
             self.logger.error(

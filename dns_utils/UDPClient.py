@@ -9,7 +9,7 @@ from typing import Optional
 
 
 class UDPClient:
-    def __init__(self, logger, server_host: str = '127.0.0.1', server_port: int = 53, timeout: float = 10.0, buffer_size: int = 4096) -> None:
+    def __init__(self, logger, server_host: str = '127.0.0.1', server_port: int = 53, timeout: float = 10.0, buffer_size: int = 65507) -> None:
         """
         Initialize UDP client.
         Args:

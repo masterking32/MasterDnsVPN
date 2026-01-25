@@ -56,7 +56,7 @@ class MasterDnsVPNClient:
             for resolver in self.resolvers
         ]
 
-    async def dns_request(self, server_host: str, server_port: int, data: bytes, timeout: float = 0) -> tuple:
+    async def dns_request(self, server_host: str, server_port: int, data: bytes, timeout: float = 0, buffer_size: int = 65507) -> tuple:
         """
         Send a DNS request to the specified server and port using UDPClient.
         Returns: (response_bytes, response_parsed, addr) or (None, None, None) on error.
@@ -72,7 +72,9 @@ class MasterDnsVPNClient:
             server_host=server_host,
             server_port=server_port,
             timeout=timeout,
+            buffer_size=buffer_size,
         )
+
         try:
             if not udp_client.connect():
                 self.logger.error("Failed to connect UDP client.")
@@ -110,15 +112,17 @@ class MasterDnsVPNClient:
                 continue
 
             name = answer.get("name", "")
-            txt_data = answer.get("rData", b"")
+            txt_rData = answer.get("rData", b"")
 
             if "." in name:
                 vpn_packet_header = name.split(".")[0]
                 name = name[len(vpn_packet_header) + 1:]
 
+            txt_data = self.dns_packet_parser.extract_txt_from_rData(txt_rData)
             final_answers.append({
                 "name": name,
-                "rData": txt_data
+                "rData": txt_rData,
+                "txt": txt_data
             })
 
         if len(final_answers) == 0 or vpn_packet_header is None:
@@ -143,7 +147,9 @@ class MasterDnsVPNClient:
             return False, False, False, False
 
         is_VPN_packet = True
-        return is_VPN_packet, session_id, packet_type, final_answers
+        merged_answers = "".join(
+            [answer["txt"] for answer in final_answers])
+        return is_VPN_packet, session_id, packet_type, merged_answers
 
     async def test_upload_mtu(self, domain: str, dns_server: str, dns_port: int, default_mtu: int) -> tuple:
         """Test and determine the optimal upload MTU for DNS tunneling."""
@@ -183,7 +189,7 @@ class MasterDnsVPNClient:
                     )
 
                     response_bytes, response_parsed, addr = await self.dns_request(
-                        dns_server, dns_port, test_packet)
+                        dns_server, dns_port, test_packet, timeout=5.0, buffer_size=mtu_bytes + 512)
 
                     if response_bytes is not None and response_parsed is not None:
                         is_VPN_packet, session_id, packet_type, answers = await self.parse_dns_response(
@@ -246,7 +252,22 @@ class MasterDnsVPNClient:
                         response_parsed)
 
                     if is_VPN_packet and packet_type == PACKET_TYPES["SERVER_DOWNLOAD_TEST"]:
-                        return True
+                        answers_decode = self.dns_packet_parser.base_decode(
+                            answers, False)
+
+                        if ".".encode() not in answers_decode:
+                            self.logger.error(
+                                "Download MTU test failed: Invalid response format.")
+                            return False
+                        received_mtu_encrypted, _ = answers_decode.split(
+                            b".", 1)
+                        received_mtu_decrypted = self.dns_packet_parser.data_decrypt(
+                            received_mtu_encrypted)
+
+                        if received_mtu_decrypted == mtu_bytes:
+                            self.logger.info(
+                                f"Download MTU test successful for {mtu} bytes to {dns_server}:{dns_port} for domain {domain}.")
+                            return True
                 elif len(labels) == 0:
                     self.logger.error(
                         "Failed to generate labels for download MTU test.")
@@ -279,7 +300,7 @@ class MasterDnsVPNClient:
                 f"[Download MTU Test] Attempting initial test with {max_mtu_candidate} bytes to {dns_server}:{dns_port} for domain '{domain}'")
             if await self.perform_download_mtu_test(domain, dns_server, dns_port, max_mtu_candidate, max_upload_chars):
                 self.logger.success(
-                    f"[Download MTU Test] Maximum MTU {max_mtu_candidate} bytes is supported by {dns_server}:{dns_port} for domain '{domain}'")
+                    f"[Download MTU Test] Maximum MTU <g>{max_mtu_candidate}</g> bytes is supported by {dns_server}:{dns_port} for domain '{domain}'")
                 return max_mtu_candidate
             else:
                 max_mtu_candidate -= 1
@@ -288,7 +309,7 @@ class MasterDnsVPNClient:
             while min_mtu <= max_mtu_candidate:
                 current_mtu = (min_mtu + max_mtu_candidate) // 2
                 self.logger.debug(
-                    f"[Download MTU Test] Testing {current_mtu} bytes to {dns_server}:{dns_port} for domain '{domain}'")
+                    f"[Download MTU Test] Testing <y>{current_mtu}</y> bytes to {dns_server}:{dns_port} for domain '{domain}'")
 
                 if current_mtu < 30:
                     self.logger.debug(
@@ -338,10 +359,12 @@ class MasterDnsVPNClient:
                 connection["is_valid"] = True
                 connection["upload_mtu_bytes"] = mtu_bytes
                 connection["upload_mtu_chars"] = mtu_char_len
+                connection['packet_loss'] = 0
             else:
                 connection["is_valid"] = False
                 connection["upload_mtu_bytes"] = 0
                 connection["upload_mtu_chars"] = 0
+                connection['packet_loss'] = 100
 
             if not connection["is_valid"]:
                 continue
@@ -365,6 +388,9 @@ class MasterDnsVPNClient:
         self.logger.warning(
             "<y>For optimal performance, please remove any invalid or slow resolvers from your configuration.</y>")
 
+        self.logger.info(
+            "Beginning download MTU tests for all valid domain-resolver combinations..."
+        )
         for connection in self.connections_map:
             if not connection.get("is_valid", False):
                 continue
