@@ -18,7 +18,7 @@ class master_dns_vpn_config:
     #   WARNING  - Indications of possible issues.
     #   ERROR    - Errors that prevent some operations.
     #   CRITICAL - Severe errors causing shutdown.
-    LOG_LEVEL = "DEBUG"
+    LOG_LEVEL = "INFO"
 
     # UDP server listening address.
     # Set to "0.0.0.0" to listen on all network interfaces, or specify a particular IP.

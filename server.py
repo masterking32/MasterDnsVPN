@@ -13,7 +13,7 @@ from typing import Optional, Any
 from server_config import master_dns_vpn_config
 from dns_utils.utils import getLogger, get_encrypt_key
 from dns_utils.DnsPacketParser import DnsPacketParser
-from dns_utils.DNS_ENUMS import PACKET_TYPES, RESOURCE_RECORDS
+from dns_utils.DNS_ENUMS import PACKET_TYPES, Q_CLASSES, RESOURCE_RECORDS
 
 # Ensure UTF-8 output for consistent logging
 try:
@@ -39,6 +39,7 @@ class MasterDnsVPNServer:
 
         self.recv_data_cache = {}
         self.send_data_cache = {}
+
         # Generate or load encryption key
         self.encrypt_key = get_encrypt_key(
             self.config.get("DATA_ENCRYPTION_METHOD", 1))
@@ -76,7 +77,7 @@ class MasterDnsVPNServer:
                 sock.setblocking(False)
                 await loop.sock_sendto(sock, query, (dns_server, 53))
                 try:
-                    response, _ = await asyncio.wait_for(loop.sock_recvfrom(sock, 512), timeout=2)
+                    response, _ = await asyncio.wait_for(loop.sock_recvfrom(sock, 65507), timeout=self.config.get("DNS_QUERY_TIMEOUT", 10.0))
                 except asyncio.TimeoutError:
                     self.logger.error(
                         f"Timeout waiting for response from {dns_server}")
@@ -155,13 +156,19 @@ class MasterDnsVPNServer:
             if packet_type == PACKET_TYPES["SERVER_TEST"]:
                 self.logger.info(
                     f"Received CLIENT_TEST packet from {addr}, sending SERVER_TEST response.")
-                txt_str = "VPN_TEST_OK"
+                txt_str = "1"
+                vpn_header = self.dns_parser.create_vpn_header(
+                    session_id=random.randint(0, 255),
+                    packet_type=PACKET_TYPES["SERVER_TEST"],
+                    base36_encode=True
+                ) + ".0"
+
                 txt_bytes = bytes([len(txt_str)]) + txt_str.encode()
                 response_packet = await self.dns_parser.simple_answer_packet(
                     answers=[{
-                        "name": packet_domain,
-                        "type": 16,  # TXT record
-                        "class": 1,
+                        "name": vpn_header,
+                        "type": RESOURCE_RECORDS["TXT"],
+                        "class": Q_CLASSES["IN"],
                         "TTL": 0,
                         "rData": txt_bytes
                     }],

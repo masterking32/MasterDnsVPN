@@ -664,6 +664,38 @@ class DnsPacketParser:
                     f"Failed to decrypt data <red>Maybe encryption key/method is wrong?</red>: {e}")
             return b''
 
+    def generate_labels(self, domain: str, session_id: int, packet_type: int, data: bytes, mtu_chars: int, encode_data: bool = True) -> str:
+        """
+        Generate DNS labels with encoded VPN header and data.
+        Args:
+            domain (str): The domain name used for DNS tunneling.
+            session_id (int): The session ID for the VPN header.
+            packet_type (int): The packet type for the VPN header.
+            data (bytes): The raw data to be encoded and sent.
+            mtu_chars (int): Maximum characters per DNS query label.
+            encode_data (bool): Whether to base-encode the data.
+
+        Returns:
+            list[str]: List of DNS labels with encoded data and VPN header.
+        """
+
+        # 1. Create VPN Header
+        header = self.create_vpn_header(session_id, packet_type)
+
+        # 2. Encode Data
+        if encode_data:
+            data = self.base_encode(data, lowerCaseOnly=True)
+
+        # 3. Create Labels
+        data_labels = []
+        for i in range(0, len(data), mtu_chars):
+            chunk = data[i:i + mtu_chars]
+            chunk_label = self.data_to_labels(chunk)
+            chunk_label += '.' + header + '.' + domain
+            data_labels.append(chunk_label)
+
+        return data_labels
+
     def calculate_upload_mtu(self, domain: str, mtu: int = 0) -> int:
         """
         Calculate the maximum upload MTU based on the domain length and DNS constraints.
@@ -759,16 +791,34 @@ class DnsPacketParser:
             label_parts = labels.split('.')
             # last part is the header
             header_encoded = label_parts[-1]
-            header_encrypted = self.base_decode(
+            header_decrypted = self.decode_and_decrypt_data(
                 header_encoded, lowerCaseOnly=True)
-            header_decrypted = self.data_decrypt(
-                header_encrypted
-            )
             return header_decrypted
         except Exception as e:
             if self.logger:
                 self.logger.error(
                     f"Failed to extract VPN header <red>Maybe encryption key/method is wrong?</red>: {e}")
+            return b''
+
+    def decode_and_decrypt_data(self, encoded_str: str, lowerCaseOnly=True) -> bytes:
+        """
+        Decode and decrypt the VPN data from an encoded string.
+
+        Args:
+            encoded_str (str): The base-encoded string containing the data.
+        Returns:
+            bytes: Decoded and decrypted VPN data bytes.
+        """
+        try:
+            data_encrypted = self.base_decode(
+                encoded_str, lowerCaseOnly=lowerCaseOnly)
+            data_decrypted = self.data_decrypt(
+                data_encrypted)
+            return data_decrypted
+        except Exception as e:
+            if self.logger:
+                self.logger.error(
+                    f"Failed to decode and decrypt VPN data <red>Maybe encryption key/method is wrong?</red>: {e}")
             return b''
 
     def extract_vpn_data_from_labels(self, labels: str) -> bytes:
@@ -785,11 +835,8 @@ class DnsPacketParser:
             label_parts = labels.split('.')
             # all parts except last are data
             data_encoded = ''.join(label_parts[:-1])
-            data_encrypted = self.base_decode(
+            data_decrypted = self.decode_and_decrypt_data(
                 data_encoded, lowerCaseOnly=True)
-            data_decrypted = self.data_decrypt(
-                data_encrypted
-            )
             return data_decrypted
         except Exception as e:
             if self.logger:
@@ -821,6 +868,7 @@ class DnsPacketParser:
         Args:
             session_id (int): VPN session identifier (0-255).
             packet_type (int): Type of VPN packet (0-255).
+            base36_encode (bool): Whether to base36 encode the header
         Returns:
             bytes: Encoded VPN header.
 

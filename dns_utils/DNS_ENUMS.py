@@ -11,8 +11,8 @@
 # Packet Types
 PACKET_TYPES = {
     "SERVER_TEST": 0x00,
-    "SET_READ_MTU": 0x01,
-    "SET_WRITE_MTU": 0x02,
+    "SET_DOWNLOAD_MTU": 0x01,
+    "SET_UPLOAD_MTU": 0x02,
     "NEW_SESSION": 0x03,
     "QUIC_INIT": 0x04,
     "QUIC_PACKET": 0x05,

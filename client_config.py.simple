@@ -18,7 +18,7 @@ class master_dns_vpn_config:
     #   WARNING  - Indications of possible issues.
     #   ERROR    - Errors that prevent some operations.
     #   CRITICAL - Severe errors causing shutdown.
-    LOG_LEVEL = "DEBUG"
+    LOG_LEVEL = "INFO"
 
     # DNS Resolver Servers Configuration
     # ----------------------------------
@@ -26,30 +26,12 @@ class master_dns_vpn_config:
     #
     # Recommendations:
     #   - Use fast, reliable public DNS servers (e.g., Google, Cloudflare) or your own trusted resolvers.
-    #   - Each resolver entry can be customized with the following options:
-    #       - address: The IP address of the DNS resolver (e.g., 8.8.8.8 for Google DNS).
-    #       - READ_MTU: The maximum packet size (MTU) for reading responses from this resolver.
-    #           * Set to 0 to auto-detect on the first run (recommended for initial setup).
-    #           * After running and reviewing logs, set this to a fixed value for best performance.
-    #       - WRITE_MTU: The maximum packet size (MTU) for sending queries to this resolver.
-    #           * Set to 0 to auto-detect on the first run.
-    #           * Set to a fixed value after testing if needed.
-    #       - allow_skipping: If True, this resolver can be skipped if its MTU is much lower than others.
-    #           * This helps avoid slowdowns caused by resolvers with poor MTU values.
-    #
+    #   - Avoid using DNS servers known for high latency or unreliability.
     # Performance Tips:
-    #   - If you have a mix of resolvers with good and bad MTU values, the lowest MTU will be used by default to avoid fragmentation.
-    #   - To maximize speed, either remove resolvers with low MTU or set their allow_skipping to True.
-    #   - Always review logs after initial setup to determine optimal MTU settings for your environment.
+    #   - Check upload and download MTU values in the client logs after the first run.
+    #   - Remove or comment out any resolvers that show poor performance or high latency.
     RESOLVER_DNS_SERVERS = [
-        {
-            "address": "8.8.8.8",  # Example: Google Public DNS
-            "READ_MTU": 0,  # 0 = auto-detect on first run; set manually after checking logs for best results
-            # 0 = auto-detect on first run; set manually after checking logs for best results
-            "WRITE_MTU": 0,
-            # If True, skip this server if its MTU is significantly lower than others
-            "allow_skipping": True
-        }
+        "8.8.8.8",
     ]
 
     # Domains used for DNS tunneling.
@@ -57,7 +39,7 @@ class master_dns_vpn_config:
     # These domains will be used to encapsulate and transport VPN data via DNS queries.
     # Adding multiple domains can improve reliability (redundancy) and distribute traffic (load balancing).
     # For best performance, use domains with shorter names, as they reduce packet size and increase efficiency.
-    DOMAIN = [
+    DOMAINS = [
         "t.example.com",  # Main tunnel domain
         "b.example.com"   # Backup or secondary domain
     ]
@@ -84,3 +66,9 @@ class master_dns_vpn_config:
     # - Keeping this key unchanged across restarts ensures stable and secure communication.
     # - If you change this key, all clients must update to match, or connections will fail.
     ENCRYPTION_KEY = ""
+
+    # DNS Query Timeout
+    # -------------------------------------------------
+    # The maximum time (in seconds) the client will wait for a DNS response from the resolver servers.
+    # If no response is received within this time frame, the query is considered failed.
+    DNS_QUERY_TIMEOUT = 10

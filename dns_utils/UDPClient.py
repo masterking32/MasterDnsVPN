@@ -8,7 +8,7 @@ import time
 
 
 class UDPClient:
-    def __init__(self, logger, server_host='127.0.0.1', server_port=53, timeout=5.0, buffer_size=4096):
+    def __init__(self, logger, server_host='127.0.0.1', server_port=53, timeout=10.0, buffer_size=4096):
         """
         Initialize UDP client
 
