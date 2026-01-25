@@ -98,7 +98,7 @@ class DnsPacketParser:
                     data[offset:offset + 2], byteorder='big')
                 offset += 2
                 question = {
-                    'qName': name,
+                    'qName': name.lower(),
                     'qType': qType,
                     'qClass': qClass
                 }
