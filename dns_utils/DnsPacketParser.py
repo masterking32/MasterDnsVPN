@@ -6,8 +6,8 @@
 from typing import Any
 import random
 import math
-
 from dns_utils.DNS_ENUMS import PACKET_TYPES, RESOURCE_RECORDS, R_CODES, Q_CLASSES
+from typing import Any, Optional
 
 
 class DnsPacketParser:
@@ -16,18 +16,16 @@ class DnsPacketParser:
     Handles DNS packet parsing, construction, and custom VPN header encoding.
     """
 
-    def __init__(self, logger: Any = None, encryption_key: bytes = b"", encryption_method: int = 1):
+    def __init__(self, logger: Optional[Any] = None, encryption_key: str = "", encryption_method: int = 1):
         self.logger = logger
-        self.encryption_key = encryption_key.encode('utf-8')
+        self.encryption_key = encryption_key.encode(
+            'utf-8') if isinstance(encryption_key, str) else encryption_key
         self.encryption_method = encryption_method
-
         if self.encryption_method not in (0, 1, 2, 3, 4, 5):
             if self.logger:
                 self.logger.error(
-                    f"Invalid encryption_method value: {self.encryption_method}. Defaulting to 1 (XOR encryption)."
-                )
+                    f"Invalid encryption_method value: {self.encryption_method}. Defaulting to 1 (XOR encryption).")
             self.encryption_method = 1
-
         # Adjust key length for encryption methods
         if self.encryption_method == 2:
             self.encryption_key = self.fix_key_length(self.encryption_key, 32)

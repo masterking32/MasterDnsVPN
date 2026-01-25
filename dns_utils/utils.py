@@ -6,24 +6,24 @@
 import json
 from loguru import logger
 import sys
+from typing import Optional
 
 
-def load_text(file_path):
+def load_text(file_path: str) -> Optional[str]:
     """
     Load and return the contents of a text file, stripped of leading/trailing whitespace.
-    Returns None if the file does not exist.
+    Returns None if the file does not exist or error occurs.
     """
     try:
         with open(file_path, 'r', encoding='utf-8') as file:
             return file.read().strip()
     except FileNotFoundError:
         return None
-    except Exception as exc:
-        # Log or handle other exceptions as needed
+    except Exception:
         return None
 
 
-def save_text(file_path, text):
+def save_text(file_path: str, text: str) -> bool:
     """
     Save the given text to a file. Returns True on success, False otherwise.
     """
@@ -31,12 +31,11 @@ def save_text(file_path, text):
         with open(file_path, 'w', encoding='utf-8') as file:
             file.write(text)
         return True
-    except Exception as exc:
-        # Log or handle the exception as needed
+    except Exception:
         return False
 
 
-def get_encrypt_key(method_id):
+def get_encrypt_key(method_id: int) -> str:
     """
     Retrieve or generate an encryption key of appropriate length based on method_id.
     method_id: 3 -> 16 chars, 4 -> 24 chars, else 32 chars.
@@ -48,17 +47,15 @@ def get_encrypt_key(method_id):
         length = 24
     else:
         length = 32
-
     key_path = 'encrypt_key.txt'
     random_key = load_text(key_path)
     if not random_key or len(random_key) != length:
         random_key = generate_random_hex_text(length)
         save_text(key_path, random_key)
-
     return random_key
 
 
-def generate_random_hex_text(length):
+def generate_random_hex_text(length: int) -> str:
     """
     Generate a random hexadecimal string of the specified length.
     """
@@ -67,7 +64,7 @@ def generate_random_hex_text(length):
     return ''.join(random.choice(hex_chars) for _ in range(length))
 
 
-def getLogger(log_level="DEBUG", logFile=None, max_log_size=1, backup_count=3):
+def getLogger(log_level: str = "DEBUG", logFile: str = None, max_log_size: int = 1, backup_count: int = 3):
     # ---------------------------------------------#
     # Logging configuration
     LOG_LEVEL = log_level.upper()

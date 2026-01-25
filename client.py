@@ -9,8 +9,9 @@ import socket
 import asyncio
 from typing import Optional
 
-from dns_utils.utils import getLogger, generate_random_hex_text
 from client_config import master_dns_vpn_config
+
+from dns_utils.utils import getLogger, generate_random_hex_text
 from dns_utils.DnsPacketParser import DnsPacketParser
 from dns_utils.UDPClient import UDPClient
 from dns_utils.DNS_ENUMS import PACKET_TYPES, Q_CLASSES, RESOURCE_RECORDS
@@ -27,40 +28,39 @@ class MasterDnsVPNClient:
     """MasterDnsVPN Client class to handle DNS requests over UDP."""
 
     def __init__(self) -> None:
-        """Initialize the MasterDnsVPNClient with configuration and logger."""
         self.udp_sock: Optional[socket.socket] = None
         self.loop: Optional[asyncio.AbstractEventLoop] = None
-        self.should_stop = asyncio.Event()
-
-        self.config = master_dns_vpn_config.__dict__
+        self.should_stop: asyncio.Event = asyncio.Event()
+        self.config: dict = master_dns_vpn_config.__dict__
         self.logger = getLogger(log_level=self.config.get("LOG_LEVEL", "INFO"))
-        self.resolvers = self.config.get("RESOLVER_DNS_SERVERS", [])
-        self.domains = self.config.get("DOMAINS", [])
-        self.timeout = self.config.get("DNS_QUERY_TIMEOUT", 10.0)
-        self.max_upload_mtu = self.config.get("MAX_UPLOAD_MTU", 512)
-        self.max_download_mtu = self.config.get("MAX_DOWNLOAD_MTU", 4096)
-        self.encryption_method = self.config.get(
+        self.resolvers: list = self.config.get("RESOLVER_DNS_SERVERS", [])
+        self.domains: list = self.config.get("DOMAINS", [])
+        self.timeout: float = self.config.get("DNS_QUERY_TIMEOUT", 10.0)
+        self.max_upload_mtu: int = self.config.get("MAX_UPLOAD_MTU", 512)
+        self.max_download_mtu: int = self.config.get("MAX_DOWNLOAD_MTU", 4096)
+        self.encryption_method: int = self.config.get(
             "DATA_ENCRYPTION_METHOD", 1)
-        self.encryption_key = self.config.get("ENCRYPTION_KEY", None)
+        self.encryption_key: str = self.config.get("ENCRYPTION_KEY", None)
         if not self.encryption_key:
             self.logger.error("No encryption key provided in configuration.")
             sys.exit(1)
-
         self.dns_packet_parser = DnsPacketParser(
             logger=self.logger,
             encryption_method=self.encryption_method,
             encryption_key=self.encryption_key,
         )
-
         # Build a map of all domain-resolver combinations
-        self.connections_map = [
+        self.connections_map: list = [
             {"domain": domain, "resolver": resolver}
             for domain in self.domains
             for resolver in self.resolvers
         ]
 
     async def dns_request(self, server_host: str, server_port: int, data: bytes):
-        """Send a DNS request to the specified server and port using asyncio DatagramProtocol."""
+        """
+        Send a DNS request to the specified server and port using UDPClient.
+        Returns: (response_bytes, response_parsed, addr) or (None, None, None) on error.
+        """
         self.logger.debug(
             f"Sending DNS request to {server_host}:{server_port}, data length: {len(data)} bytes")
         udp_client = UDPClient(
@@ -69,26 +69,21 @@ class MasterDnsVPNClient:
             server_port=server_port,
             timeout=self.timeout,
         )
-
-        if not udp_client.connect():
-            self.logger.error("Failed to connect UDP client.")
-            return None, None, None
-
-        if not udp_client.send_bytes(data):
-            self.logger.error("Failed to send DNS request.")
+        try:
+            if not udp_client.connect():
+                self.logger.error("Failed to connect UDP client.")
+                return None, None, None
+            if not udp_client.send_bytes(data):
+                self.logger.error("Failed to send DNS request.")
+                return None, None, None
+            response_bytes, addr = udp_client.receive_bytes()
+            if response_bytes is None:
+                self.logger.error("No response received from DNS server.")
+                return None, None, None
+            response_parsed = await self.dns_packet_parser.parse_dns_packet(response_bytes)
+            return response_bytes, response_parsed, addr
+        finally:
             udp_client.close()
-            return None, None, None
-
-        response_bytes, addr = udp_client.receive_bytes()
-        if response_bytes is None:
-            self.logger.error("No response received from DNS server.")
-            udp_client.close()
-            return None, None, None
-
-        response_parsed = await self.dns_packet_parser.parse_dns_packet(
-            response_bytes)
-        udp_client.close()
-        return response_bytes, response_parsed, addr
 
     async def parse_dns_response(self, response_parsed: dict) -> tuple:
         """Parse the DNS response and extract relevant information."""
