@@ -105,7 +105,7 @@ class MasterDnsVPNServer:
                     f"No questions found in VPN packet from {addr}")
                 return False, None
 
-            packet_domain = questions[0]['qName']
+            packet_domain = questions[0]['qName'].lower()
             packet_main_domain = next(
                 (domain for domain in self.allowed_domains if packet_domain.endswith(domain)), '')
 
