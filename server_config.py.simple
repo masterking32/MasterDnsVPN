@@ -43,7 +43,7 @@ class master_dns_vpn_config:
     # For best performance, use domains with shorter names, as they reduce packet size and increase efficiency.
     DOMAIN = [
         "t.example.com",  # Main tunnel domain
-        "b.example.com"   # Backup or secondary domain
+    #    "b.example.com"   # Backup or secondary domain
     ]
 
     # Data encryption method.
