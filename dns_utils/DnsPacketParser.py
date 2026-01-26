@@ -35,6 +35,8 @@ class DnsPacketParser:
         elif self.encryption_method == 5:
             self.encryption_key = self.fix_key_length(self.encryption_key, 32)
 
+        self.base9x_alphabet = r'0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!#$%&\()*+,-/;<=>?@[\\]^_`{|}~ '
+
     def fix_key_length(self, key: bytes, desired_length: int) -> bytes:
         """
         Adjust the key to the desired length by truncating or padding with zeros.
@@ -98,7 +100,7 @@ class DnsPacketParser:
                     data[offset:offset + 2], byteorder='big')
                 offset += 2
                 question = {
-                    'qName': name.lower(),
+                    'qName': name,
                     'qType': qType,
                     'qClass': qClass
                 }
@@ -248,13 +250,12 @@ class DnsPacketParser:
                     'NsCount': 0,
                     'ArCount': 0
                 },
-                'questions': questions,
+                'questions': questions or [],
                 'answers': answers,
                 'authorities': [],
                 'additional': []
             }
-
-            packet = await self.create_packet(section, question_packet)
+            packet = await self.create_packet(section, question_packet, is_response=True)
             return packet
         except Exception as e:
             self.logger.error(f"Failed to create answer packet: {e}")
@@ -295,7 +296,7 @@ class DnsPacketParser:
             self.logger.error(f"Failed to create question packet: {e}")
             return b''
 
-    async def create_packet(self, sections: dict, question_packet: bytes = b'') -> bytes:
+    async def create_packet(self, sections: dict, question_packet: bytes = b'', is_response: bool = False) -> bytes:
         """
         Create a DNS packet from the given sections for question or answer.
         sections: {
@@ -313,9 +314,15 @@ class DnsPacketParser:
             # Headers
             if question_packet and len(question_packet) >= 12:
                 packet += question_packet[0:2]  # ID
-                flags = int.from_bytes(
-                    question_packet[2:4], byteorder='big')
-                packet += flags.to_bytes(2, byteorder='big')  # Flags
+                if is_response:
+                    # Set QR to 1 (response), keep other flags from question_packet
+                    flags = int.from_bytes(
+                        question_packet[2:4], byteorder='big')
+                    flags |= 0x8000  # Set QR to 1
+                    packet += flags.to_bytes(2, byteorder='big')
+                else:
+                    # Copy flags as is for question
+                    packet += question_packet[2:4]
             else:
                 # Ensure all header fields are integers
                 id_val = int(sections['headers']['id'])
@@ -419,10 +426,11 @@ class DnsPacketParser:
         """
         alphabet = '0123456789abcdefghijklmnopqrstuvwxyz'  # base36
         if lowerCaseOnly is False:
-            # base94
-            alphabet = r'0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!#$%&\()*+,-/:;<=>?@[\\]^_`{|}~ '
+            alphabet = self.base9x_alphabet
 
-        num = int.from_bytes(data_bytes, byteorder='big')
+        data_to_encode = b'\x01' + data_bytes
+
+        num = int.from_bytes(data_to_encode, byteorder='big')
         if num == 0:
             return alphabet[0]
 
@@ -438,17 +446,25 @@ class DnsPacketParser:
         Decode base lowercase (0-9, a-z) or mixed case string to bytes.
         """
         alphabet = '0123456789abcdefghijklmnopqrstuvwxyz'  # base36
-        if lowerCaseOnly is False:
-            # base94
-            alphabet = r'0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!#$%&\()*+,-/:;<=>?@[\\]^_`{|}~ '
+        if not lowerCaseOnly:
+            alphabet = self.base9x_alphabet
 
         base = len(alphabet)
+        char_map = {c: i for i, c in enumerate(alphabet)}
         num = 0
         for char in encoded_str:
-            num = num * base + alphabet.index(char)
+            if char not in char_map:
+                raise ValueError(
+                    f"Invalid character '{char}' in encoded string")
+            num = num * base + char_map[char]
 
         byte_length = (num.bit_length() + 7) // 8
-        return num.to_bytes(byte_length, byteorder='big')
+
+        if byte_length == 0:
+            return b''
+
+        decoded_bytes = num.to_bytes(byte_length, byteorder='big')
+        return decoded_bytes[1:]
 
     def xor_data(self, data: bytes, key: bytes) -> bytes:
         """
@@ -590,36 +606,45 @@ class DnsPacketParser:
 
         return data_labels
 
-    async def generate_vpn_response_packet(self, session_id: int, packet_type: int, data: bytes,  question_packet: bytes = b'') -> bytes:
-
+    async def generate_vpn_response_packet(self, domain: str, session_id: int, packet_type: int, data: bytes,  question_packet: bytes = b'') -> bytes:
         MAX_ALLOWED_CHARS_PER_TXT = 191
         header = self.create_vpn_header(
-            session_id, packet_type, base36_encode=True)
+            session_id, packet_type, base36_encode=False)
 
-        data = self.base_encode(data, lowerCaseOnly=False)
-        # split data into chunks
-        chunks = []
-        for i in range(0, len(data), MAX_ALLOWED_CHARS_PER_TXT):
-            chunk = data[i:i + MAX_ALLOWED_CHARS_PER_TXT]
-            chunks.append(chunk)
-
+        data_str = self.base_encode(data, lowerCaseOnly=False)
         answers = []
         answer_id = 0
-        for chunk in chunks:
-            name = ''
+
+        current_data_idx = 0
+        answer_id = 0
+
+        while current_data_idx < len(data_str):
+            prefix = ""
             if answer_id == 0:
-                name = header + '.0'
-            else:
-                name = str(answer_id)
-            answer_id += 1
+                prefix = header + '.'
+            prefix += str(answer_id) + '.'
+
+            overhead_len = len(prefix)
+            available_space = MAX_ALLOWED_CHARS_PER_TXT - overhead_len
+
+            if available_space <= 0:
+                break
+
+            chunk_payload = data_str[current_data_idx:
+                                     current_data_idx + available_space]
+
+            full_chunk_str = prefix + chunk_payload
+
             answer = {
-                'name': name,  # root
+                'name': domain,
                 'type': RESOURCE_RECORDS['TXT'],
                 'class': Q_CLASSES['IN'],
                 'TTL': 0,
-                'rData': bytes([len(chunk)]) + chunk.encode('utf-8')
+                'rData': bytes([len(full_chunk_str)]) + full_chunk_str.encode('utf-8')
             }
             answers.append(answer)
+            current_data_idx += len(chunk_payload)
+            answer_id += 1
 
         packet = await self.simple_answer_packet(answers, question_packet)
         return packet

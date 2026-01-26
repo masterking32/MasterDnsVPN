@@ -105,6 +105,7 @@ class MasterDnsVPNServer:
                     f"No questions found in VPN packet from {addr}")
                 return False, None
 
+            request_domain = questions[0]['qName']
             packet_domain = questions[0]['qName'].lower()
             packet_main_domain = next(
                 (domain for domain in self.allowed_domains if packet_domain.endswith(domain)), '')
@@ -154,24 +155,18 @@ class MasterDnsVPNServer:
             if packet_type == PACKET_TYPES["SERVER_UPLOAD_TEST"]:
                 self.logger.info(
                     f"Received CLIENT_TEST packet from {addr}, sending SERVER_UPLOAD_TEST response.")
+
                 txt_str = "1"
-                vpn_header = self.dns_parser.create_vpn_header(
-                    session_id=random.randint(0, 255),
+                data_bytes = self.dns_parser.data_encrypt(txt_str.encode())
+
+                response_packet = await self.dns_parser.generate_vpn_response_packet(
+                    domain=request_domain,
+                    session_id=1,
                     packet_type=PACKET_TYPES["SERVER_UPLOAD_TEST"],
-                    base36_encode=True
-                ) + ".0"
-                txt_bytes = bytes(
-                    [len(txt_str)]) + txt_str.encode()
-                response_packet = await self.dns_parser.simple_answer_packet(
-                    answers=[{
-                        "name": vpn_header,
-                        "type": RESOURCE_RECORDS["TXT"],
-                        "class": Q_CLASSES["IN"],
-                        "TTL": 0,
-                        "rData": txt_bytes
-                    }],
+                    data=data_bytes,
                     question_packet=data
                 )
+
                 return True, response_packet
             elif packet_type == PACKET_TYPES["SERVER_DOWNLOAD_TEST"]:
                 if '.' not in labels:
@@ -200,20 +195,21 @@ class MasterDnsVPNServer:
                         f"Download size too small in SERVER_DOWNLOAD_TEST packet from {addr}: {download_size}")
                     return False, None
 
-                response = self.dns_parser.data_encrypt(
-                    download_size_bytes) + ".".encode()
+                data_bytes = self.dns_parser.data_encrypt(download_size_bytes)
+                data_bytes = data_bytes + ":".encode()
+                data_bytes = data_bytes + random.randbytes(
+                    download_size - len(data_bytes))
 
-                random_bytes = response + random.randbytes(
-                    download_size - len(response))
-
-                if len(random_bytes) != download_size:
+                if len(data_bytes) != download_size:
                     self.logger.error(
-                        f"Generated download data size mismatch for packet from {addr}: expected {download_size}, got {len(random_bytes)}")
+                        f"Prepared download data size mismatch for packet from {addr}: expected {download_size}, got {len(data_bytes)}")
                     return False, None
+
                 response_packet = await self.dns_parser.generate_vpn_response_packet(
-                    session_id=random.randint(0, 255),
+                    domain=request_domain,
+                    session_id=255,
                     packet_type=PACKET_TYPES["SERVER_DOWNLOAD_TEST"],
-                    data=random_bytes,
+                    data=data_bytes,
                     question_packet=data
                 )
 
@@ -304,6 +300,8 @@ class MasterDnsVPNServer:
             except Exception as e:
                 self.logger.error(f"Error closing UDP socket: {e}")
 
+        sys.exit(0)
+
     def dns_loop(self) -> None:
         """
         Start the main DNS handling event loop.
@@ -367,7 +365,19 @@ def main() -> None:
     Entry point for the MasterDnsVPN server.
     """
     server = MasterDnsVPNServer()
-    server.start()
+    try:
+        server.start()
+    except KeyboardInterrupt:
+        if server.loop and not server.loop.is_closed():
+            server.loop.call_soon_threadsafe(server.should_stop.set)
+        if server.udp_sock:
+            try:
+                server.udp_sock.close()
+            except Exception:
+                pass
+        print("\nServer stopped by user (Ctrl+C). Goodbye!")
+
+        sys.exit(0)
 
 
 if __name__ == "__main__":

@@ -111,18 +111,27 @@ class MasterDnsVPNClient:
             if answer.get("TTL", 0) != 0:
                 continue
 
-            name = answer.get("name", "")
             txt_rData = answer.get("rData", b"")
-
-            if "." in name:
-                vpn_packet_header = name.split(".")[0]
-                name = name[len(vpn_packet_header) + 1:]
+            if len(txt_rData) == 0:
+                continue
 
             txt_data = self.dns_packet_parser.extract_txt_from_rData(txt_rData)
+            if len(txt_data) == 0:
+                continue
+
+            if "." not in txt_data:
+                self.logger.debug(
+                    f"TXT record without expected format: {txt_data}")
+                continue
+
+            if txt_data.count(".") >= 2:
+                vpn_packet_header, chunk_id, data_part = txt_data.split(".", 2)
+            else:
+                chunk_id, data_part = txt_data.split(".", 1)
+
             final_answers.append({
-                "name": name,
-                "rData": txt_rData,
-                "txt": txt_data
+                "chunk_id": int(chunk_id),
+                "data": data_part,
             })
 
         if len(final_answers) == 0 or vpn_packet_header is None:
@@ -130,9 +139,9 @@ class MasterDnsVPNClient:
                 f"Extracted VPN packet header: {vpn_packet_header}")
             return False, False, False, False
 
-        final_answers.sort(key=lambda x: x["name"])
+        final_answers.sort(key=lambda x: x["chunk_id"])
         extracted_header = self.dns_packet_parser.decode_and_decrypt_data(
-            vpn_packet_header, lowerCaseOnly=True)
+            vpn_packet_header, lowerCaseOnly=False)
 
         if len(extracted_header) != 2:
             self.logger.error(
@@ -148,73 +157,141 @@ class MasterDnsVPNClient:
 
         is_VPN_packet = True
         merged_answers = "".join(
-            [answer["txt"] for answer in final_answers])
-        return is_VPN_packet, session_id, packet_type, merged_answers
+            [answer["data"] for answer in final_answers])
 
-    async def test_upload_mtu(self, domain: str, dns_server: str, dns_port: int, default_mtu: int) -> tuple:
-        """Test and determine the optimal upload MTU for DNS tunneling."""
+        decoded_answers = self.dns_packet_parser.base_decode(
+            merged_answers, lowerCaseOnly=False)
+        return is_VPN_packet, session_id, packet_type, decoded_answers
+
+    async def perform_upload_mtu_test(self, domain: str, dns_server: str, dns_port: int, mtu: int) -> bool:
+        """Perform a single upload MTU test."""
         try:
-            while True:
-                if (default_mtu <= 30 and default_mtu != 0) or default_mtu > 512:
-                    self.logger.error(
-                        f"Upload MTU test failed: Could not determine optimal MTU to {dns_server}:{dns_port} for domain {domain}")
-                    return False, 0, 0
+            mtu_char_len, mtu_bytes = self.dns_packet_parser.calculate_upload_mtu(
+                domain=domain,
+                mtu=mtu
+            )
 
-                mtu_char_len, mtu_bytes = self.dns_packet_parser.calculate_upload_mtu(
-                    domain=domain,
-                    mtu=default_mtu
+            if (mtu_char_len < 29):
+                self.logger.error(
+                    f"Calculated MTU character length too small: {mtu_char_len} characters for domain {domain}")
+                return False
+
+            self.logger.debug(
+                f"Performing upload MTU test: {mtu_bytes} bytes ({mtu_char_len} characters) to {dns_server}:{dns_port} for domain {domain}")
+
+            random_hex = generate_random_hex_text(mtu_char_len).lower()
+            labels = self.dns_packet_parser.generate_labels(
+                domain=domain,
+                session_id=random.randint(0, 255),
+                packet_type=PACKET_TYPES["SERVER_UPLOAD_TEST"],
+                data=random_hex,
+                mtu_chars=mtu_char_len,
+                encode_data=False
+            )
+
+            if labels is not None and len(labels) > 0:
+                label = labels[0]
+
+                test_packet = await self.dns_packet_parser.simple_question_packet(
+                    domain=label,
+                    qType=RESOURCE_RECORDS["TXT"]
                 )
 
-                default_mtu = mtu_bytes - 1
+                response_bytes, response_parsed, addr = await self.dns_request(
+                    dns_server, dns_port, test_packet, timeout=5.0, buffer_size=mtu_bytes + 512)
 
-                self.logger.debug(
-                    f"Testing upload MTU: {mtu_bytes} bytes ({mtu_char_len} characters) to {dns_server}:{dns_port} for domain {domain}")
+                if response_bytes is not None and response_parsed is not None:
+                    is_VPN_packet, session_id, packet_type, answers = await self.parse_dns_response(
+                        response_parsed)
 
-                random_hex = generate_random_hex_text(mtu_char_len).lower()
-                labels = self.dns_packet_parser.generate_labels(
-                    domain=domain,
-                    session_id=random.randint(0, 255),
-                    packet_type=PACKET_TYPES["SERVER_UPLOAD_TEST"],
-                    data=random_hex,
-                    mtu_chars=mtu_char_len,
-                    encode_data=False
-                )
+                    if is_VPN_packet and packet_type == PACKET_TYPES["SERVER_UPLOAD_TEST"]:
+                        self.logger.success(
+                            f"Upload MTU test successful: <g>{mtu_bytes}</g> bytes to <g>{dns_server}:{dns_port}</g> for domain <g>{domain}</g>")
+                        return True
+            elif len(labels) == 0:
+                self.logger.error(
+                    "Failed to generate labels for MTU test.")
+                return False
+            elif len(labels) > 1:
+                self.logger.error(
+                    "Generated multiple labels for MTU test; expected only one.")
 
-                if labels is not None and len(labels) > 0:
-                    label = labels[0]
-
-                    test_packet = await self.dns_packet_parser.simple_question_packet(
-                        domain=label,
-                        qType=RESOURCE_RECORDS["TXT"]
-                    )
-
-                    response_bytes, response_parsed, addr = await self.dns_request(
-                        dns_server, dns_port, test_packet, timeout=5.0, buffer_size=mtu_bytes + 512)
-
-                    if response_bytes is not None and response_parsed is not None:
-                        is_VPN_packet, session_id, packet_type, answers = await self.parse_dns_response(
-                            response_parsed)
-
-                        if is_VPN_packet and packet_type == PACKET_TYPES["SERVER_UPLOAD_TEST"]:
-                            self.logger.success(
-                                f"Upload MTU test successful: <g>{mtu_bytes}</g> bytes to <g>{dns_server}:{dns_port}</g> for domain <g>{domain}</g>")
-                            return True, mtu_bytes, mtu_char_len
-                elif len(labels) == 0:
-                    self.logger.error(
-                        "Failed to generate labels for MTU test.")
-                    return False, 0, 0
-                elif len(labels) > 1:
-                    self.logger.error(
-                        "Generated multiple labels for MTU test; expected only one.")
-
-                self.logger.warning(
-                    f"Upload MTU test failed for {mtu_bytes} bytes to {dns_server}:{dns_port} for domain {domain}. Retrying with lower MTU...")
+            self.logger.warning(
+                f"Upload MTU test failed for {mtu_bytes} bytes to {dns_server}:{dns_port} for domain {domain}.")
+            return False
 
         except Exception as e:
             self.logger.error(
                 f"Error during upload MTU test to {dns_server}:{dns_port} for domain {domain}: {e}")
 
-        return False, 0, 0
+        return False
+
+    async def test_upload_mtu(self, domain: str, dns_server: str, dns_port: int, default_mtu: int) -> tuple:
+        """Test and determine the optimal upload MTU for DNS tunneling."""
+        try:
+            mtu_char_len, mtu_bytes = self.dns_packet_parser.calculate_upload_mtu(
+                domain=domain,
+                mtu=0
+            )
+
+            if default_mtu > 512 or default_mtu <= 0:
+                default_mtu = 512
+
+            if default_mtu > mtu_bytes:
+                default_mtu = mtu_bytes
+
+            min_mtu = 0
+            max_mtu_candidate = default_mtu
+            optimal_mtu = 0
+
+            # Initial attempt with the maximum MTU
+            self.logger.debug(
+                f"[Upload MTU Test] Starting test with maximum MTU {max_mtu_candidate} bytes to {dns_server}:{dns_port} for domain '{domain}'")
+            if await self.perform_upload_mtu_test(domain, dns_server, dns_port, max_mtu_candidate):
+                self.logger.success(
+                    f"[Upload MTU Test] Maximum MTU <g>{max_mtu_candidate}</g> bytes is supported by {dns_server}:{dns_port} for domain '{domain}'")
+                mtu_char_len, mtu_bytes = self.dns_packet_parser.calculate_upload_mtu(
+                    domain=domain,
+                    mtu=max_mtu_candidate
+                )
+                return True, mtu_bytes, mtu_char_len
+
+            while min_mtu <= max_mtu_candidate:
+                current_mtu = (min_mtu + max_mtu_candidate) // 2
+                self.logger.debug(
+                    f"[Upload MTU Test] Testing <y>{current_mtu}</y> bytes to {dns_server}:{dns_port} for domain '{domain}'")
+
+                if current_mtu < 30:
+                    self.logger.debug(
+                        f"[Upload MTU Test] Current MTU {current_mtu} bytes is below minimum threshold. Ending test.")
+                    break
+
+                if await self.perform_upload_mtu_test(domain, dns_server, dns_port, current_mtu):
+                    optimal_mtu = current_mtu
+                    min_mtu = current_mtu + 1
+                    self.logger.debug(
+                        f"[Upload MTU Test] Success at {current_mtu} bytes. Trying higher...")
+                else:
+                    max_mtu_candidate = current_mtu - 1
+                    self.logger.debug(
+                        f"[Upload MTU Test] Failure at {current_mtu} bytes. Trying lower...")
+            if optimal_mtu > 29:
+                mtu_char_len, mtu_bytes = self.dns_packet_parser.calculate_upload_mtu(
+                    domain=domain,
+                    mtu=optimal_mtu
+                )
+                self.logger.success(
+                    f"[Upload MTU Test] Optimal upload MTU determined: <g>{mtu_bytes}</g> bytes ({mtu_char_len} characters) to <g>{dns_server}:{dns_port}</g> for domain <g>{domain}</g>")
+                return True, mtu_bytes, mtu_char_len
+
+            self.logger.error(
+                f"[Upload MTU Test] Failed to determine a valid upload MTU for {dns_server}:{dns_port} and domain '{domain}'")
+
+            return False, 0, 0
+        except Exception as exc:
+            self.logger.error(
+                f"[Upload MTU Test] Exception occurred while testing upload MTU to {dns_server}:{dns_port} for domain '{domain}': {exc}")
+            return False, 0, 0
 
     async def perform_download_mtu_test(self, domain: str, dns_server: str, dns_port: int, mtu: int, max_upload_chars: int) -> bool:
         """Perform a single download MTU test."""
@@ -252,19 +329,16 @@ class MasterDnsVPNClient:
                         response_parsed)
 
                     if is_VPN_packet and packet_type == PACKET_TYPES["SERVER_DOWNLOAD_TEST"]:
-                        answers_decode = self.dns_packet_parser.base_decode(
-                            answers, False)
-
-                        if ".".encode() not in answers_decode:
+                        if ":".encode() not in answers:
                             self.logger.error(
                                 "Download MTU test failed: Invalid response format.")
                             return False
-                        received_mtu_encrypted, _ = answers_decode.split(
-                            b".", 1)
-                        received_mtu_decrypted = self.dns_packet_parser.data_decrypt(
-                            received_mtu_encrypted)
 
-                        if received_mtu_decrypted == mtu_bytes:
+                        received_mtu_encrypted, _ = answers.split(
+                            b":", 1)
+                        download_size = self.dns_packet_parser.data_decrypt(
+                            received_mtu_encrypted)
+                        if download_size == mtu_bytes:
                             self.logger.info(
                                 f"Download MTU test successful for {mtu} bytes to {dns_server}:{dns_port} for domain {domain}.")
                             return True
