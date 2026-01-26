@@ -56,7 +56,7 @@ class MasterDnsVPNServer:
         """
         Solve DNS query by forwarding it to configured DNS servers asynchronously.
         """
-
+        # TODO: Add allow list domains!
         if not query:
             self.logger.error("Empty DNS query received.")
             return b''

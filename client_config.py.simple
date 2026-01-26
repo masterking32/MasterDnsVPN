@@ -36,10 +36,16 @@ class master_dns_vpn_config:
 
     # MTU Settings for DNS Tunneling
     # --------------------------------
+    # Minimum MTU thresholds for resolver selection.
+    # If a resolver's upload or download MTU is below these values, it will be excluded from use.
+    # Set to 0 to disable minimum MTU checks.
+    MIN_UPLOAD_MTU = 64
+    MIN_DOWNLOAD_MTU = 64
+
     # These values define the Maximum Transmission Unit (MTU) for upload and download operations.
     # Adjust these values based on your network conditions for optimal performance.
     # Check the client logs after initial connection to see recommended MTU values.
-
+    
     # Maximum size of data packets sent to the server. (default: 512 bytes)
     MAX_UPLOAD_MTU = 512
     # Maximum size of data packets received from the server. (default: 4096 bytes)

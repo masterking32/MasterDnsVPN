@@ -38,6 +38,8 @@ class MasterDnsVPNClient:
         self.timeout: float = self.config.get("DNS_QUERY_TIMEOUT", 10.0)
         self.max_upload_mtu: int = self.config.get("MAX_UPLOAD_MTU", 512)
         self.max_download_mtu: int = self.config.get("MAX_DOWNLOAD_MTU", 4096)
+        self.min_upload_mtu: int = self.config.get("MIN_UPLOAD_MTU", 0)
+        self.min_download_mtu: int = self.config.get("MIN_DOWNLOAD_MTU", 0)
         self.encryption_method: int = self.config.get(
             "DATA_ENCRYPTION_METHOD", 1)
         self.encryption_key: str = self.config.get("ENCRYPTION_KEY", None)
@@ -77,14 +79,14 @@ class MasterDnsVPNClient:
 
         try:
             if not udp_client.connect():
-                self.logger.error("Failed to connect UDP client.")
+                self.logger.debug("Failed to connect UDP client.")
                 return None, None, None
             if not udp_client.send_bytes(data):
-                self.logger.error("Failed to send DNS request.")
+                self.logger.debug("Failed to send DNS request.")
                 return None, None, None
             response_bytes, addr = udp_client.receive_bytes()
             if response_bytes is None:
-                self.logger.error("No response received from DNS server.")
+                self.logger.debug("No response received from DNS server.")
                 return None, None, None
             response_parsed = await self.dns_packet_parser.parse_dns_packet(response_bytes)
             return response_bytes, response_parsed, addr
@@ -205,18 +207,16 @@ class MasterDnsVPNClient:
                         response_parsed)
 
                     if is_VPN_packet and packet_type == PACKET_TYPES["SERVER_UPLOAD_TEST"]:
-                        self.logger.success(
-                            f"Upload MTU test successful: <g>{mtu_bytes}</g> bytes to <g>{dns_server}:{dns_port}</g> for domain <g>{domain}</g>")
                         return True
             elif len(labels) == 0:
-                self.logger.error(
+                self.logger.debug(
                     "Failed to generate labels for MTU test.")
                 return False
             elif len(labels) > 1:
-                self.logger.error(
+                self.logger.debug(
                     "Generated multiple labels for MTU test; expected only one.")
 
-            self.logger.warning(
+            self.logger.debug(
                 f"Upload MTU test failed for {mtu_bytes} bytes to {dns_server}:{dns_port} for domain {domain}.")
             return False
 
@@ -228,6 +228,9 @@ class MasterDnsVPNClient:
 
     async def test_upload_mtu(self, domain: str, dns_server: str, dns_port: int, default_mtu: int) -> tuple:
         """Test and determine the optimal upload MTU for DNS tunneling."""
+        self.logger.info(
+            f"[Upload MTU Test] Starting upload MTU test to {dns_server}:{dns_port} for domain '{domain}'...")
+
         try:
             mtu_char_len, mtu_bytes = self.dns_packet_parser.calculate_upload_mtu(
                 domain=domain,
@@ -244,12 +247,11 @@ class MasterDnsVPNClient:
             max_mtu_candidate = default_mtu
             optimal_mtu = 0
 
-            # Initial attempt with the maximum MTU
             self.logger.debug(
                 f"[Upload MTU Test] Starting test with maximum MTU {max_mtu_candidate} bytes to {dns_server}:{dns_port} for domain '{domain}'")
+
+            # Initial attempt with the maximum MTU
             if await self.perform_upload_mtu_test(domain, dns_server, dns_port, max_mtu_candidate):
-                self.logger.success(
-                    f"[Upload MTU Test] Maximum MTU <g>{max_mtu_candidate}</g> bytes is supported by {dns_server}:{dns_port} for domain '{domain}'")
                 mtu_char_len, mtu_bytes = self.dns_packet_parser.calculate_upload_mtu(
                     domain=domain,
                     mtu=max_mtu_candidate
@@ -280,12 +282,7 @@ class MasterDnsVPNClient:
                     domain=domain,
                     mtu=optimal_mtu
                 )
-                self.logger.success(
-                    f"[Upload MTU Test] Optimal upload MTU determined: <g>{mtu_bytes}</g> bytes ({mtu_char_len} characters) to <g>{dns_server}:{dns_port}</g> for domain <g>{domain}</g>")
                 return True, mtu_bytes, mtu_char_len
-
-            self.logger.error(
-                f"[Upload MTU Test] Failed to determine a valid upload MTU for {dns_server}:{dns_port} and domain '{domain}'")
 
             return False, 0, 0
         except Exception as exc:
@@ -330,7 +327,7 @@ class MasterDnsVPNClient:
 
                     if is_VPN_packet and packet_type == PACKET_TYPES["SERVER_DOWNLOAD_TEST"]:
                         if ":".encode() not in answers:
-                            self.logger.error(
+                            self.logger.debug(
                                 "Download MTU test failed: Invalid response format.")
                             return False
 
@@ -339,23 +336,23 @@ class MasterDnsVPNClient:
                         download_size = self.dns_packet_parser.data_decrypt(
                             received_mtu_encrypted)
                         if download_size == mtu_bytes:
-                            self.logger.info(
+                            self.logger.debug(
                                 f"Download MTU test successful for {mtu} bytes to {dns_server}:{dns_port} for domain {domain}.")
                             return True
                 elif len(labels) == 0:
-                    self.logger.error(
+                    self.logger.debug(
                         "Failed to generate labels for download MTU test.")
                     return False
                 elif len(labels) > 1:
-                    self.logger.error(
+                    self.logger.debug(
                         "Generated multiple labels for download MTU test; expected only one.")
                     return False
-            self.logger.warning(
+            self.logger.debug(
                 f"Download MTU test failed for {mtu} bytes to {dns_server}:{dns_port} for domain {domain}.")
             return False
 
         except Exception as e:
-            self.logger.error(
+            self.logger.debug(
                 f"Error during download MTU test to {dns_server}:{dns_port} for domain {domain}: {e}")
             return False
 
@@ -367,7 +364,8 @@ class MasterDnsVPNClient:
         min_mtu = 0
         max_mtu_candidate = max_mtu
         optimal_mtu = 0
-
+        self.logger.info(
+            f"[Download MTU Test] Starting download MTU test to {dns_server}:{dns_port} for domain '{domain}' ...")
         try:
             # Initial attempt with the maximum MTU
             self.logger.debug(
@@ -401,12 +399,8 @@ class MasterDnsVPNClient:
                         f"[Download MTU Test] Failure at {current_mtu} bytes. Trying lower...")
 
             if optimal_mtu > 29:
-                self.logger.success(
-                    f"[Download MTU Test] Optimal download MTU determined: <g>{optimal_mtu}</g> bytes to <g>{dns_server}:{dns_port}</g> for domain <g>{domain}</g>")
                 return optimal_mtu
 
-            self.logger.error(
-                f"[Download MTU Test] Failed to determine a valid download MTU for {dns_server}:{dns_port} and domain '{domain}'")
             return 0
         except Exception as exc:
             self.logger.error(
@@ -429,12 +423,26 @@ class MasterDnsVPNClient:
                 default_mtu=upload_mtu
             )
 
+            if isValid and self.min_upload_mtu > 0 and mtu_bytes < self.min_upload_mtu:
+                self.logger.error(
+                    f"Upload MTU {mtu_bytes} bytes is below minimum threshold of {self.min_upload_mtu} bytes for {dns_server}:{dns_port} and domain <g>{domain}</g>")
+                isValid = False
+                connection["is_valid"] = False
+                connection["upload_mtu_bytes"] = 0
+                connection["upload_mtu_chars"] = 0
+                connection['packet_loss'] = 100
+                continue
+
             if isValid:
+                self.logger.success(
+                    f"Upload MTU test successful: <g>{mtu_bytes}</g> bytes to <g>{dns_server}:{dns_port}</g> for domain <g>{domain}</g>")
                 connection["is_valid"] = True
                 connection["upload_mtu_bytes"] = mtu_bytes
                 connection["upload_mtu_chars"] = mtu_char_len
                 connection['packet_loss'] = 0
             else:
+                self.logger.error(
+                    f"Upload MTU test failed for {dns_server}:{dns_port} and domain <g>{domain}</g>")
                 connection["is_valid"] = False
                 connection["upload_mtu_bytes"] = 0
                 connection["upload_mtu_chars"] = 0
@@ -460,7 +468,7 @@ class MasterDnsVPNClient:
         self.logger.success(
             f"Lowest upload MTU across all valid connections: <g>{lowest_upload_mtu}</g> bytes ({lowest_upload_mtu_chars} characters)")
         self.logger.warning(
-            "<y>For optimal performance, please remove any invalid or slow resolvers from your configuration.</y>")
+            "<y>For optimal performance, please remove any invalid or slow resolvers from your configuration, you can set the MIN_UPLOAD_MTU and MIN_DOWNLOAD_MTU values to filter out low MTU resolvers automatically.</y>")
 
         self.logger.info(
             "Beginning download MTU tests for all valid domain-resolver combinations..."
@@ -481,9 +489,20 @@ class MasterDnsVPNClient:
                 max_upload_chars=lowest_upload_mtu_chars
             )
 
+            if self.min_download_mtu > 0 and download_mtu < self.min_download_mtu:
+                self.logger.error(
+                    f"Download MTU {download_mtu} bytes is below minimum threshold of {self.min_download_mtu} bytes for {dns_server}:{dns_port} and domain <g>{domain}</g>")
+                connection["is_valid"] = False
+                connection["download_mtu_bytes"] = 0
+                continue
+
             if download_mtu > 0:
+                self.logger.success(
+                    f"Download MTU test successful: <g>{download_mtu}</g> bytes to <g>{dns_server}:{dns_port}</g> for domain <g>{domain}</g>")
                 connection["download_mtu_bytes"] = download_mtu
             else:
+                self.logger.error(
+                    f"Download MTU test failed for {dns_server}:{dns_port} and domain <g>{domain}</g>")
                 connection["is_valid"] = False
                 connection["download_mtu_bytes"] = 0
 
@@ -504,6 +523,9 @@ class MasterDnsVPNClient:
 
         self.max_download_mtu = lowest_download_mtu
         self.max_upload_mtu = lowest_upload_mtu
+
+        self.logger.warning(
+            "<y>MTU tests completed. For optimal performance, please remove any invalid or slow resolvers from your configuration, you can set the MIN_UPLOAD_MTU and MIN_DOWNLOAD_MTU values to filter out low MTU resolvers automatically.</y>")
 
     async def start(self) -> None:
         """Start the MasterDnsVPN Client."""

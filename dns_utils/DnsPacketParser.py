@@ -158,7 +158,15 @@ class DnsPacketParser:
         labels = []
         jumped = False
         original_offset = offset
+        hops = 0
+        MAX_HOPS = 10
         while True:
+            if hops > MAX_HOPS:
+                raise ValueError("DNS Compression loop detected")
+
+            if offset >= len(data):
+                raise ValueError("Offset out of bounds")
+
             length = data[offset]
             # Check for pointer (compression)
             if (length & 0xC0) == 0xC0:
@@ -167,6 +175,7 @@ class DnsPacketParser:
                 pointer = ((length & 0x3F) << 8) | data[offset + 1]
                 offset = pointer
                 jumped = True
+                hops += 1
                 continue
             if length == 0:
                 offset += 1
@@ -608,7 +617,7 @@ class DnsPacketParser:
         return data_labels
 
     async def generate_vpn_response_packet(self, domain: str, session_id: int, packet_type: int, data: bytes,  question_packet: bytes = b'') -> bytes:
-        MAX_ALLOWED_CHARS_PER_TXT = 191
+        MAX_ALLOWED_CHARS_PER_TXT = 191  # Conservative limit for TXT record
         header = self.create_vpn_header(
             session_id, packet_type, base36_encode=False)
 
@@ -719,7 +728,8 @@ class DnsPacketParser:
         # 6. Convert Max Characters to Max Bytes (Base36 Logic)
         # log2(36) ≈ 5.1699 bits per character
         bits_capacity = max_payload_chars * math.log2(36)
-        safe_bytes_capacity = int(bits_capacity / 8) - 1
+        # Add -1 for safety if needed
+        safe_bytes_capacity = int(bits_capacity / 8)
 
         # 7. Respect User's Requested MTU (if provided and smaller)
         if mtu > 0 and mtu < safe_bytes_capacity:
