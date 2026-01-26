@@ -64,6 +64,9 @@ class UDPClient:
         Returns:
             tuple: (data, address) or (None, None) on error or timeout
         """
+        if self.sock is None:
+            self.logger.error("Socket is not initialized.")
+            return None, None
         try:
             data, addr = self.sock.recvfrom(self.buffer_size)
             self.logger.debug(f"Received {len(data)} bytes from {addr}")

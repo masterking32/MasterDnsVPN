@@ -8,6 +8,7 @@ import random
 import math
 from dns_utils.DNS_ENUMS import PACKET_TYPES, RESOURCE_RECORDS, R_CODES, Q_CLASSES
 from typing import Any, Optional
+import hashlib
 
 
 class DnsPacketParser:
@@ -38,16 +39,16 @@ class DnsPacketParser:
         self.base9x_alphabet = r'0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!#$%&\()*+,-/;<=>?@[\\]^_`{|}~ '
 
     def fix_key_length(self, key: bytes, desired_length: int) -> bytes:
-        """
-        Adjust the key to the desired length by truncating or padding with zeros.
-        """
-        if len(key) > desired_length:
-            return key[:desired_length]
-        elif len(key) * 2 == desired_length:
-            return key + key
-        elif len(key) < desired_length:
-            return key.ljust(desired_length, b'\0')
-        return key
+        if len(key) == desired_length:
+            return key
+        if desired_length == 32:
+            return hashlib.sha256(key).digest()
+        elif desired_length == 16:
+            return hashlib.md5(key).digest()
+
+        while len(key) < desired_length:
+            key += key
+        return key[:desired_length]
 
     """
     Default DNS Packet Parsers
@@ -718,7 +719,7 @@ class DnsPacketParser:
         # 6. Convert Max Characters to Max Bytes (Base36 Logic)
         # log2(36) ≈ 5.1699 bits per character
         bits_capacity = max_payload_chars * math.log2(36)
-        safe_bytes_capacity = int(bits_capacity / 8)
+        safe_bytes_capacity = int(bits_capacity / 8) - 1
 
         # 7. Respect User's Requested MTU (if provided and smaller)
         if mtu > 0 and mtu < safe_bytes_capacity:

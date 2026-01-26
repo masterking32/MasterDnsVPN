@@ -3,10 +3,10 @@
 # Github: https://github.com/masterking32
 # Year: 2026
 
-import json
 from loguru import logger
 import sys
 from typing import Optional
+import secrets
 
 
 def load_text(file_path: str) -> Optional[str]:
@@ -59,9 +59,7 @@ def generate_random_hex_text(length: int) -> str:
     """
     Generate a random hexadecimal string of the specified length.
     """
-    import random
-    hex_chars = '0123456789abcdef'
-    return ''.join(random.choice(hex_chars) for _ in range(length))
+    return secrets.token_hex(length // 2)
 
 
 def getLogger(log_level: str = "DEBUG", logFile: str = None, max_log_size: int = 1, backup_count: int = 3):
