@@ -12,12 +12,22 @@
 PACKET_TYPES = {
     "SERVER_UPLOAD_TEST": 0x00,
     "SERVER_DOWNLOAD_TEST": 0x01,
-    "SET_DOWNLOAD_MTU": 0x02,
-    "SET_UPLOAD_MTU": 0x03,
-    "NEW_SESSION": 0x04,
-    "QUIC_INIT": 0x05,
-    "QUIC_PACKET": 0x06,
-    "KCP_PACKET": 0x07,
+    "NEW_SESSION": 0x02,
+    "SET_DOWNLOAD_MTU": 0x03,
+    "SET_UPLOAD_MTU": 0x04,
+    "SESSION_CLOSE": 0x05,
+    "DATA_PACKET": 0x06,
+    "PING": 0x07,
+
+    "RESERVE_1": 0x08,
+    "RESERVE_2": 0x09,
+    "RESERVE_3": 0x0A,
+    "RESERVE_4": 0x0B,
+    "RESERVE_5": 0x0C,
+
+    "QUIC_INIT": 0x0D,
+    "QUIC_PACKET": 0x0E,
+    "KCP_PACKET": 0x0F,
 }
 
 # DNS Resource Record Types (qType)

@@ -42,6 +42,11 @@ class MasterDnsVPNClient:
         self.min_download_mtu: int = self.config.get("MIN_DOWNLOAD_MTU", 0)
         self.encryption_method: int = self.config.get(
             "DATA_ENCRYPTION_METHOD", 1)
+        self.skip_resolver_with_packet_loss: int = self.config.get(
+            "SKIP_RESOLVER_WITH_PACKET_LOSS", 100)
+        self.resolver_balancing_strategy: int = self.config.get(
+            "RESOLVER_BALANCING_STRATEGY", 0
+        )
         self.encryption_key: str = self.config.get("ENCRYPTION_KEY", None)
         if not self.encryption_key:
             self.logger.error("No encryption key provided in configuration.")
@@ -51,12 +56,86 @@ class MasterDnsVPNClient:
             encryption_method=self.encryption_method,
             encryption_key=self.encryption_key,
         )
+
         # Build a map of all domain-resolver combinations
         self.connections_map: list = [
             {"domain": domain, "resolver": resolver}
             for domain in self.domains
             for resolver in self.resolvers
         ]
+
+        self.connections_map = [
+            dict(t) for t in {tuple(d.items())
+                              for d in self.connections_map}
+        ]
+
+        self.resent_connection_selected: int = -1
+
+    async def select_connection(self) -> Optional[dict]:
+        """Select a connection based on the balancing strategy."""
+        valid_connections = [
+            conn for conn in self.connections_map if conn.get("is_valid", True)
+        ]
+
+        if not valid_connections:
+            self.logger.error("No valid connections available.")
+            return None
+
+        for conn in valid_connections:
+            total_packets = conn.get("total_packets", 0)
+            lost_packets = conn.get("lost_packets", 0)
+            if total_packets > 0:
+                packet_loss = (lost_packets / total_packets) * 100
+            else:
+                packet_loss = 0
+            conn['packet_loss'] = packet_loss
+
+        valid_connections = [
+            conn for conn in valid_connections
+            if conn['packet_loss'] <= self.skip_resolver_with_packet_loss
+        ]
+
+        if not valid_connections:
+            self.logger.error(
+                "No valid connections available after applying packet loss filter.")
+            return None
+
+        if self.resolver_balancing_strategy == 2:
+            self.resent_connection_selected = (
+                self.resent_connection_selected + 1) % len(valid_connections)
+            selected_connection = valid_connections[self.resent_connection_selected]
+            self.logger.debug(
+                f"Round Robin selected connection, domain: {selected_connection['domain']}, resolver: {selected_connection['resolver']}")
+            return selected_connection
+
+        elif self.resolver_balancing_strategy == 3:
+            valid_connections.sort(key=lambda x: x['packet_loss'])
+            selected_connection = valid_connections[0]
+            self.logger.debug(
+                f"Least Packet Loss selected connection with packet loss: {selected_connection['packet_loss']:.2f}%, domain: {selected_connection['domain']}, resolver: {selected_connection['resolver']}")
+            return selected_connection
+
+        else:
+            selected_connection = random.choice(valid_connections)
+            self.logger.debug(
+                f"Randomly selected connection, domain: {selected_connection['domain']}, resolver: {selected_connection['resolver']}")
+            return selected_connection
+
+    async def get_main_connection_index(self, selected_connection: Optional[dict] = None) -> Optional[int]:
+        """Find and return the main connection (connections_map) based on the selected connection."""
+        if selected_connection is None:
+            selected_connection = await self.select_connection()
+            if selected_connection is None:
+                return None
+
+        for index, conn in enumerate(self.connections_map):
+            if (conn.get("domain") == selected_connection.get("domain") and
+                    conn.get("resolver") == selected_connection.get("resolver")):
+                return index
+
+        self.logger.error(
+            "Selected connection not found in connections map.")
+        return None
 
     async def dns_request(self, server_host: str, server_port: int, data: bytes, timeout: float = 0, buffer_size: int = 65507) -> tuple:
         """
@@ -480,6 +559,7 @@ class MasterDnsVPNClient:
             resolver = connection.get("resolver")
             dns_server = resolver
             dns_port = 53
+            connection['total_packets'] = 0
 
             download_mtu = await self.test_download_mtu(
                 domain=domain,

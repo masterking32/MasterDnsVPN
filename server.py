@@ -41,6 +41,8 @@ class MasterDnsVPNServer:
         self.recv_data_cache = {}
         self.send_data_cache = {}
 
+        self.sessions = {}
+
         # Generate or load encryption key
         self.encrypt_key = get_encrypt_key(
             self.config.get("DATA_ENCRYPTION_METHOD", 1))
@@ -51,6 +53,37 @@ class MasterDnsVPNServer:
                                           encryption_method=self.config.get(
                                               "DATA_ENCRYPTION_METHOD", 1),
                                           encryption_key=self.encrypt_key)
+
+    async def new_session(self) -> int:
+        """
+        Create a new session and return its session ID.
+        """
+        for session_id in range(1, 256):
+            if session_id not in self.sessions:
+                self.sessions[session_id] = {
+                    "last_packet_time": asyncio.get_event_loop().time()
+                }
+                self.logger.info(f"Created new session with ID: {session_id}")
+                return session_id
+
+    async def is_session_valid(self, session_id: int) -> bool:
+        """
+        Check if a session ID is valid.
+        """
+        return session_id in self.sessions
+
+    async def close_inactive_sessions(self, timeout: int = 300) -> None:
+        """
+        Close sessions that have been inactive for a specified timeout (seconds).
+        """
+        current_time = asyncio.get_event_loop().time()
+        inactive_sessions = [
+            session_id for session_id, session_info in self.sessions.items()
+            if current_time - session_info["last_packet_time"] > timeout
+        ]
+        for session_id in inactive_sessions:
+            del self.sessions[session_id]
+            self.logger.info(f"Closed inactive session with ID: {session_id}")
 
     async def solve_dns(self, query: bytes) -> bytes:
         """

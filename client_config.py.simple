@@ -46,6 +46,21 @@ class master_dns_vpn_config:
     # Adjust these values based on your network conditions for optimal performance.
     # Check the client logs after initial connection to see recommended MTU values.
     
+    # Skip DNS Resolver with Packet Loss
+    # -------------------------------------------------
+    # If a DNS resolver exhibits packet loss above this percentage, it will be skipped.
+    # Set to 100 to disable this check.
+    SKIP_RESOLVER_WITH_PACKET_LOSS = 50  # in percentage (1-100)
+
+    # Balancing Strategy for Multiple Resolvers
+    # -------------------------------------------------
+    # Strategy to balance load across multiple DNS resolvers.
+    # Options:
+    #   1       - Random: Randomly select a resolver for each query.
+    #   2       - Round Robin: Cycle through resolvers in order.
+    #   3       - Less Packet Loss: Prefer resolvers with lower packet loss rates.
+    RESOLVER_BALANCING_STRATEGY = 1
+
     # Maximum size of data packets sent to the server. (default: 512 bytes)
     MAX_UPLOAD_MTU = 512
     # Maximum size of data packets received from the server. (default: 4096 bytes)
