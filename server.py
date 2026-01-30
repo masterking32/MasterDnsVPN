@@ -190,7 +190,8 @@ class MasterDnsVPNServer:
                     f"Received CLIENT_TEST packet from {addr}, sending SERVER_UPLOAD_TEST response.")
 
                 txt_str = "1"
-                data_bytes = self.dns_parser.data_encrypt(txt_str.encode())
+                data_bytes = self.dns_parser.codec_transform(
+                    txt_str.encode(), encrypt=True)
 
                 response_packet = await self.dns_parser.generate_vpn_response_packet(
                     domain=request_domain,
@@ -228,7 +229,8 @@ class MasterDnsVPNServer:
                         f"Download size too small in SERVER_DOWNLOAD_TEST packet from {addr}: {download_size}")
                     return False, None
 
-                data_bytes = self.dns_parser.data_encrypt(download_size_bytes)
+                data_bytes = self.dns_parser.codec_transform(
+                    download_size_bytes, encrypt=True)
                 data_bytes = data_bytes + ":".encode()
                 data_bytes = data_bytes + random.randbytes(
                     download_size - len(data_bytes))

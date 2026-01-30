@@ -374,7 +374,8 @@ class MasterDnsVPNClient:
         try:
             # convert mtu to bytes
             mtu_bytes = mtu.to_bytes(2, byteorder='big')
-            mtu_encrypt = self.dns_packet_parser.data_encrypt(data=mtu_bytes)
+            mtu_encrypt = self.dns_packet_parser.codec_transform(
+                mtu_bytes, encrypt=True)
             mtu_encode = self.dns_packet_parser.base_encode(
                 mtu_encrypt, lowerCaseOnly=True)
             mtu_len = len(mtu_encode) + 1  # +1 for the dot separator
@@ -412,8 +413,8 @@ class MasterDnsVPNClient:
 
                         received_mtu_encrypted, _ = answers.split(
                             b":", 1)
-                        download_size = self.dns_packet_parser.data_decrypt(
-                            received_mtu_encrypted)
+                        download_size = self.dns_packet_parser.codec_transform(
+                            received_mtu_encrypted, encrypt=False)
                         if download_size == mtu_bytes:
                             self.logger.debug(
                                 f"Download MTU test successful for {mtu} bytes to {dns_server}:{dns_port} for domain {domain}.")

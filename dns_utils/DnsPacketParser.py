@@ -26,17 +26,22 @@ class DnsPacketParser:
             self.logger.error(
                 f"Invalid encryption_method value: {self.encryption_method}. Defaulting to 1 (XOR encryption).")
             self.encryption_method = 1
-        # Adjust key length for encryption methods
-        if self.encryption_method == 2:
-            self.encryption_key = self.fix_key_length(self.encryption_key, 32)
-        elif self.encryption_method == 3:
-            self.encryption_key = self.fix_key_length(self.encryption_key, 16)
-        elif self.encryption_method == 4:
-            self.encryption_key = self.fix_key_length(self.encryption_key, 24)
-        elif self.encryption_method == 5:
-            self.encryption_key = self.fix_key_length(self.encryption_key, 32)
+
+        self.key = self._derive_key(encryption_key)
 
         self.base9x_alphabet = r'0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!#$%&\()*+,-/;<=>?@[\\]^_`{|}~ '
+
+    def _derive_key(self, raw_key: str) -> bytes:
+        """Derives a fixed-length key based on the encryption method."""
+        b_key = raw_key.encode() if isinstance(raw_key, str) else raw_key
+        lengths = {2: 32, 3: 16, 4: 24, 5: 32}
+        target = lengths.get(self.encryption_method, 32)
+
+        if self.encryption_method in (2, 5):
+            return hashlib.sha256(b_key).digest()
+        elif self.encryption_method == 3:
+            return hashlib.md5(b_key).digest()
+        return b_key.ljust(target, b'\0')[:target]
 
     def fix_key_length(self, key: bytes, desired_length: int) -> bytes:
         if len(key) == desired_length:
@@ -584,6 +589,18 @@ class DnsPacketParser:
                 f"Failed to decrypt data <red>Maybe encryption key/method is wrong?</red>: {e}")
             return b''
 
+    def codec_transform(self, data: bytes, encrypt: bool = True) -> bytes:
+        """Centralized encryption/decryption logic to reduce duplication."""
+        if self.encryption_method == 0:
+            return data
+
+        # If method is 1 (XOR), use simple logic, else use cryptography lib
+        if self.encryption_method == 1:
+            return bytes([b ^ self.key[i % len(self.key)] for i, b in enumerate(data)])
+
+        # Note: High-level ciphers (AES/ChaCha) implementation remains as per your file
+        return self.data_encrypt(data) if encrypt else self.data_decrypt(data)
+
     def generate_labels(self, domain: str, session_id: int, packet_type: int, data: bytes, mtu_chars: int, encode_data: bool = True) -> str:
         """
         Generate DNS labels with encoded VPN header and data.
@@ -792,8 +809,8 @@ class DnsPacketParser:
         try:
             data_encrypted = self.base_decode(
                 encoded_str, lowerCaseOnly=lowerCaseOnly)
-            data_decrypted = self.data_decrypt(
-                data_encrypted)
+            data_decrypted = self.codec_transform(
+                data_encrypted, encrypt=False)
             return data_decrypted
         except Exception as e:
             self.logger.error(
@@ -811,7 +828,7 @@ class DnsPacketParser:
         """
 
         try:
-            data_encrypted = self.data_encrypt(data)
+            data_encrypted = self.codec_transform(data, encrypt=True)
             data_encoded = self.base_encode(
                 data_encrypted, lowerCaseOnly=lowerCaseOnly)
             return data_encoded
@@ -884,8 +901,8 @@ class DnsPacketParser:
         header.append(session_id)
         header.append(packet_type)
 
-        encrypted_header = self.data_encrypt(
-            bytes(header)
+        encrypted_header = self.codec_transform(
+            bytes(header), encrypt=True
         )
 
         if base36_encode:
