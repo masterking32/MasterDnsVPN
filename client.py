@@ -110,9 +110,17 @@ class MasterDnsVPNClient:
 
         elif self.resolver_balancing_strategy == 3:
             valid_connections.sort(key=lambda x: x['packet_loss'])
-            selected_connection = valid_connections[0]
-            self.logger.debug(
-                f"Least Packet Loss selected connection with packet loss: {selected_connection['packet_loss']:.2f}%, domain: {selected_connection['domain']}, resolver: {selected_connection['resolver']}")
+            min_loss = valid_connections[0]['packet_loss']
+            same_loss_connections = [
+                conn for conn in valid_connections if conn['packet_loss'] == min_loss]
+            if len(same_loss_connections) > 1:
+                selected_connection = random.choice(same_loss_connections)
+                self.logger.debug(
+                    f"Least Packet Loss (tie) randomly selected connection with packet loss: {selected_connection['packet_loss']:.2f}%, domain: {selected_connection['domain']}, resolver: {selected_connection['resolver']}")
+            else:
+                selected_connection = same_loss_connections[0]
+                self.logger.debug(
+                    f"Least Packet Loss selected connection with packet loss: {selected_connection['packet_loss']:.2f}%, domain: {selected_connection['domain']}, resolver: {selected_connection['resolver']}")
             return selected_connection
 
         else:
@@ -545,14 +553,16 @@ class MasterDnsVPNClient:
             self.logger.error(
                 "All domain-resolver combinations failed MTU tests.")
             return
+
+        self.logger.warning("=" * 80)
         self.logger.success(
-            f"Lowest upload MTU across all valid connections: <g>{lowest_upload_mtu}</g> bytes ({lowest_upload_mtu_chars} characters)")
-        self.logger.warning(
-            "<y>For optimal performance, please remove any invalid or slow resolvers from your configuration, you can set the MIN_UPLOAD_MTU and MIN_DOWNLOAD_MTU values to filter out low MTU resolvers automatically.</y>")
+            f"<cyan>Lowest upload MTU across all valid connections: <g>{lowest_upload_mtu}</g> bytes ({lowest_upload_mtu_chars} characters)</cyan>")
+        self.logger.warning("=" * 80)
 
         self.logger.info(
             "Beginning download MTU tests for all valid domain-resolver combinations..."
         )
+
         for connection in self.connections_map:
             if not connection.get("is_valid", False):
                 continue
@@ -599,17 +609,24 @@ class MasterDnsVPNClient:
                 "All domain-resolver combinations failed download MTU tests.")
             return
 
+        self.logger.warning("=" * 80)
         self.logger.success(
-            f"Lowest download MTU across all valid connections: <g>{lowest_download_mtu}</g> bytes")
+            f"<cyan>Lowest download MTU across all valid connections: <g>{lowest_download_mtu}</g> bytes</cyan>")
 
         self.max_download_mtu = lowest_download_mtu
         self.max_upload_mtu = lowest_upload_mtu
 
+        self.logger.warning("=" * 80)
         self.logger.warning(
-            "<y>MTU tests completed. For optimal performance, please remove any invalid or slow resolvers from your configuration, you can set the MIN_UPLOAD_MTU and MIN_DOWNLOAD_MTU values to filter out low MTU resolvers automatically.</y>")
+            f"<green>MTU tests completed.</green> <cyan>For optimal performance, please remove any invalid or slow resolvers from your configuration, you can set the <yellow>MIN_UPLOAD_MTU</yellow> and <yellow>MIN_DOWNLOAD_MTU</yellow> values to filter out low MTU resolvers automatically.</cyan>")
+        self.logger.warning(
+            f"<green>You can set the <yellow>MAX_UPLOAD_MTU</yellow> to <blue>{self.max_upload_mtu}</blue> and <yellow>MAX_DOWNLOAD_MTU</yellow> to <blue>{self.max_download_mtu}</blue> in your configuration for best results.</green>"
+        )
+        self.logger.warning("=" * 80)
 
     async def start(self) -> None:
         """Start the MasterDnsVPN Client."""
+        self.logger.info("=" * 80)
         self.logger.success("Starting MasterDnsVPN Client...")
 
         self.logger.debug(f"Checking configuration...")
@@ -627,6 +644,7 @@ class MasterDnsVPNClient:
 
         self.logger.debug(f"Configuration looks good.")
         self.logger.success("MasterDnsVPN Client started successfully.")
+        self.logger.info("=" * 80)
 
         self.logger.info(
             "Beginning MTU tests for all domain-resolver combinations...")
