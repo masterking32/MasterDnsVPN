@@ -283,15 +283,19 @@ class MasterDnsVPNServer:
             return
 
         # Normal DNS query processing
-        response = await self.solve_dns(data)
+        # response = await self.solve_dns(data)
+        # if not response:
+        #     self.logger.error(
+        #         f"No response generated for DNS request from {addr}")
+        #     response = await self.dns_parser.server_fail_response(data)
+        #     if not response:
+        #         self.logger.error(
+        #             f"Failed to generate Server Failure response for DNS request from {addr}")
+        #         return
+
+        # DNS query forwarding is disabled for security reasons. Forwarding may allow attackers to abuse your server via DNS-based attacks.
         if not response:
-            self.logger.error(
-                f"No response generated for DNS request from {addr}")
             response = await self.dns_parser.server_fail_response(data)
-            if not response:
-                self.logger.error(
-                    f"Failed to generate Server Failure response for DNS request from {addr}")
-                return
 
         try:
             self.udp_sock.sendto(response, addr)
