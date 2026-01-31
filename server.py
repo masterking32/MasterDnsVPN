@@ -332,7 +332,7 @@ class MasterDnsVPNServer:
             except OSError as e:
                 self.logger.error(
                     f"Socket error: {e}. Exiting DNS request handler.")
-                break
+                continue
             except Exception as e:
                 self.logger.exception(
                     f"Unexpected error receiving DNS request: {e}")
