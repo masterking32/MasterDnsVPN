@@ -324,7 +324,7 @@ class MasterDnsVPNClient:
                 )
 
                 is_VPN_packet, session_id, packet_type, answers = await self._query_and_parse(
-                    dns_server, dns_port, test_packet, timeout=5.0, buffer_size=mtu_bytes + 512)
+                    dns_server, dns_port, test_packet, timeout=10.0, buffer_size=mtu_bytes + 512)
 
                 if is_VPN_packet and packet_type == PACKET_TYPES["SERVER_UPLOAD_TEST"]:
                     return True
@@ -416,7 +416,7 @@ class MasterDnsVPNClient:
             label = mtu_encode + "." + labels[0]
             test_packet = await self.dns_packet_parser.simple_question_packet(domain=label, qType=RESOURCE_RECORDS["TXT"])
 
-            is_VPN_packet, session_id, packet_type, answers = await self._query_and_parse(dns_server, dns_port, test_packet, timeout=5.0)
+            is_VPN_packet, session_id, packet_type, answers = await self._query_and_parse(dns_server, dns_port, test_packet, timeout=10.0)
 
             if not is_VPN_packet or packet_type != PACKET_TYPES["SERVER_DOWNLOAD_TEST"]:
                 self.logger.debug(

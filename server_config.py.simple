@@ -55,3 +55,11 @@ class master_dns_vpn_config:
     # 5 - AES-256-CTR encryption (strongest, slowest, largest packets)
     # Choose based on your security and performance needs.
     DATA_ENCRYPTION_METHOD = 1
+
+    # Session Timeout (in seconds).
+    # Duration of inactivity after which a session is considered expired.
+    SESSION_TIMEOUT = 300  # 5 minutes
+
+    # Session Cleanup Interval (in seconds).
+    # Frequency at which the server checks for and removes expired sessions.
+    SESSION_CLEANUP_INTERVAL = 60  # 1 minute

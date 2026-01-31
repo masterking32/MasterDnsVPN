@@ -90,7 +90,113 @@ class MasterDnsVPNServer:
             del self.sessions[session_id]
             self.logger.info(f"Closed inactive session with ID: {session_id}")
 
-    async def handle_vpn_packet(self, data: bytes, parsed_packet: dict, addr) -> tuple[bool, Optional[bytes]]:
+    async def handle_vpn_packet(self, packet_type: int, session_id: int, data: bytes = b'', labels: dict = {}, parsed_packet: dict = None, addr=None, request_domain: str = '') -> Optional[bytes]:
+        """Handle VPN packet based on its type."""
+
+        if packet_type == PACKET_TYPES["SERVER_UPLOAD_TEST"]:
+            return await self.handle_packet_upload_test(
+                data=data, request_domain=request_domain)
+        elif packet_type == PACKET_TYPES["SERVER_DOWNLOAD_TEST"]:
+            return await self.handle_packet_download_test(
+                data=data, labels=labels, request_domain=request_domain, addr=addr)
+        elif packet_type == PACKET_TYPES["NEW_SESSION"]:
+            return await self.handle_packet_new_session(
+                data=data, request_domain=request_domain, addr=addr)
+
+        return None
+
+    async def handle_packet_new_session(self, data: bytes, request_domain: str, addr) -> Optional[bytes]:
+        """Handle NEW_SESSION VPN packet."""
+
+        new_session_id = await self.new_session()
+        if new_session_id is None:
+            self.logger.error(
+                f"Failed to create new session for NEW_SESSION packet from {addr}")
+            return False, None
+
+        txt_str = str(new_session_id)
+        data_bytes = self.dns_parser.codec_transform(
+            txt_str.encode(), encrypt=True)
+
+        response_packet = await self.dns_parser.generate_vpn_response_packet(
+            domain=request_domain,
+            session_id=new_session_id,
+            packet_type=PACKET_TYPES["NEW_SESSION"],
+            data=data_bytes,
+            question_packet=data
+        )
+
+        return response_packet
+
+    async def handle_packet_download_test(self, data: bytes, labels: str, request_domain: str, addr) -> Optional[bytes]:
+        """Handle SERVER_UPLOAD_TEST VPN packet."""
+
+        if '.' not in labels:
+            self.logger.warning(
+                f"Invalid SERVER_DOWNLOAD_TEST packet format from {addr}: {labels}")
+            return None
+
+        first_part_of_data = labels.split('.')[0]
+        if not first_part_of_data:
+            self.logger.warning(
+                f"Empty data in SERVER_DOWNLOAD_TEST packet from {addr}")
+            return None
+
+        download_size_bytes = self.dns_parser.decode_and_decrypt_data(
+            first_part_of_data, lowerCaseOnly=True)
+
+        if download_size_bytes is None:
+            self.logger.warning(
+                f"Failed to decode download size in SERVER_DOWNLOAD_TEST packet from {addr}")
+            return None
+
+        download_size = int.from_bytes(
+            download_size_bytes, byteorder='big')
+
+        if download_size < 29:
+            self.logger.warning(
+                f"Download size too small in SERVER_DOWNLOAD_TEST packet from {addr}: {download_size}")
+            return None
+
+        data_bytes = self.dns_parser.codec_transform(
+            download_size_bytes, encrypt=True)
+        data_bytes = data_bytes + ":".encode()
+        data_bytes = data_bytes + random.randbytes(
+            download_size - len(data_bytes))
+
+        if len(data_bytes) != download_size:
+            self.logger.error(
+                f"Prepared download data size mismatch for packet from {addr}: expected {download_size}, got {len(data_bytes)}")
+            return None
+
+        response_packet = await self.dns_parser.generate_vpn_response_packet(
+            domain=request_domain,
+            session_id=255,
+            packet_type=PACKET_TYPES["SERVER_DOWNLOAD_TEST"],
+            data=data_bytes,
+            question_packet=data
+        )
+
+        return response_packet
+
+    async def handle_packet_upload_test(self, data: bytes, request_domain: str) -> Optional[bytes]:
+        """Handle SERVER_UPLOAD_TEST VPN packet."""
+
+        txt_str = "1"
+        data_bytes = self.dns_parser.codec_transform(
+            txt_str.encode(), encrypt=True)
+
+        response_packet = await self.dns_parser.generate_vpn_response_packet(
+            domain=request_domain,
+            session_id=1,
+            packet_type=PACKET_TYPES["SERVER_UPLOAD_TEST"],
+            data=data_bytes,
+            question_packet=data
+        )
+
+        return response_packet
+
+    async def validate_vpn_packet(self, data: bytes, parsed_packet: dict, addr) -> Optional[bytes]:
         """
         Handle VPN packet logic and return (is_vpn_packet, response_bytes).
         """
@@ -101,7 +207,7 @@ class MasterDnsVPNServer:
             if not questions:
                 self.logger.error(
                     f"No questions found in VPN packet from {addr}")
-                return False, None
+                return None
 
             request_domain = questions[0]['qName']
             packet_domain = questions[0]['qName'].lower()
@@ -111,17 +217,17 @@ class MasterDnsVPNServer:
             if questions[0]['qType'] != RESOURCE_RECORDS["TXT"]:
                 self.logger.warning(
                     f"Invalid DNS query type for VPN packet from {addr}: {questions[0]['qType']}")
-                return False, None
+                return None
 
             if not packet_main_domain:
                 self.logger.warning(
                     f"Domain {packet_domain} not allowed for VPN packets from {addr}")
-                return False, None
+                return None
 
             if packet_domain.count('.') < 3:
                 self.logger.warning(
                     f"Invalid domain format for VPN packet from {addr}: {packet_domain}")
-                return False, None
+                return None
 
             labels = packet_domain.replace(
                 '.' + packet_main_domain, '')
@@ -134,113 +240,35 @@ class MasterDnsVPNServer:
             if not extracted_header:
                 self.logger.warning(
                     f"Failed to extract VPN header from labels for packet from {addr}")
-                return False, None
+                return None
 
             if len(extracted_header) != 2:
                 self.logger.warning(
                     f"Invalid VPN header length from labels for packet from {addr}: {len(extracted_header)}")
-                return False, None
+                return None
 
             packet_type = extracted_header[1]
             if packet_type not in PACKET_TYPES.values():
                 self.logger.warning(
                     f"Invalid VPN packet type from labels for packet from {addr}: {packet_type}")
-                return False, None
+                return None
 
-            self.logger.debug(
-                f"Extracted VPN header from labels: {extracted_header}")
+            session_id = extracted_header[0]
+            response = await self.handle_vpn_packet(packet_type=packet_type,
+                                                    session_id=session_id,
+                                                    data=data,
+                                                    labels=labels,
+                                                    parsed_packet=parsed_packet,
+                                                    addr=addr,
+                                                    request_domain=request_domain)
 
-            # @TODO: MOVE TO ANOTHER FUNCTION
-            if packet_type == PACKET_TYPES["SERVER_UPLOAD_TEST"]:
-                self.logger.debug(
-                    f"Received upload-test from {addr}; preparing response")
-
-                txt_str = "1"
-                data_bytes = self.dns_parser.codec_transform(
-                    txt_str.encode(), encrypt=True)
-
-                response_packet = await self.dns_parser.generate_vpn_response_packet(
-                    domain=request_domain,
-                    session_id=1,
-                    packet_type=PACKET_TYPES["SERVER_UPLOAD_TEST"],
-                    data=data_bytes,
-                    question_packet=data
-                )
-
-                return True, response_packet
-            elif packet_type == PACKET_TYPES["SERVER_DOWNLOAD_TEST"]:
-                if '.' not in labels:
-                    self.logger.warning(
-                        f"Invalid SERVER_DOWNLOAD_TEST packet format from {addr}: {labels}")
-                    return False, None
-
-                first_part_of_data = labels.split('.')[0]
-                if not first_part_of_data:
-                    self.logger.warning(
-                        f"Empty data in SERVER_DOWNLOAD_TEST packet from {addr}")
-                    return False, None
-
-                download_size_bytes = self.dns_parser.decode_and_decrypt_data(
-                    first_part_of_data, lowerCaseOnly=True)
-                if download_size_bytes is None:
-                    self.logger.warning(
-                        f"Failed to decode download size in SERVER_DOWNLOAD_TEST packet from {addr}")
-                    return False, None
-
-                download_size = int.from_bytes(
-                    download_size_bytes, byteorder='big')
-
-                if download_size < 29:
-                    self.logger.warning(
-                        f"Download size too small in SERVER_DOWNLOAD_TEST packet from {addr}: {download_size}")
-                    return False, None
-
-                data_bytes = self.dns_parser.codec_transform(
-                    download_size_bytes, encrypt=True)
-                data_bytes = data_bytes + ":".encode()
-                data_bytes = data_bytes + random.randbytes(
-                    download_size - len(data_bytes))
-
-                if len(data_bytes) != download_size:
-                    self.logger.error(
-                        f"Prepared download data size mismatch for packet from {addr}: expected {download_size}, got {len(data_bytes)}")
-                    return False, None
-
-                response_packet = await self.dns_parser.generate_vpn_response_packet(
-                    domain=request_domain,
-                    session_id=255,
-                    packet_type=PACKET_TYPES["SERVER_DOWNLOAD_TEST"],
-                    data=data_bytes,
-                    question_packet=data
-                )
-
-                return True, response_packet
-
-            elif packet_type == PACKET_TYPES["NEW_SESSION"]:
-                new_session_id = await self.new_session()
-                if new_session_id is None:
-                    self.logger.error(
-                        f"Failed to create new session for NEW_SESSION packet from {addr}")
-                    return False, None
-
-                txt_str = str(new_session_id)
-                data_bytes = self.dns_parser.codec_transform(
-                    txt_str.encode(), encrypt=True)
-
-                response_packet = await self.dns_parser.generate_vpn_response_packet(
-                    domain=request_domain,
-                    session_id=new_session_id,
-                    packet_type=PACKET_TYPES["NEW_SESSION"],
-                    data=data_bytes,
-                    question_packet=data
-                )
-
-                return True, response_packet
-            return True, None
+            if response:
+                return response
         except Exception as e:
             self.logger.error(
                 f"Error handling VPN packet from {addr}: {e}")
-            return False, None
+
+        return None
 
     async def send_udp_response(self, response: bytes, addr) -> bool:
         """Async send helper to write UDP response to addr using the server socket."""
@@ -274,17 +302,11 @@ class MasterDnsVPNServer:
         self.logger.debug(f"Parsed DNS packet from {addr}: {parsed_packet}")
 
         # Check for VPN packet
-        vpn_packet, vpn_response = await self.handle_vpn_packet(data, parsed_packet, addr)
+        vpn_response = await self.validate_vpn_packet(data, parsed_packet, addr)
         if vpn_response:
             await self.send_udp_response(vpn_response, addr)
             return
-
-        # If it was a VPN packet but no response to send, nothing more to do
-        if vpn_packet:
-            return
-
-        response = None
-        if not response:
+        else:
             response = await self.dns_parser.server_fail_response(data)
             if not response:
                 self.logger.error(
