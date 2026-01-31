@@ -772,7 +772,11 @@ class DnsPacketParser:
         """
 
         try:
+            if not labels or not isinstance(labels, str):
+                return b''
             label_parts = labels.split('.')
+            if not label_parts:
+                return b''
             header_encoded = label_parts[-1]
             header_decrypted = self.decode_and_decrypt_data(
                 header_encoded, lowerCaseOnly=True)
@@ -782,8 +786,7 @@ class DnsPacketParser:
 
             return header_decrypted
         except Exception as e:
-            self.logger.error(
-                "Failed to extract VPN header <red>Maybe encryption key/method is wrong?</red>", e)
+            self.logger.error(f"Failed to extract VPN header: {e}")
             return b''
 
     def decode_and_decrypt_data(self, encoded_str: str, lowerCaseOnly=True) -> bytes:
@@ -796,14 +799,15 @@ class DnsPacketParser:
             bytes: Decoded and decrypted VPN data bytes.
         """
         try:
+            if not encoded_str:
+                return b''
             data_encrypted = self.base_decode(
                 encoded_str, lowerCaseOnly=lowerCaseOnly)
             data_decrypted = self.codec_transform(
                 data_encrypted, encrypt=False)
             return data_decrypted
         except Exception as e:
-            self.logger.error(
-                "Failed to decode and decrypt VPN data <red>Maybe encryption key/method is wrong?</red>", e)
+            self.logger.error(f"Failed to decode and decrypt VPN data: {e}")
             return b''
 
     def encrypt_and_encode_data(self, data: bytes, lowerCaseOnly=True) -> str:
@@ -817,13 +821,14 @@ class DnsPacketParser:
         """
 
         try:
+            if not data:
+                return ''
             data_encrypted = self.codec_transform(data, encrypt=True)
             data_encoded = self.base_encode(
                 data_encrypted, lowerCaseOnly=lowerCaseOnly)
             return data_encoded
         except Exception as e:
-            self.logger.error(
-                "Failed to encrypt and encode VPN data <red>Maybe encryption key/method is wrong?</red>", e)
+            self.logger.error(f"Failed to encrypt and encode VPN data: {e}")
             return ''
 
     def extract_vpn_data_from_labels(self, labels: str) -> bytes:
@@ -837,15 +842,18 @@ class DnsPacketParser:
         """
 
         try:
+            if not labels or not isinstance(labels, str):
+                return b''
             label_parts = labels.split('.')
+            if len(label_parts) <= 1:
+                return b''
             # all parts except last are data
             data_encoded = ''.join(label_parts[:-1])
             data_decrypted = self.decode_and_decrypt_data(
                 data_encoded, lowerCaseOnly=True)
             return data_decrypted
         except Exception as e:
-            self.logger.error(
-                "Failed to extract VPN data <red>Maybe encryption key/method is wrong?</red>", e)
+            self.logger.error(f"Failed to extract VPN data: {e}")
             return b''
 
     #

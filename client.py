@@ -4,6 +4,7 @@
 # Year: 2026
 
 import random
+import functools
 import sys
 import os
 import socket
@@ -369,38 +370,14 @@ class MasterDnsVPNClient:
             self.logger.debug(
                 f"[Upload MTU Test] Starting test with maximum MTU {max_mtu_candidate} bytes to {dns_server}:{dns_port} for domain '{domain}'")
 
-            # Initial attempt with the maximum MTU
-            if await self.perform_upload_mtu_test(domain, dns_server, dns_port, max_mtu_candidate):
-                mtu_char_len, mtu_bytes = self.dns_packet_parser.calculate_upload_mtu(
-                    domain=domain,
-                    mtu=max_mtu_candidate
-                )
-                return True, mtu_bytes, mtu_char_len
+            # Use binary search helper to find optimal MTU
+            test_fn = functools.partial(
+                self.perform_upload_mtu_test, domain, dns_server, dns_port)
+            optimal_mtu = await self._binary_search_mtu(test_fn, min_mtu, max_mtu_candidate, min_threshold=30)
 
-            while min_mtu <= max_mtu_candidate:
-                current_mtu = (min_mtu + max_mtu_candidate) // 2
-                self.logger.debug(
-                    f"[Upload MTU Test] Testing <y>{current_mtu}</y> bytes to {dns_server}:{dns_port} for domain '{domain}'")
-
-                if current_mtu < 30:
-                    self.logger.debug(
-                        f"[Upload MTU Test] Current MTU {current_mtu} bytes is below minimum threshold. Ending test.")
-                    break
-
-                if await self.perform_upload_mtu_test(domain, dns_server, dns_port, current_mtu):
-                    optimal_mtu = current_mtu
-                    min_mtu = current_mtu + 1
-                    self.logger.debug(
-                        f"[Upload MTU Test] Success at {current_mtu} bytes. Trying higher...")
-                else:
-                    max_mtu_candidate = current_mtu - 1
-                    self.logger.debug(
-                        f"[Upload MTU Test] Failure at {current_mtu} bytes. Trying lower...")
             if optimal_mtu > 29:
                 mtu_char_len, mtu_bytes = self.dns_packet_parser.calculate_upload_mtu(
-                    domain=domain,
-                    mtu=optimal_mtu
-                )
+                    domain=domain, mtu=optimal_mtu)
                 return True, mtu_bytes, mtu_char_len
 
             return False, 0, 0
@@ -468,6 +445,47 @@ class MasterDnsVPNClient:
                 f"Error during download MTU test to {dns_server}:{dns_port} for domain {domain}: {e}")
             return False
 
+    async def _binary_search_mtu(self, test_callable, min_mtu: int, max_mtu: int, min_threshold: int = 30) -> int:
+        """
+        Generic binary search for MTU tests.
+        `test_callable(size)` should be an async callable returning True on success.
+        Returns the highest successful MTU or 0 if none.
+        """
+        # Quick check max
+        try:
+            if max_mtu <= 0:
+                return 0
+
+            if await test_callable(max_mtu):
+                return max_mtu
+            max_candidate = max_mtu - 1
+
+            low = min_mtu
+            high = max_candidate
+            optimal = 0
+
+            while low <= high:
+                mid = (low + high) // 2
+                if mid < min_threshold:
+                    break
+                self.logger.debug(f"[MTU Binary Search] Testing {mid} bytes")
+                try:
+                    ok = await test_callable(mid)
+                except Exception as e:
+                    self.logger.debug(f"MTU test callable raised: {e}")
+                    ok = False
+
+                if ok:
+                    optimal = mid
+                    low = mid + 1
+                else:
+                    high = mid - 1
+
+            return optimal
+        except Exception as e:
+            self.logger.debug(f"Error in MTU binary search: {e}")
+            return 0
+
     async def test_download_mtu(self, domain: str, dns_server: str, dns_port: int, max_mtu: int, max_upload_chars: int) -> int:
         """
         Determine the optimal download MTU for DNS tunneling using binary search.
@@ -479,41 +497,11 @@ class MasterDnsVPNClient:
         self.logger.info(
             f"[Download MTU Test] Starting download MTU test to {dns_server}:{dns_port} for domain '{domain}' ...")
         try:
-            # Initial attempt with the maximum MTU
-            self.logger.debug(
-                f"[Download MTU Test] Attempting initial test with {max_mtu_candidate} bytes to {dns_server}:{dns_port} for domain '{domain}'")
-            if await self.perform_download_mtu_test(domain, dns_server, dns_port, max_mtu_candidate, max_upload_chars):
-                self.logger.success(
-                    f"[Download MTU Test] Maximum MTU <g>{max_mtu_candidate}</g> bytes is supported by {dns_server}:{dns_port} for domain '{domain}'")
-                return max_mtu_candidate
-            else:
-                max_mtu_candidate -= 1
-
-            # Binary search for the highest working MTU
-            while min_mtu <= max_mtu_candidate:
-                current_mtu = (min_mtu + max_mtu_candidate) // 2
-                self.logger.debug(
-                    f"[Download MTU Test] Testing <y>{current_mtu}</y> bytes to {dns_server}:{dns_port} for domain '{domain}'")
-
-                if current_mtu < 30:
-                    self.logger.debug(
-                        f"[Download MTU Test] Current MTU {current_mtu} bytes is below minimum threshold. Ending test.")
-                    break
-
-                if await self.perform_download_mtu_test(domain, dns_server, dns_port, current_mtu, max_upload_chars):
-                    optimal_mtu = current_mtu
-                    min_mtu = current_mtu + 1
-                    self.logger.debug(
-                        f"[Download MTU Test] Success at {current_mtu} bytes. Trying higher...")
-                else:
-                    max_mtu_candidate = current_mtu - 1
-                    self.logger.debug(
-                        f"[Download MTU Test] Failure at {current_mtu} bytes. Trying lower...")
-
-            if optimal_mtu > 29:
-                return optimal_mtu
-
-            return 0
+            # Use binary search helper for download MTU
+            test_fn = functools.partial(
+                self.perform_download_mtu_test, domain, dns_server, dns_port, max_upload_chars=max_upload_chars)
+            optimal_mtu = await self._binary_search_mtu(test_fn, min_mtu, max_mtu_candidate, min_threshold=30)
+            return optimal_mtu if optimal_mtu > 29 else 0
         except Exception as exc:
             self.logger.error(
                 f"[Download MTU Test] Exception occurred while testing download MTU to {dns_server}:{dns_port} for domain '{domain}': {exc}")
