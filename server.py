@@ -9,9 +9,7 @@ import os
 import socket
 import asyncio
 import signal
-import threading
 import random
-import time
 from typing import Optional, Any
 import ctypes
 from ctypes import wintypes
@@ -20,8 +18,7 @@ from server_config import master_dns_vpn_config
 
 from dns_utils.utils import getLogger, get_encrypt_key
 from dns_utils.DnsPacketParser import DnsPacketParser
-from dns_utils.DNS_ENUMS import PACKET_TYPES, Q_CLASSES, RESOURCE_RECORDS
-from dns_utils.UDPClient import UDPClient
+from dns_utils.DNS_ENUMS import PACKET_TYPES, RESOURCE_RECORDS
 
 # Ensure UTF-8 output for consistent logging
 try:
@@ -42,7 +39,6 @@ class MasterDnsVPNServer:
 
         self.config = master_dns_vpn_config.__dict__
         self.logger = getLogger(log_level=self.config.get("LOG_LEVEL", "INFO"))
-        self.vpn_packet_sign = self.config.get("VPN_PACKET_SIGN", "0032")
         self.allowed_domains = self.config.get("DOMAIN", [])
 
         self.recv_data_cache = {}
@@ -50,7 +46,6 @@ class MasterDnsVPNServer:
 
         self.sessions = {}
 
-        # Generate or load encryption key
         self.encrypt_key = get_encrypt_key(
             self.config.get("DATA_ENCRYPTION_METHOD", 1))
         self.logger.warning(
@@ -60,7 +55,7 @@ class MasterDnsVPNServer:
                                           encryption_method=self.config.get(
                                               "DATA_ENCRYPTION_METHOD", 1),
                                           encryption_key=self.encrypt_key)
-        # Background task references (used for fast shutdown)
+
         self._dns_task = None
         self._session_cleanup_task = None
 
@@ -94,38 +89,6 @@ class MasterDnsVPNServer:
         for session_id in inactive_sessions:
             del self.sessions[session_id]
             self.logger.info(f"Closed inactive session with ID: {session_id}")
-
-    async def solve_dns(self, query: bytes) -> bytes:
-        """
-        Solve DNS query by forwarding it to configured DNS servers asynchronously.
-        """
-        # TODO: Add allow list domains!
-        if not query:
-            self.logger.error("Empty DNS query received.")
-            return b''
-
-        dns_servers = self.config.get("DNS_SERVERS") or []
-        if not dns_servers:
-            self.logger.error("No DNS servers configured.")
-            return b''
-
-        dns_server = random.choice(dns_servers)
-        self.logger.debug(f"Forwarding DNS query to {dns_server}")
-
-        try:
-            # Use UDPClient async helper to simplify send/receive
-            udp_client = UDPClient(logger=self.logger, server_host=dns_server,
-                                   server_port=53, timeout=self.config.get("DNS_QUERY_TIMEOUT", 10.0))
-            result = await udp_client.send_and_receive_async(query, retries=3)
-            if not result:
-                self.logger.debug(f"No response from {dns_server}")
-                return b''
-            response, _addr = result
-            self.logger.debug(f"Received DNS response from {dns_server}")
-            return response
-        except Exception as e:
-            self.logger.error(f"Failed to get response from {dns_server}: {e}")
-        return b''
 
     async def handle_vpn_packet(self, data: bytes, parsed_packet: dict, addr) -> tuple[bool, Optional[bytes]]:
         """
@@ -187,6 +150,7 @@ class MasterDnsVPNServer:
             self.logger.debug(
                 f"Extracted VPN header from labels: {extracted_header}")
 
+            # @TODO: MOVE TO ANOTHER FUNCTION
             if packet_type == PACKET_TYPES["SERVER_UPLOAD_TEST"]:
                 self.logger.debug(
                     f"Received upload-test from {addr}; preparing response")
@@ -287,7 +251,7 @@ class MasterDnsVPNServer:
                 self.logger.error(
                     "UDP socket is not initialized for sending response.")
                 return False
-            # Ensure non-blocking socket and event loop available
+
             if self.loop is None:
                 self.loop = asyncio.get_running_loop()
             await self.loop.sock_sendto(self.udp_sock, response, addr)
@@ -319,9 +283,6 @@ class MasterDnsVPNServer:
         if vpn_packet:
             return
 
-        # Non-VPN request: try to forward (optional) or return server failure
-        # Forwarding disabled by default for safety — use solve_dns if enabled
-        # response = await self.solve_dns(data)
         response = None
         if not response:
             response = await self.dns_parser.server_fail_response(data)
@@ -339,26 +300,22 @@ class MasterDnsVPNServer:
         assert self.udp_sock is not None, "UDP socket is not initialized."
         assert self.loop is not None, "Event loop is not initialized."
         self.udp_sock.setblocking(False)
-        # Use a short timeout on recv so shutdown can be handled quickly
         while not self.should_stop.is_set():
             try:
                 try:
                     data, addr = await asyncio.wait_for(
                         self.loop.sock_recvfrom(self.udp_sock, 512), timeout=1.0)
                 except asyncio.TimeoutError:
-                    # Timeout: loop back to check should_stop
                     continue
             except OSError as e:
                 self.logger.error(
                     f"Socket error: {e}. Exiting DNS request handler.")
                 break
             except Exception as e:
-                # Unexpected; log and continue listening
                 self.logger.exception(
                     f"Unexpected error receiving DNS request: {e}")
                 continue
 
-            # Spawn a new task for each request
             try:
                 self.loop.create_task(self.handle_single_request(data, addr))
             except Exception as e:
@@ -400,8 +357,6 @@ class MasterDnsVPNServer:
         """Initialize sockets, start background tasks, and wait for shutdown signal."""
         try:
             self.logger.info("MasterDnsVPN Server starting ...")
-
-            # Set up event loop and UDP socket
             self.loop = asyncio.get_running_loop()
 
             host = self.config.get("UDP_HOST", "0.0.0.0")
@@ -414,52 +369,89 @@ class MasterDnsVPNServer:
                     socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             except Exception:
                 pass
+
             self.udp_sock.bind((host, port))
 
             self.logger.info(f"UDP socket bound on {host}:{port}")
 
-            # create new tasks for dns handling and session cleanup
             self._dns_task = self.loop.create_task(self.handle_dns_requests())
             self._session_cleanup_task = self.loop.create_task(
                 self._session_cleanup_loop())
 
             self.logger.info("MasterDnsVPN Server started successfully.")
 
-            # wait until stop is signalled
             try:
                 await self.should_stop.wait()
             except asyncio.CancelledError:
                 pass
-            finally:
-                try:
-                    if getattr(self, '_dns_task', None):
-                        self._dns_task.cancel()
-                except Exception:
-                    pass
-                try:
-                    if getattr(self, '_session_cleanup_task', None):
-                        self._session_cleanup_task.cancel()
-                except Exception:
-                    pass
-                await asyncio.gather(
-                    *(t for t in (getattr(self, '_dns_task', None),
-                      getattr(self, '_session_cleanup_task', None)) if t),
-                    return_exceptions=True)
-                # ensure socket closed
-                if self.udp_sock:
-                    try:
-                        self.udp_sock.close()
-                    except Exception:
-                        pass
-                self.logger.info("MasterDnsVPN Server stopped.")
 
+            await self.stop()
         except Exception as e:
             self.logger.exception(f"Failed to start MasterDnsVPN Server: {e}")
-            if self.udp_sock:
+            await self.stop()
+
+    async def stop(self) -> None:
+        """Signal the server to stop."""
+        try:
+            if getattr(self, '_dns_task', None):
+                self._dns_task.cancel()
+        except Exception:
+            pass
+
+        try:
+            if getattr(self, '_session_cleanup_task', None):
+                self._session_cleanup_task.cancel()
+        except Exception:
+            pass
+
+        try:
+            await asyncio.gather(
+                *(t for t in (getattr(self, '_dns_task', None),
+                              getattr(self, '_session_cleanup_task', None)) if t),
+                return_exceptions=True)
+        except Exception:
+            pass
+
+        if self.loop:
+            try:
+                self.loop.call_soon_threadsafe(self.should_stop.set)
+            except Exception:
                 try:
-                    self.udp_sock.close()
+                    if not self.should_stop.is_set():
+                        self.should_stop.set()
                 except Exception:
                     pass
+
+            try:
+                self.loop.call_soon_threadsafe(self._close_udp_socket)
+            except Exception:
+                pass
+
+            try:
+                self.loop.call_soon_threadsafe(
+                    self._cancel_background_tasks)
+            except Exception:
+                pass
+
+            try:
+                self.loop.call_soon_threadsafe(self.loop.stop)
+            except Exception:
+                pass
+        else:
+            if not self.should_stop.is_set():
+                try:
+                    self.should_stop.set()
+                except Exception:
+                    pass
+
+        if self.udp_sock:
+            try:
+                self.udp_sock.close()
+            except Exception:
+                pass
+
+        os.exit(0)
+        self.logger.info("MasterDnsVPN Server stopped.")
 
     def _signal_handler(self, signum: int, frame: Any = None) -> None:
         """
@@ -467,59 +459,15 @@ class MasterDnsVPNServer:
         """
         self.logger.info(
             f"Received signal {signum}, shutting down MasterDnsVPN Server ...")
-        # Use call_soon_threadsafe to interact with the asyncio loop from a signal handler
+
         try:
             if self.loop:
-                try:
-                    # Wake the main task waiting on the event
-                    self.loop.call_soon_threadsafe(self.should_stop.set)
-                except Exception:
-                    # Fallback if loop isn't running yet
-                    try:
-                        if not self.should_stop.is_set():
-                            self.should_stop.set()
-                    except Exception:
-                        pass
-
-                # Close UDP socket safely on the loop thread
-                try:
-                    self.loop.call_soon_threadsafe(self._close_udp_socket)
-                except Exception:
-                    # fallback to immediate close
-                    if self.udp_sock:
-                        try:
-                            self.udp_sock.close()
-                            self.logger.info("UDP socket closed.")
-                        except Exception as e:
-                            self.logger.error(f"Error closing UDP socket: {e}")
-
-                # Cancel background tasks on the loop thread for faster shutdown
-                try:
-                    self.loop.call_soon_threadsafe(
-                        self._cancel_background_tasks)
-                except Exception:
-                    pass
-
-                # Stop the event loop from the loop thread
-                try:
-                    self.loop.call_soon_threadsafe(self.loop.stop)
-                except Exception:
-                    pass
+                asyncio.run_coroutine_threadsafe(self.stop(), self.loop)
             else:
-                # No loop available: set event and close socket directly
-                if not self.should_stop.is_set():
-                    try:
-                        self.should_stop.set()
-                    except Exception:
-                        pass
-                if self.udp_sock:
-                    try:
-                        self.udp_sock.close()
-                        self.logger.info("UDP socket closed.")
-                    except Exception as e:
-                        self.logger.error(f"Error closing UDP socket: {e}")
-        except Exception as e:
-            self.logger.error(f"Error in signal handler: {e}")
+                asyncio.run(self.stop())
+        except Exception:
+            os._exit(0)
+            pass
 
         self.logger.info("Shutdown signalled.")
 
@@ -539,7 +487,6 @@ class MasterDnsVPNServer:
 def main():
     server = MasterDnsVPNServer()
     try:
-        # Prefer manual loop management to reliably register loop-level signal handlers
         if sys.platform == "win32":
             asyncio.set_event_loop_policy(
                 asyncio.WindowsSelectorEventLoopPolicy())
@@ -547,7 +494,6 @@ def main():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
-        # Try to register loop-level handlers (more reliable for asyncio shutdown)
         try:
             loop.add_signal_handler(
                 signal.SIGINT, lambda: server._signal_handler(signal.SIGINT, None))
@@ -569,17 +515,14 @@ def main():
         try:
             loop.run_until_complete(server.start())
         except KeyboardInterrupt:
-            # Fallback: ensure handler runs
             try:
                 server._signal_handler(signal.SIGINT, None)
             except Exception:
                 pass
-            print("\n🛑 Server stopped by user (Ctrl+C). Goodbye!")
+            print("\nServer stopped by user (Ctrl+C). Goodbye!")
             return
-        # On Windows, also register a ConsoleCtrlHandler to catch CTRL events
         if sys.platform == 'win32':
             try:
-                # Define handler prototype
                 HandlerRoutine = ctypes.WINFUNCTYPE(
                     wintypes.BOOL, wintypes.DWORD)
 
@@ -596,14 +539,14 @@ def main():
             except Exception:
                 pass
     except KeyboardInterrupt:
-        print("\n🛑 Server stopped by user (Ctrl+C). Goodbye!")
+        print("\nServer stopped by user (Ctrl+C). Goodbye!")
     except Exception as e:
-        print(f"🛑 Error starting the server: {e}")
+        print(f"{e}")
 
     try:
         os._exit(0)
     except Exception as e:
-        print(f"🛑 Error while stopping the server: {e}")
+        print(f"Error while stopping the server: {e}")
         exit()
 
 
