@@ -90,7 +90,7 @@ class UDPClient:
         """
         for attempt in range(retries):
             if attempt > 0:
-                self.logger.info(f"Retry attempt {attempt}/{retries-1}")
+                self.logger.debug(f"Retry attempt {attempt}/{retries-1}")
             if self.send_bytes(data):
                 response, addr = self.receive_bytes()
                 if response is not None:
@@ -133,7 +133,7 @@ class UDPClient:
 
         for attempt in range(retries):
             if attempt > 0:
-                self.logger.info(f"Retry attempt {attempt}/{retries-1}")
+                self.logger.debug(f"Retry attempt {attempt}/{retries-1}")
             try:
                 await loop.sock_sendto(self.sock, data, (self.server_host, self.server_port))
                 try:

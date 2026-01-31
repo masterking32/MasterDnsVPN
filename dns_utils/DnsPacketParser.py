@@ -480,7 +480,7 @@ class DnsPacketParser:
                 xored.append(data[i] ^ key[i % key_length])
             return bytes(xored)
         except Exception as e:
-            self.logger.error("Failed to XOR data", e)
+            self.logger.error(f"Failed to XOR data: {e}")
             return b''
 
     def data_encrypt(self, data: bytes, key: bytes = None, method: int = None) -> bytes:

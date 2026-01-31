@@ -132,8 +132,7 @@ class MasterDnsVPNServer:
         Handle VPN packet logic and return (is_vpn_packet, response_bytes).
         """
         try:
-            self.logger.info(
-                f"Handling VPN packet from {addr}")
+            self.logger.debug(f"Handling VPN packet from {addr}")
 
             questions = parsed_packet.get('questions')
             if not questions:
@@ -189,8 +188,8 @@ class MasterDnsVPNServer:
                 f"Extracted VPN header from labels: {extracted_header}")
 
             if packet_type == PACKET_TYPES["SERVER_UPLOAD_TEST"]:
-                self.logger.info(
-                    f"Received CLIENT_TEST packet from {addr}, sending SERVER_UPLOAD_TEST response.")
+                self.logger.debug(
+                    f"Received upload-test from {addr}; preparing response")
 
                 txt_str = "1"
                 data_bytes = self.dns_parser.codec_transform(
