@@ -587,6 +587,21 @@ class DnsPacketParser:
         # Note: High-level ciphers (AES/ChaCha) implementation remains as per your file
         return self.data_encrypt(data) if encrypt else self.data_decrypt(data)
 
+    async def build_request_dns_query(self, domain: str, session_id: int, packet_type: int, data: bytes, mtu_chars: int, encode_data: bool = True, qType: int = RESOURCE_RECORDS['TXT']) -> bytes:
+        labels = self.generate_labels(
+            domain, session_id, packet_type, data, mtu_chars, encode_data)
+
+        if not labels or len(labels) == 0:
+            self.logger.debug("No labels generated for DNS query.")
+            return b''
+
+        packets = []
+        for label in labels:
+            packet = await self.simple_question_packet(label, qType)
+            packets.append(packet)
+
+        return packets
+
     def generate_labels(self, domain: str, session_id: int, packet_type: int, data: bytes, mtu_chars: int, encode_data: bool = True) -> str:
         """
         Generate DNS labels with encoded VPN header and data.

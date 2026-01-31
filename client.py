@@ -154,19 +154,132 @@ class MasterDnsVPNClient:
             "Selected connection not found in connections map.")
         return None
 
-    async def test_upload_mtu_size(self) -> None:
+    async def _binary_search_mtu(self, test_callable, min_mtu: int, max_mtu: int, min_threshold: int = 30) -> int:
+        """
+        Generic binary search for MTU tests.
+        `test_callable(size)` should be an async callable returning True on success.
+        Returns the highest successful MTU or 0 if none.
+        """
+        # Quick check max
+        try:
+            if max_mtu <= 0:
+                return 0
+
+            if await test_callable(max_mtu):
+                return max_mtu
+            max_candidate = max_mtu - 1
+
+            low = min_mtu
+            high = max_candidate
+            optimal = 0
+
+            while low <= high:
+                mid = (low + high) // 2
+                if mid < min_threshold:
+                    break
+                try:
+                    ok = await test_callable(mid)
+                except Exception as e:
+                    self.logger.debug(f"MTU test callable raised: {e}")
+                    ok = False
+
+                if ok:
+                    optimal = mid
+                    low = mid + 1
+                else:
+                    high = mid - 1
+
+            return optimal
+        except Exception as e:
+            self.logger.debug(f"Error in MTU binary search: {e}")
+            return 0
+
+    async def send_upload_mtu_test(self, domain: str, dns_server: str, dns_port: int, mtu_size: int) -> bool:
+
+        mtu_char_len, mtu_bytes = self.dns_packet_parser.calculate_upload_mtu(
+            domain=domain,
+            mtu=mtu_size
+        )
+
+        self.logger.debug(
+            f"Sending upload MTU test of size {mtu_bytes} to domain {domain} via resolver {dns_server}...")
+
+        if (mtu_char_len < 29):
+            self.logger.error(
+                f"Calculated MTU character length too small: {mtu_char_len} characters for domain {domain}")
+            return False
+
+        random_hex = generate_random_hex_text(mtu_char_len).lower()
+        dns_queries = await self.dns_packet_parser.build_request_dns_query(
+            domain=domain,
+            session_id=random.randint(0, 255),
+            packet_type=PACKET_TYPES["SERVER_UPLOAD_TEST"],
+            data=random_hex,
+            mtu_chars=mtu_char_len,
+            encode_data=False,
+            qType=RESOURCE_RECORDS["TXT"]
+        )
+
+        if dns_queries is None or len(dns_queries) != 1:
+            self.logger.debug(
+                f"Failed to build DNS query for upload MTU test to domain {domain} via resolver {dns_server}.")
+            return False
+
+        # TODO SEND TO UDP AND WAIT FOR RESPONSE
+        return False
+
+    async def test_upload_mtu_size(self, domain: str, dns_server: str, dns_port: int, default_mtu: int) -> tuple:
         """Test and adjust upload MTU size based on network conditions."""
-        # Placeholder for MTU testing logic
-        pass
+        self.logger.debug(
+            f"Testing upload MTU size for domain {domain} via resolver {dns_server}...")
+
+        try:
+            mtu_char_len, mtu_bytes = self.dns_packet_parser.calculate_upload_mtu(
+                domain=domain,
+                mtu=0
+            )
+
+            if default_mtu > 512 or default_mtu <= 0:
+                default_mtu = 512
+
+            if mtu_bytes > default_mtu:
+                mtu_bytes = default_mtu
+
+            min_mtu = 0
+            max_mtu_candidate = default_mtu
+            optimal_mtu = 0
+
+            test_fn = functools.partial(
+                self.send_upload_mtu_test, domain, dns_server, dns_port)
+            optimal_mtu = await self._binary_search_mtu(test_fn, min_mtu, max_mtu_candidate, min_threshold=30)
+
+            if optimal_mtu > 29:
+                mtu_char_len, mtu_bytes = self.dns_packet_parser.calculate_upload_mtu(
+                    domain=domain, mtu=optimal_mtu)
+                return True, mtu_bytes, mtu_char_len
+
+        except Exception as e:
+            self.logger.debug(
+                f"Error calculating initial upload MTU for domain {domain} via resolver {dns_server}: {e}")
+
+        return False, 0, 0
 
     async def test_download_mtu_size(self) -> None:
         """Test and adjust download MTU size based on network conditions."""
         # Placeholder for MTU testing logic
         pass
 
-    async def test_mtu_sizes(self) -> None:
+    async def test_mtu_sizes(self) -> Optional[bool]:
         """Test and adjust MTU sizes based on network conditions."""
+
+        self.logger.info("=" * 80)
+        self.logger.info(
+            "<y>Testing upload MTU sizes for all resolver-domain pairs...</y>")
+
         for connection in self.connections_map:
+            if not connection or self.should_stop.is_set():
+                continue
+
             domain = connection.get("domain")
             resolver = connection.get("resolver")
             dns_server = resolver
@@ -179,6 +292,26 @@ class MasterDnsVPNClient:
             connection["upload_mtu_chars"] = 0
             connection["download_mtu_bytes"] = 0
             connection['packet_loss'] = 100
+
+            is_valid, mtu_bytes, mtu_char_len = await self.test_upload_mtu_size(
+                domain=domain,
+                dns_server=dns_server,
+                dns_port=dns_port,
+                default_mtu=upload_mtu
+            )
+
+            if is_valid and (self.min_upload_mtu == 0 or mtu_bytes >= self.min_upload_mtu):
+                connection["is_valid"] = True
+                connection["upload_mtu_bytes"] = mtu_bytes
+                connection["upload_mtu_chars"] = mtu_char_len
+                self.logger.info(
+                    f"<green>Connection valid for domain <cyan>{domain}</cyan> via resolver <cyan>{resolver}</cyan> with upload MTU <cyan>{mtu_bytes}</cyan> bytes ({mtu_char_len} chars).</green>")
+            else:
+                self.logger.info(
+                    f"Connection invalid for domain {domain} via resolver <red>{resolver}</red>. <red>Upload MTU test failed or below minimum.</red>")
+
+        self.logger.info(
+            "Testing download MTU sizes for all valid resolver-domain pairs...")
 
     async def sleep(self, seconds: float) -> None:
         """Async sleep helper."""
@@ -206,7 +339,7 @@ class MasterDnsVPNClient:
             self.loop = asyncio.get_running_loop()
 
             self.logger.info("=" * 80)
-            self.logger.success("Starting MasterDnsVPN Client...")
+            self.logger.success("<g>Starting MasterDnsVPN Client...</g>")
 
             self.logger.debug(f"Checking configuration...")
             if not self.domains:
@@ -222,13 +355,17 @@ class MasterDnsVPNClient:
                 return
 
             self.logger.debug(f"Configuration looks good.")
-            self.logger.info("=" * 80)
 
             while not self.should_stop.is_set():
+                self.logger.info("=" * 80)
+                self.logger.info(
+                    "<green>Running MasterDnsVPN Client...</green>")
                 self.packets_queue.clear()
                 await self.run_client()
-                self.logger.info("Retrying in 10 second...")
-                await self.sleep(3)
+                self.logger.info("=" * 80)
+                self.logger.error(
+                    "<yellow>Retrying in 10 second...</yellow>")
+                await self.sleep(10)
 
         except asyncio.CancelledError:
             self.logger.info("MasterDnsVPN Client is stopping...")
