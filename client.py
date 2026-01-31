@@ -167,33 +167,35 @@ class MasterDnsVPNClient:
         )
 
         try:
-            if not udp_client.connect():
-                self.logger.debug("Failed to connect UDP client.")
-                return None, None, None
-
-            request_id = int.from_bytes(data[0:2], byteorder='big')
-
-            if not udp_client.send_bytes(data):
-                self.logger.debug("Failed to send DNS request.")
-                return None, None, None
-
-            response_bytes, addr = udp_client.receive_bytes()
-            if response_bytes is None:
-                self.logger.debug("No response received from DNS server.")
-                return None, None, None
-
-            response_id_answered = int.from_bytes(
-                response_bytes[0:2], byteorder='big')
-            if response_id_answered != request_id:
+            result = await udp_client.send_and_receive_async(data, retries=3)
+            if not result:
                 self.logger.debug(
-                    f"Response ID {response_id_answered} does not match request ID {request_id}. Discarding response.")
+                    "No response received from DNS server (async).")
                 return None, None, None
+
+            response_bytes, addr = result
+
+            # verify transaction id
+            try:
+                request_id = int.from_bytes(data[0:2], byteorder='big')
+                response_id_answered = int.from_bytes(
+                    response_bytes[0:2], byteorder='big')
+                if response_id_answered != request_id:
+                    self.logger.debug(
+                        f"Response ID {response_id_answered} does not match request ID {request_id}. Discarding response.")
+                    return None, None, None
+            except Exception:
+                # if parsing ids fails, proceed to parsing but log
+                self.logger.debug(
+                    "Failed to parse DNS transaction ID from response.")
 
             response_parsed = await self.dns_packet_parser.parse_dns_packet(response_bytes)
-
             return response_bytes, response_parsed, addr
         finally:
-            udp_client.close()
+            try:
+                await udp_client.close_async()
+            except Exception:
+                udp_client.close()
 
     async def parse_dns_response(self, response_parsed: dict) -> tuple:
         """Parse the DNS response and extract relevant information."""

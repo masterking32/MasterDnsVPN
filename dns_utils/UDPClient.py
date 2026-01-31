@@ -5,6 +5,7 @@
 
 import socket
 import time
+import asyncio
 from typing import Optional
 
 
@@ -109,3 +110,55 @@ class UDPClient:
                 self.logger.debug(f"Error closing socket: {e}")
             self.sock = None
         self.logger.debug("UDP client cleanup complete")
+
+    async def send_and_receive_async(self, data: bytes, retries: int = 3) -> Optional[tuple[bytes, tuple]]:
+        """
+        Async send and receive using asyncio loop.sock_sendto / sock_recvfrom.
+        Returns (response_bytes, addr) or None on failure.
+        """
+        loop = asyncio.get_running_loop()
+
+        if not isinstance(data, (bytes, bytearray)):
+            self.logger.debug("Data must be bytes")
+            return None
+
+        # Ensure socket exists and is non-blocking for asyncio
+        if self.sock is None:
+            try:
+                self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                self.sock.setblocking(False)
+            except Exception as e:
+                self.logger.debug(f"Async socket creation failed: {e}")
+                return None
+
+        for attempt in range(retries):
+            if attempt > 0:
+                self.logger.info(f"Retry attempt {attempt}/{retries-1}")
+            try:
+                await loop.sock_sendto(self.sock, data, (self.server_host, self.server_port))
+                try:
+                    resp, addr = await asyncio.wait_for(loop.sock_recvfrom(self.sock, self.buffer_size), timeout=self.timeout)
+                    self.logger.debug(
+                        f"Async received {len(resp)} bytes from {addr}")
+                    return resp, addr
+                except asyncio.TimeoutError:
+                    self.logger.debug(
+                        "Timeout: No response from server (async)")
+            except Exception as e:
+                self.logger.debug(f"Failed to send data async: {e}")
+
+            if attempt < retries - 1:
+                await asyncio.sleep(0.5)
+
+        self.logger.debug("All async retry attempts failed")
+        return None
+
+    async def close_async(self) -> None:
+        """Async-friendly close for the socket."""
+        if self.sock:
+            try:
+                self.sock.close()
+                self.logger.debug("Async socket closed")
+            except Exception as e:
+                self.logger.debug(f"Error closing async socket: {e}")
+            self.sock = None

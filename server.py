@@ -19,6 +19,7 @@ from server_config import master_dns_vpn_config
 from dns_utils.utils import getLogger, get_encrypt_key
 from dns_utils.DnsPacketParser import DnsPacketParser
 from dns_utils.DNS_ENUMS import PACKET_TYPES, Q_CLASSES, RESOURCE_RECORDS
+from dns_utils.UDPClient import UDPClient
 
 # Ensure UTF-8 output for consistent logging
 try:
@@ -98,34 +99,27 @@ class MasterDnsVPNServer:
             self.logger.error("Empty DNS query received.")
             return b''
 
-        if not self.config.get("DNS_SERVERS"):
+        dns_servers = self.config.get("DNS_SERVERS") or []
+        if not dns_servers:
             self.logger.error("No DNS servers configured.")
             return b''
 
-        dns_server = random.choice(self.config["DNS_SERVERS"])
-        try:
-            if self.udp_sock is None or self.udp_sock.fileno() == -1:
-                self.logger.warning(
-                    "UDP socket is closed. Exiting DNS solving.")
-                return b''
+        dns_server = random.choice(dns_servers)
+        self.logger.debug(f"Forwarding DNS query to {dns_server}")
 
-            self.logger.debug(f"Forwarding DNS query to {dns_server}")
-            loop = asyncio.get_running_loop()
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                sock.setblocking(False)
-                await loop.sock_sendto(sock, query, (dns_server, 53))
-                try:
-                    response, _ = await asyncio.wait_for(loop.sock_recvfrom(sock, 65507), timeout=self.config.get("DNS_QUERY_TIMEOUT", 10.0))
-                except asyncio.TimeoutError:
-                    self.logger.error(
-                        f"Timeout waiting for response from {dns_server}")
-                    return b''
-                self.logger.debug(
-                    f"Received DNS response from {dns_server}")
-                return response
+        try:
+            # Use UDPClient async helper to simplify send/receive
+            udp_client = UDPClient(logger=self.logger, server_host=dns_server,
+                                   server_port=53, timeout=self.config.get("DNS_QUERY_TIMEOUT", 10.0))
+            result = await udp_client.send_and_receive_async(query, retries=3)
+            if not result:
+                self.logger.debug(f"No response from {dns_server}")
+                return b''
+            response, _addr = result
+            self.logger.debug(f"Received DNS response from {dns_server}")
+            return response
         except Exception as e:
-            self.logger.error(
-                f"Failed to get response from {dns_server}: {e}")
+            self.logger.error(f"Failed to get response from {dns_server}: {e}")
         return b''
 
     async def handle_vpn_packet(self, data: bytes, parsed_packet: dict, addr) -> tuple[bool, Optional[bytes]]:
