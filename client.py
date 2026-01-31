@@ -197,6 +197,24 @@ class MasterDnsVPNClient:
             except Exception:
                 udp_client.close()
 
+    async def _query_and_parse(self, dns_server: str, dns_port: int, question_packet: bytes, timeout: float = 5.0, buffer_size: int = 65507):
+        """Helper: send a question packet, parse response and return parsed tuple.
+
+        Returns: (is_VPN_packet, session_id, packet_type, answers) or (None, None, None, None)
+        """
+        response_bytes, response_parsed, addr = await self.dns_request(
+            dns_server, dns_port, question_packet, timeout=timeout, buffer_size=buffer_size)
+
+        if response_bytes is None or response_parsed is None:
+            return None, None, None, None
+
+        try:
+            return await self.parse_dns_response(response_parsed)
+        except Exception as e:
+            self.logger.debug(
+                f"Failed to parse DNS response from {dns_server}: {e}")
+            return None, None, None, None
+
     async def parse_dns_response(self, response_parsed: dict) -> tuple:
         """Parse the DNS response and extract relevant information."""
 
@@ -304,15 +322,11 @@ class MasterDnsVPNClient:
                     qType=RESOURCE_RECORDS["TXT"]
                 )
 
-                response_bytes, response_parsed, addr = await self.dns_request(
+                is_VPN_packet, session_id, packet_type, answers = await self._query_and_parse(
                     dns_server, dns_port, test_packet, timeout=5.0, buffer_size=mtu_bytes + 512)
 
-                if response_bytes is not None and response_parsed is not None:
-                    is_VPN_packet, session_id, packet_type, answers = await self.parse_dns_response(
-                        response_parsed)
-
-                    if is_VPN_packet and packet_type == PACKET_TYPES["SERVER_UPLOAD_TEST"]:
-                        return True
+                if is_VPN_packet and packet_type == PACKET_TYPES["SERVER_UPLOAD_TEST"]:
+                    return True
             elif len(labels) == 0:
                 self.logger.debug(
                     "Failed to generate labels for MTU test.")
@@ -398,7 +412,7 @@ class MasterDnsVPNClient:
     async def perform_download_mtu_test(self, domain: str, dns_server: str, dns_port: int, mtu: int, max_upload_chars: int) -> bool:
         """Perform a single download MTU test."""
         try:
-            # convert mtu to bytes
+            # convert mtu to bytes and prepare label
             mtu_bytes = mtu.to_bytes(2, byteorder='big')
             mtu_encrypt = self.dns_packet_parser.codec_transform(
                 mtu_bytes, encrypt=True)
@@ -407,52 +421,44 @@ class MasterDnsVPNClient:
             mtu_len = len(mtu_encode) + 1  # +1 for the dot separator
             upload_mtu = max_upload_chars - mtu_len
             payload_data = generate_random_hex_text(upload_mtu).lower()
+
             labels = self.dns_packet_parser.generate_labels(
                 domain=domain,
                 session_id=random.randint(0, 255),
                 packet_type=PACKET_TYPES["SERVER_DOWNLOAD_TEST"],
                 data=payload_data,
                 mtu_chars=upload_mtu,
-                encode_data=False
+                encode_data=False,
             )
 
-            if labels is not None and len(labels) > 0:
-                label = mtu_encode + "." + labels[0]
+            if not labels:
+                self.logger.debug(
+                    "Failed to generate labels for download MTU test.")
+                return False
 
-                test_packet = await self.dns_packet_parser.simple_question_packet(
-                    domain=label,
-                    qType=RESOURCE_RECORDS["TXT"]
-                )
+            label = mtu_encode + "." + labels[0]
+            test_packet = await self.dns_packet_parser.simple_question_packet(domain=label, qType=RESOURCE_RECORDS["TXT"])
 
-                response_bytes, response_parsed, addr = await self.dns_request(
-                    dns_server, dns_port, test_packet, timeout=5.0)
+            is_VPN_packet, session_id, packet_type, answers = await self._query_and_parse(dns_server, dns_port, test_packet, timeout=5.0)
 
-                if response_bytes is not None and response_parsed is not None:
-                    is_VPN_packet, session_id, packet_type, answers = await self.parse_dns_response(
-                        response_parsed)
+            if not is_VPN_packet or packet_type != PACKET_TYPES["SERVER_DOWNLOAD_TEST"]:
+                self.logger.debug(
+                    f"Download MTU test failed: unexpected response from {dns_server}")
+                return False
 
-                    if is_VPN_packet and packet_type == PACKET_TYPES["SERVER_DOWNLOAD_TEST"]:
-                        if ":".encode() not in answers:
-                            self.logger.debug(
-                                "Download MTU test failed: Invalid response format.")
-                            return False
+            if b":" not in answers:
+                self.logger.debug(
+                    "Download MTU test failed: Invalid response format.")
+                return False
 
-                        received_mtu_encrypted, _ = answers.split(
-                            b":", 1)
-                        download_size = self.dns_packet_parser.codec_transform(
-                            received_mtu_encrypted, encrypt=False)
-                        if download_size == mtu_bytes:
-                            self.logger.debug(
-                                f"Download MTU test successful for {mtu} bytes to {dns_server}:{dns_port} for domain {domain}.")
-                            return True
-                elif len(labels) == 0:
-                    self.logger.debug(
-                        "Failed to generate labels for download MTU test.")
-                    return False
-                elif len(labels) > 1:
-                    self.logger.debug(
-                        "Generated multiple labels for download MTU test; expected only one.")
-                    return False
+            received_mtu_encrypted, _ = answers.split(b":", 1)
+            download_size = self.dns_packet_parser.codec_transform(
+                received_mtu_encrypted, encrypt=False)
+            if download_size == mtu_bytes:
+                self.logger.debug(
+                    f"Download MTU test successful for {mtu} bytes to {dns_server}:{dns_port} for domain {domain}.")
+                return True
+
             self.logger.debug(
                 f"Download MTU test failed for {mtu} bytes to {dns_server}:{dns_port} for domain {domain}.")
             return False

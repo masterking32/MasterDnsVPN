@@ -274,6 +274,25 @@ class MasterDnsVPNServer:
                 f"Error handling VPN packet from {addr}: {e}")
             return False, None
 
+    async def send_udp_response(self, response: bytes, addr) -> bool:
+        """Async send helper to write UDP response to addr using the server socket."""
+        if not response or addr is None:
+            return False
+        try:
+            if self.udp_sock is None:
+                self.logger.error(
+                    "UDP socket is not initialized for sending response.")
+                return False
+            # Ensure non-blocking socket and event loop available
+            if self.loop is None:
+                self.loop = asyncio.get_running_loop()
+            await self.loop.sock_sendto(self.udp_sock, response, addr)
+            self.logger.debug(f"Sent DNS response to {addr}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to send DNS response to {addr}: {e}")
+            return False
+
     async def handle_single_request(self, data, addr):
         """
         Handle a single DNS request in its own task.
@@ -281,47 +300,33 @@ class MasterDnsVPNServer:
         if data is None or addr is None:
             self.logger.error("Invalid data or address in DNS request.")
             return
-
         self.logger.debug(f"Received DNS request from {addr}")
+
         parsed_packet = await self.dns_parser.parse_dns_packet(data)
-        self.logger.debug(
-            f"Parsed DNS packet from {addr}: {parsed_packet}")
+        self.logger.debug(f"Parsed DNS packet from {addr}: {parsed_packet}")
 
         # Check for VPN packet
         vpn_packet, vpn_response = await self.handle_vpn_packet(data, parsed_packet, addr)
         if vpn_response:
-            try:
-                self.udp_sock.sendto(vpn_response, addr)
-                self.logger.debug(f"Sent VPN DNS response to {addr}")
-            except Exception as e:
-                self.logger.error(
-                    f"Failed to send VPN DNS response to {addr}: {e}")
+            await self.send_udp_response(vpn_response, addr)
             return
 
+        # If it was a VPN packet but no response to send, nothing more to do
         if vpn_packet:
             return
 
-        # Normal DNS query processing
+        # Non-VPN request: try to forward (optional) or return server failure
+        # Forwarding disabled by default for safety — use solve_dns if enabled
         # response = await self.solve_dns(data)
-        # if not response:
-        #     self.logger.error(
-        #         f"No response generated for DNS request from {addr}")
-        #     response = await self.dns_parser.server_fail_response(data)
-        #     if not response:
-        #         self.logger.error(
-        #             f"Failed to generate Server Failure response for DNS request from {addr}")
-        #         return
-
-        # DNS query forwarding is disabled for security reasons. Forwarding may allow attackers to abuse your server via DNS-based attacks.
+        response = None
         if not response:
             response = await self.dns_parser.server_fail_response(data)
+            if not response:
+                self.logger.error(
+                    f"Failed to generate Server Failure response for DNS request from {addr}")
+                return
 
-        try:
-            self.udp_sock.sendto(response, addr)
-            self.logger.debug(f"Sent DNS response to {addr}")
-        except Exception as e:
-            self.logger.error(
-                f"Failed to send DNS response to {addr}: {e}")
+        await self.send_udp_response(response, addr)
 
     async def handle_dns_requests(self) -> None:
         """
