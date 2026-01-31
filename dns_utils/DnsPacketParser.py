@@ -29,7 +29,7 @@ class DnsPacketParser:
 
         self.key = self._derive_key(encryption_key)
 
-        self.base9x_alphabet = r'0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!#$%&\()*+,-/;<=>?@[\\]^_`{|}~ '
+        self.base9x_alphabet = r'0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!#$%&()*+,-/;<=>?@[]^_`{|}~'
 
     def _derive_key(self, raw_key: str) -> bytes:
         """Derives a fixed-length key based on the encryption method."""
@@ -42,18 +42,6 @@ class DnsPacketParser:
         elif self.encryption_method == 3:
             return hashlib.md5(b_key).digest()
         return b_key.ljust(target, b'\0')[:target]
-
-    def fix_key_length(self, key: bytes, desired_length: int) -> bytes:
-        if len(key) == desired_length:
-            return key
-        if desired_length == 32:
-            return hashlib.sha256(key).digest()
-        elif desired_length == 16:
-            return hashlib.md5(key).digest()
-
-        while len(key) < desired_length:
-            key += key
-        return key[:desired_length]
 
     """
     Default DNS Packet Parsers
@@ -439,18 +427,14 @@ class DnsPacketParser:
         """
         Encode bytes to base lowercase (0-9, a-z) or mixed case.
         """
-        alphabet = '0123456789abcdefghijklmnopqrstuvwxyz'  # base36
-        if lowerCaseOnly is False:
+        alphabet = '0123456789abcdefghijklmnopqrstuvwxyz'
+        if not lowerCaseOnly:
             alphabet = self.base9x_alphabet
 
-        data_to_encode = b'\x01' + data_bytes
-
-        num = int.from_bytes(data_to_encode, byteorder='big')
-        if num == 0:
-            return alphabet[0]
+        base = len(alphabet)
+        num = int.from_bytes(b'\x01' + data_bytes, byteorder='big')
 
         encoded = ''
-        base = len(alphabet)
         while num > 0:
             num, rem = divmod(num, base)
             encoded = alphabet[rem] + encoded
@@ -460,7 +444,8 @@ class DnsPacketParser:
         """
         Decode base lowercase (0-9, a-z) or mixed case string to bytes.
         """
-        alphabet = '0123456789abcdefghijklmnopqrstuvwxyz'  # base36
+
+        alphabet = '0123456789abcdefghijklmnopqrstuvwxyz'
         if not lowerCaseOnly:
             alphabet = self.base9x_alphabet
 
@@ -469,17 +454,18 @@ class DnsPacketParser:
         num = 0
         for char in encoded_str:
             if char not in char_map:
-                raise ValueError(
-                    f"Invalid character '{char}' in encoded string")
+                continue
             num = num * base + char_map[char]
 
+        if num == 0:
+            return b'\x00'
+
         byte_length = (num.bit_length() + 7) // 8
+        decoded = num.to_bytes(byte_length, byteorder='big')
 
-        if byte_length == 0:
-            return b''
-
-        decoded_bytes = num.to_bytes(byte_length, byteorder='big')
-        return decoded_bytes[1:]
+        if decoded.startswith(b'\x01'):
+            return decoded[1:]
+        return decoded
 
     def xor_data(self, data: bytes, key: bytes) -> bytes:
         """
@@ -787,10 +773,13 @@ class DnsPacketParser:
 
         try:
             label_parts = labels.split('.')
-            # last part is the header
             header_encoded = label_parts[-1]
             header_decrypted = self.decode_and_decrypt_data(
                 header_encoded, lowerCaseOnly=True)
+
+            if not header_decrypted or len(header_decrypted) != 2:
+                return b''
+
             return header_decrypted
         except Exception as e:
             self.logger.error(

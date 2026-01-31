@@ -5,9 +5,11 @@
 
 import random
 import sys
+import os
 import socket
 import asyncio
 from typing import Optional
+
 
 from client_config import master_dns_vpn_config
 
@@ -168,14 +170,27 @@ class MasterDnsVPNClient:
             if not udp_client.connect():
                 self.logger.debug("Failed to connect UDP client.")
                 return None, None, None
+
+            request_id = int.from_bytes(data[0:2], byteorder='big')
+
             if not udp_client.send_bytes(data):
                 self.logger.debug("Failed to send DNS request.")
                 return None, None, None
+
             response_bytes, addr = udp_client.receive_bytes()
             if response_bytes is None:
                 self.logger.debug("No response received from DNS server.")
                 return None, None, None
+
+            response_id_answered = int.from_bytes(
+                response_bytes[0:2], byteorder='big')
+            if response_id_answered != request_id:
+                self.logger.debug(
+                    f"Response ID {response_id_answered} does not match request ID {request_id}. Discarding response.")
+                return None, None, None
+
             response_parsed = await self.dns_packet_parser.parse_dns_packet(response_bytes)
+
             return response_bytes, response_parsed, addr
         finally:
             udp_client.close()
@@ -241,8 +256,9 @@ class MasterDnsVPNClient:
         packet_type = extracted_header[1]
 
         if packet_type not in PACKET_TYPES.values():
-            self.logger.error(f"Unknown packet type: {packet_type}")
-            return False, False, False, False
+            self.logger.debug(
+                f"Received non-VPN or stray packet type: {packet_type}")
+            return False, None, None, None
 
         is_VPN_packet = True
         merged_answers = "".join(
@@ -624,41 +640,169 @@ class MasterDnsVPNClient:
         )
         self.logger.warning("=" * 80)
 
+    async def send_new_session_request(self, connection: dict, retry_id: int = 0) -> bool:
+        """Send a new session request to the server."""
+        domain = connection.get("domain")
+        resolver = connection.get("resolver")
+        dns_server = resolver
+        dns_port = 53
+
+        if retry_id >= 3:
+            self.logger.error(
+                f"Exceeded maximum retries for new session request to {dns_server}:{dns_port} for domain '{domain}'.")
+            return False
+
+        self.logger.debug(
+            f"Sending new session request to {dns_server}:{dns_port} for domain '{domain}'...")
+
+        random_bytes = generate_random_hex_text(random.randint(2, 5)).lower()
+
+        labels = self.dns_packet_parser.generate_labels(
+            domain=domain,
+            session_id=random.randint(0, 255),
+            packet_type=PACKET_TYPES["NEW_SESSION"],
+            data=random_bytes,
+            mtu_chars=self.max_upload_mtu,
+            encode_data=False
+        )
+
+        if labels is None or len(labels) == 0:
+            self.logger.error("Failed to generate labels for new session.")
+            return await self.send_new_session_request(connection, retry_id=retry_id + 1)
+
+        label = labels[0]
+        new_session_packet = await self.dns_packet_parser.simple_question_packet(
+            domain=label,
+            qType=RESOURCE_RECORDS["TXT"]
+        )
+
+        response_bytes, response_parsed, addr = await self.dns_request(
+            dns_server, dns_port, new_session_packet, timeout=10.0)
+
+        if response_bytes is None or response_parsed is None:
+            self.logger.error(
+                f"No response received for new session request to {dns_server}:{dns_port} for domain '{domain}', retrying...")
+            return await self.send_new_session_request(connection, retry_id=retry_id + 1)
+
+        is_VPN_packet, session_id, packet_type, answers = await self.parse_dns_response(
+            response_parsed)
+
+        if not is_VPN_packet:
+            self.logger.error(
+                f"Invalid VPN packet received for new session request to {dns_server}:{dns_port} for domain '{domain}', retrying...")
+            return await self.send_new_session_request(connection, retry_id=retry_id + 1)
+
+        if packet_type != PACKET_TYPES["NEW_SESSION"]:
+            self.logger.error(
+                f"Unexpected packet type received for new session request to {dns_server}:{dns_port} for domain '{domain}', retrying...")
+            return await self.send_new_session_request(connection, retry_id=retry_id + 1)
+
+        if session_id is None:
+            self.logger.error(
+                f"No session ID received for new session request to {dns_server}:{dns_port} for domain '{domain}', retrying...")
+            return await self.send_new_session_request(connection, retry_id=retry_id + 1)
+
+        decoded_response = self.dns_packet_parser.codec_transform(
+            answers, encrypt=False)
+
+        if decoded_response is None:
+            self.logger.error(
+                f"Failed to decode response for new session request to {dns_server}:{dns_port} for domain '{domain}', retrying...")
+            return await self.send_new_session_request(connection, retry_id=retry_id + 1)
+
+        session_id_int = 0
+        try:
+            if isinstance(decoded_response, bytes):
+                try:
+                    decoded_str = decoded_response.decode('ascii')
+                    session_id_int = int(decoded_str)
+                except Exception:
+                    session_id_int = int.from_bytes(
+                        decoded_response, byteorder='big')
+            else:
+                session_id_int = int(decoded_response)
+        except Exception:
+            session_id_int = decoded_response
+
+        if session_id_int != session_id:
+            self.logger.error(
+                f"Session ID mismatch for new session request to {dns_server}:{dns_port} for domain '{domain}', retrying...")
+            return await self.send_new_session_request(connection, retry_id=retry_id + 1)
+
+        self.session_id = session_id_int
+        self.logger.success(
+            f"New session established with Session ID: <g>{self.session_id}</g>")
+        return True
+
+    async def new_session(self) -> None:
+        """Create a new VPN session."""
+        self.logger.info("Creating a new VPN session...")
+        selected_connection = await self.select_connection()
+        if selected_connection is None:
+            self.logger.error(
+                "Failed to select a valid connection, Looks like all connections are invalid.")
+            return None
+        success = await self.send_new_session_request(selected_connection)
+        if not success:
+            self.logger.error("Failed to send new session request.")
+            return None
+        self.logger.success("New VPN session created successfully.")
+        return selected_connection
+
     async def start(self) -> None:
         """Start the MasterDnsVPN Client."""
-        self.logger.info("=" * 80)
-        self.logger.success("Starting MasterDnsVPN Client...")
+        try:
+            self.logger.info("=" * 80)
+            self.logger.success("Starting MasterDnsVPN Client...")
 
-        self.logger.debug(f"Checking configuration...")
-        if not self.domains:
-            self.logger.error("No domains configured for DNS tunneling.")
-            return
+            self.logger.debug(f"Checking configuration...")
+            if not self.domains:
+                self.logger.error("No domains configured for DNS tunneling.")
+                return
 
-        if not self.resolvers:
-            self.logger.error("No DNS resolvers configured.")
-            return
+            if not self.resolvers:
+                self.logger.error("No DNS resolvers configured.")
+                return
 
-        if self.encryption_method is None or self.encryption_key is None:
-            self.logger.error("Encryption method or key not configured.")
-            return
+            if self.encryption_method is None or self.encryption_key is None:
+                self.logger.error("Encryption method or key not configured.")
+                return
 
-        self.logger.debug(f"Configuration looks good.")
-        self.logger.success("MasterDnsVPN Client started successfully.")
-        self.logger.info("=" * 80)
+            self.logger.debug(f"Configuration looks good.")
+            self.logger.success("MasterDnsVPN Client started successfully.")
+            self.logger.info("=" * 80)
 
-        self.logger.info(
-            "Beginning MTU tests for all domain-resolver combinations...")
-        await self.test_all_mtu()
+            self.logger.info(
+                "Beginning MTU tests for all domain-resolver combinations...")
+            await self.test_all_mtu()
+
+            new_session = await self.new_session()
+            if new_session is None:
+                self.logger.error("Failed to create a new VPN session.")
+                return
+        except asyncio.CancelledError:
+            self.logger.info("MasterDnsVPN Client is stopping...")
+        except Exception as e:
+            self.logger.error(f"Error in MasterDnsVPN Client: {e}")
 
 
 def main():
-    """Main function to start the MasterDnsVPN Client."""
     client = MasterDnsVPNClient()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
     try:
-        asyncio.run(client.start())
+        loop.run_until_complete(client.start())
     except KeyboardInterrupt:
-        print("MasterDnsVPN Client stopped by user.")
+        print("\n\033[91m[!] Forced shutdown requested...\033[0m")
+    finally:
+        try:
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+        except:
+            pass
+        os._exit(0)
 
 
 if __name__ == "__main__":

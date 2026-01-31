@@ -3,11 +3,15 @@
 # Github: https://github.com/masterking32
 # Year: 2026
 
+
 import sys
+import os
 import socket
 import asyncio
 import signal
+import threading
 import random
+import time
 from typing import Optional, Any
 
 from server_config import master_dns_vpn_config
@@ -249,6 +253,27 @@ class MasterDnsVPNServer:
                 )
 
                 return True, response_packet
+
+            elif packet_type == PACKET_TYPES["NEW_SESSION"]:
+                new_session_id = await self.new_session()
+                if new_session_id is None:
+                    self.logger.error(
+                        f"Failed to create new session for NEW_SESSION packet from {addr}")
+                    return False, None
+
+                txt_str = str(new_session_id)
+                data_bytes = self.dns_parser.codec_transform(
+                    txt_str.encode(), encrypt=True)
+
+                response_packet = await self.dns_parser.generate_vpn_response_packet(
+                    domain=request_domain,
+                    session_id=new_session_id,
+                    packet_type=PACKET_TYPES["NEW_SESSION"],
+                    data=data_bytes,
+                    question_packet=data
+                )
+
+                return True, response_packet
             return True, None
         except Exception as e:
             self.logger.error(
@@ -331,50 +356,31 @@ class MasterDnsVPNServer:
         """
         self.logger.info(
             f"Received signal {signum}, shutting down MasterDnsVPN Server ...")
-        if self.loop and not self.loop.is_closed():
-            self.loop.call_soon_threadsafe(self.should_stop.set)
+
+        if not self.should_stop.is_set():
+            self.should_stop.set()
+
         if self.udp_sock:
             try:
                 self.udp_sock.close()
+                self.logger.info("UDP socket closed.")
             except Exception as e:
                 self.logger.error(f"Error closing UDP socket: {e}")
 
-        sys.exit(0)
+        if self.loop:
+            self.loop.stop()
+            self.logger.info("Event loop stopped.")
 
-    def dns_loop(self) -> None:
+    async def _session_cleanup_loop(self) -> None:
         """
-        Start the main DNS handling event loop.
+        Periodically clean up inactive sessions.
         """
-        self.logger.debug("Entering MasterDnsVPN DNS handling loop ...")
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
+        while not self.should_stop.is_set():
+            await asyncio.sleep(60)  # Check every 60 seconds
+            await self.close_inactive_sessions(
+                timeout=self.config.get("SESSION_TIMEOUT", 300))
 
-        # Register signal handlers for graceful shutdown (only in main thread)
-        import threading
-        if threading.current_thread() is threading.main_thread():
-            try:
-                for sig in (signal.SIGINT, signal.SIGTERM):
-                    self.loop.add_signal_handler(
-                        sig, lambda sig=sig: self._signal_handler(sig))
-            except NotImplementedError:
-                # Fallback for platforms that do not support add_signal_handler (e.g., Windows)
-                signal.signal(signal.SIGINT, self._signal_handler)
-                signal.signal(signal.SIGTERM, self._signal_handler)
-
-        try:
-            self.loop.run_until_complete(self.handle_dns_requests())
-        except Exception as e:
-            self.logger.exception(f"Exception in DNS loop: {e}")
-        finally:
-            if self.udp_sock:
-                try:
-                    self.udp_sock.close()
-                except Exception as e:
-                    self.logger.error(f"Error closing UDP socket: {e}")
-            self.loop.close()
-            self.logger.info("Event loop closed. Server shutdown complete.")
-
-    def start(self) -> None:
+    async def start(self) -> None:
         """
         Start the MasterDnsVPN server: bind UDP socket and enter DNS loop.
         """
@@ -387,8 +393,27 @@ class MasterDnsVPNServer:
                                 self.config.get("UDP_PORT", 53)))
             self.logger.info(
                 f"UDP socket bound on {self.config.get('UDP_HOST', '0.0.0.0')}:{self.config.get('UDP_PORT', 53)}")
+
+            #  create new task for dns request handling
+            self.loop = asyncio.get_running_loop()
+            dns_task = self.loop.create_task(self.handle_dns_requests())
+            session_cleanup_task = self.loop.create_task(
+                self._session_cleanup_loop())
+
             self.logger.info("MasterDnsVPN Server started successfully.")
-            self.dns_loop()
+
+            # wait until ctrl + c or any kill signal using asyncio event
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                signal.signal(sig, self._signal_handler)
+            try:
+                await self.should_stop.wait()
+            except KeyboardInterrupt:
+                self.logger.info(
+                    "KeyboardInterrupt received, shutting down ...")
+            finally:
+                dns_task.cancel()
+                session_cleanup_task.cancel()
+                await asyncio.gather(dns_task, session_cleanup_task, return_exceptions=True)
 
         except Exception as e:
             self.logger.exception(f"Failed to start MasterDnsVPN Server: {e}")
@@ -399,24 +424,23 @@ class MasterDnsVPNServer:
                     pass
 
 
-def main() -> None:
-    """
-    Entry point for the MasterDnsVPN server.
-    """
+def main():
     server = MasterDnsVPNServer()
     try:
-        server.start()
+        if sys.platform == "win32":
+            asyncio.set_event_loop_policy(
+                asyncio.WindowsSelectorEventLoopPolicy())
+        asyncio.run(server.start())
     except KeyboardInterrupt:
-        if server.loop and not server.loop.is_closed():
-            server.loop.call_soon_threadsafe(server.should_stop.set)
-        if server.udp_sock:
-            try:
-                server.udp_sock.close()
-            except Exception:
-                pass
-        print("\nServer stopped by user (Ctrl+C). Goodbye!")
+        print("\n🛑 Server stopped by user (Ctrl+C). Goodbye!")
+    except Exception as e:
+        print(f"🛑 Error starting the server: {e}")
 
-        sys.exit(0)
+    try:
+        os._exit(0)
+    except Exception as e:
+        print(f"🛑 Error while stopping the server: {e}")
+        exit()
 
 
 if __name__ == "__main__":
