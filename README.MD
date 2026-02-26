@@ -5,7 +5,18 @@ MasterDnsVPN is a powerful, cross-platform DNS tunneling VPN written in Python. 
 MasterDnsVPN provides both server and client components, featuring robust encryption, flexible domain management, resolver balancing, and automatic MTU optimization. It is designed for bypassing censorship, enabling secure communication in restricted networks, and supporting research or educational purposes. For alternative DNS tunneling solutions, consider Dnstt, SlipStream, Iodine, or DNSCat2.
 
 # 🚧 UNDER DEVELOPMENT
-⚠️ This project is currently under development and is not yet fully functional. It is not ready for use at this time. Please follow the repository for updates and check back next week!
+⚠️ This project is currently under development and is not yet fully functional. It is not ready for use at this time. 
+
+---
+
+# ℹ️ Project Status
+
+### This project is no longer actively maintained. Development was paused due to the emergence of similar DNS tunneling solutions for censorship bypass. However, the codebase remains available as a reference or foundation for your own DNS tunneling VPN implementation.
+
+#### **Note:** The code is incomplete and may require additional development to function as intended.
+
+### For an alternative DNS tunneling project, see [SlipStream Rust Plus](https://github.com/Fox-Fig/slipstream-rust-plus).
+
 
 ---
 
