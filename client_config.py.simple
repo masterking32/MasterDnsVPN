@@ -1,4 +1,3 @@
-
 # MasterDnsVPN Client Configuration File
 # --------------------------------------
 # Author: MasterkinG32
@@ -9,6 +8,7 @@
 # Adjust these settings according to your network environment and security requirements.
 #
 # IMPORTANT: After modifying this file, restart the client to apply changes.
+
 
 class master_dns_vpn_config:
     # Logging level for client output.
@@ -45,7 +45,7 @@ class master_dns_vpn_config:
     # These values define the Maximum Transmission Unit (MTU) for upload and download operations.
     # Adjust these values based on your network conditions for optimal performance.
     # Check the client logs after initial connection to see recommended MTU values.
-    
+
     # Skip DNS Resolver with Packet Loss
     # -------------------------------------------------
     # If a DNS resolver exhibits packet loss above this percentage, it will be skipped.

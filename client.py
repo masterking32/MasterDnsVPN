@@ -46,10 +46,10 @@ class MasterDnsVPNClient:
         self.max_download_mtu: int = self.config.get("MAX_DOWNLOAD_MTU", 4096)
         self.min_upload_mtu: int = self.config.get("MIN_UPLOAD_MTU", 0)
         self.min_download_mtu: int = self.config.get("MIN_DOWNLOAD_MTU", 0)
-        self.encryption_method: int = self.config.get(
-            "DATA_ENCRYPTION_METHOD", 1)
+        self.encryption_method: int = self.config.get("DATA_ENCRYPTION_METHOD", 1)
         self.skip_resolver_with_packet_loss: int = self.config.get(
-            "SKIP_RESOLVER_WITH_PACKET_LOSS", 100)
+            "SKIP_RESOLVER_WITH_PACKET_LOSS", 100
+        )
         self.resolver_balancing_strategy: int = self.config.get(
             "RESOLVER_BALANCING_STRATEGY", 0
         )
@@ -76,8 +76,7 @@ class MasterDnsVPNClient:
         ]
 
         self.connections_map = [
-            dict(t) for t in {tuple(d.items())
-                              for d in self.connections_map}
+            dict(t) for t in {tuple(d.items()) for d in self.connections_map}
         ]
 
     async def select_connection(self) -> Optional[dict]:
@@ -97,48 +96,58 @@ class MasterDnsVPNClient:
                 packet_loss = (lost_packets / total_packets) * 100
             else:
                 packet_loss = 0
-            conn['packet_loss'] = packet_loss
+            conn["packet_loss"] = packet_loss
 
         valid_connections = [
-            conn for conn in valid_connections
-            if conn['packet_loss'] <= self.skip_resolver_with_packet_loss
+            conn
+            for conn in valid_connections
+            if conn["packet_loss"] <= self.skip_resolver_with_packet_loss
         ]
 
         if not valid_connections:
             self.logger.error(
-                "No valid connections available after applying packet loss filter.")
+                "No valid connections available after applying packet loss filter."
+            )
             return None
 
         if self.resolver_balancing_strategy == 2:
             self.resent_connection_selected = (
-                self.resent_connection_selected + 1) % len(valid_connections)
+                self.resent_connection_selected + 1
+            ) % len(valid_connections)
             selected_connection = valid_connections[self.resent_connection_selected]
             self.logger.debug(
-                f"Round Robin selected connection, domain: {selected_connection['domain']}, resolver: {selected_connection['resolver']}")
+                f"Round Robin selected connection, domain: {selected_connection['domain']}, resolver: {selected_connection['resolver']}"
+            )
             return selected_connection
 
         elif self.resolver_balancing_strategy == 3:
-            valid_connections.sort(key=lambda x: x['packet_loss'])
-            min_loss = valid_connections[0]['packet_loss']
+            valid_connections.sort(key=lambda x: x["packet_loss"])
+            min_loss = valid_connections[0]["packet_loss"]
             same_loss_connections = [
-                conn for conn in valid_connections if conn['packet_loss'] == min_loss]
+                conn for conn in valid_connections if conn["packet_loss"] == min_loss
+            ]
             if len(same_loss_connections) > 1:
                 selected_connection = random.choice(same_loss_connections)
                 self.logger.debug(
-                    f"Least Packet Loss (tie) randomly selected connection with packet loss: {selected_connection['packet_loss']:.2f}%, domain: {selected_connection['domain']}, resolver: {selected_connection['resolver']}")
+                    f"Least Packet Loss (tie) randomly selected connection with packet loss: {selected_connection['packet_loss']:.2f}%, domain: {selected_connection['domain']}, resolver: {selected_connection['resolver']}"
+                )
             else:
                 selected_connection = same_loss_connections[0]
                 self.logger.debug(
-                    f"Least Packet Loss selected connection with packet loss: {selected_connection['packet_loss']:.2f}%, domain: {selected_connection['domain']}, resolver: {selected_connection['resolver']}")
+                    f"Least Packet Loss selected connection with packet loss: {selected_connection['packet_loss']:.2f}%, domain: {selected_connection['domain']}, resolver: {selected_connection['resolver']}"
+                )
             return selected_connection
 
         else:
             selected_connection = random.choice(valid_connections)
             self.logger.debug(
-                f"Randomly selected connection, domain: {selected_connection['domain']}, resolver: {selected_connection['resolver']}")
+                f"Randomly selected connection, domain: {selected_connection['domain']}, resolver: {selected_connection['resolver']}"
+            )
             return selected_connection
 
-    async def get_main_connection_index(self, selected_connection: Optional[dict] = None) -> Optional[int]:
+    async def get_main_connection_index(
+        self, selected_connection: Optional[dict] = None
+    ) -> Optional[int]:
         """Find and return the main connection (connections_map) based on the selected connection."""
         if selected_connection is None:
             selected_connection = await self.select_connection()
@@ -146,15 +155,17 @@ class MasterDnsVPNClient:
                 return None
 
         for index, conn in enumerate(self.connections_map):
-            if (conn.get("domain") == selected_connection.get("domain") and
-                    conn.get("resolver") == selected_connection.get("resolver")):
+            if conn.get("domain") == selected_connection.get("domain") and conn.get(
+                "resolver"
+            ) == selected_connection.get("resolver"):
                 return index
 
-        self.logger.error(
-            "Selected connection not found in connections map.")
+        self.logger.error("Selected connection not found in connections map.")
         return None
 
-    async def _binary_search_mtu(self, test_callable, min_mtu: int, max_mtu: int, min_threshold: int = 30) -> int:
+    async def _binary_search_mtu(
+        self, test_callable, min_mtu: int, max_mtu: int, min_threshold: int = 30
+    ) -> int:
         """
         Generic binary search for MTU tests.
         `test_callable(size)` should be an async callable returning True on success.
@@ -194,19 +205,22 @@ class MasterDnsVPNClient:
             self.logger.debug(f"Error in MTU binary search: {e}")
             return 0
 
-    async def send_upload_mtu_test(self, domain: str, dns_server: str, dns_port: int, mtu_size: int) -> bool:
+    async def send_upload_mtu_test(
+        self, domain: str, dns_server: str, dns_port: int, mtu_size: int
+    ) -> bool:
 
         mtu_char_len, mtu_bytes = self.dns_packet_parser.calculate_upload_mtu(
-            domain=domain,
-            mtu=mtu_size
+            domain=domain, mtu=mtu_size
         )
 
         self.logger.debug(
-            f"Sending upload MTU test of size {mtu_bytes} to domain {domain} via resolver {dns_server}...")
+            f"Sending upload MTU test of size {mtu_bytes} to domain {domain} via resolver {dns_server}..."
+        )
 
-        if (mtu_char_len < 29):
+        if mtu_char_len < 29:
             self.logger.error(
-                f"Calculated MTU character length too small: {mtu_char_len} characters for domain {domain}")
+                f"Calculated MTU character length too small: {mtu_char_len} characters for domain {domain}"
+            )
             return False
 
         random_hex = generate_random_hex_text(mtu_char_len).lower()
@@ -217,26 +231,29 @@ class MasterDnsVPNClient:
             data=random_hex,
             mtu_chars=mtu_char_len,
             encode_data=False,
-            qType=RESOURCE_RECORDS["TXT"]
+            qType=RESOURCE_RECORDS["TXT"],
         )
 
         if dns_queries is None or len(dns_queries) != 1:
             self.logger.debug(
-                f"Failed to build DNS query for upload MTU test to domain {domain} via resolver {dns_server}.")
+                f"Failed to build DNS query for upload MTU test to domain {domain} via resolver {dns_server}."
+            )
             return False
 
         # TODO SEND TO UDP AND WAIT FOR RESPONSE
         return False
 
-    async def test_upload_mtu_size(self, domain: str, dns_server: str, dns_port: int, default_mtu: int) -> tuple:
+    async def test_upload_mtu_size(
+        self, domain: str, dns_server: str, dns_port: int, default_mtu: int
+    ) -> tuple:
         """Test and adjust upload MTU size based on network conditions."""
         self.logger.debug(
-            f"Testing upload MTU size for domain {domain} via resolver {dns_server}...")
+            f"Testing upload MTU size for domain {domain} via resolver {dns_server}..."
+        )
 
         try:
             mtu_char_len, mtu_bytes = self.dns_packet_parser.calculate_upload_mtu(
-                domain=domain,
-                mtu=0
+                domain=domain, mtu=0
             )
 
             if default_mtu > 512 or default_mtu <= 0:
@@ -250,17 +267,22 @@ class MasterDnsVPNClient:
             optimal_mtu = 0
 
             test_fn = functools.partial(
-                self.send_upload_mtu_test, domain, dns_server, dns_port)
-            optimal_mtu = await self._binary_search_mtu(test_fn, min_mtu, max_mtu_candidate, min_threshold=30)
+                self.send_upload_mtu_test, domain, dns_server, dns_port
+            )
+            optimal_mtu = await self._binary_search_mtu(
+                test_fn, min_mtu, max_mtu_candidate, min_threshold=30
+            )
 
             if optimal_mtu > 29:
                 mtu_char_len, mtu_bytes = self.dns_packet_parser.calculate_upload_mtu(
-                    domain=domain, mtu=optimal_mtu)
+                    domain=domain, mtu=optimal_mtu
+                )
                 return True, mtu_bytes, mtu_char_len
 
         except Exception as e:
             self.logger.debug(
-                f"Error calculating initial upload MTU for domain {domain} via resolver {dns_server}: {e}")
+                f"Error calculating initial upload MTU for domain {domain} via resolver {dns_server}: {e}"
+            )
 
         return False, 0, 0
 
@@ -274,7 +296,8 @@ class MasterDnsVPNClient:
 
         self.logger.info("=" * 80)
         self.logger.info(
-            "<y>Testing upload MTU sizes for all resolver-domain pairs...</y>")
+            "<y>Testing upload MTU sizes for all resolver-domain pairs...</y>"
+        )
 
         for connection in self.connections_map:
             if not connection or self.should_stop.is_set():
@@ -291,27 +314,32 @@ class MasterDnsVPNClient:
             connection["upload_mtu_bytes"] = 0
             connection["upload_mtu_chars"] = 0
             connection["download_mtu_bytes"] = 0
-            connection['packet_loss'] = 100
+            connection["packet_loss"] = 100
 
             is_valid, mtu_bytes, mtu_char_len = await self.test_upload_mtu_size(
                 domain=domain,
                 dns_server=dns_server,
                 dns_port=dns_port,
-                default_mtu=upload_mtu
+                default_mtu=upload_mtu,
             )
 
-            if is_valid and (self.min_upload_mtu == 0 or mtu_bytes >= self.min_upload_mtu):
+            if is_valid and (
+                self.min_upload_mtu == 0 or mtu_bytes >= self.min_upload_mtu
+            ):
                 connection["is_valid"] = True
                 connection["upload_mtu_bytes"] = mtu_bytes
                 connection["upload_mtu_chars"] = mtu_char_len
                 self.logger.info(
-                    f"<green>Connection valid for domain <cyan>{domain}</cyan> via resolver <cyan>{resolver}</cyan> with upload MTU <cyan>{mtu_bytes}</cyan> bytes ({mtu_char_len} chars).</green>")
+                    f"<green>Connection valid for domain <cyan>{domain}</cyan> via resolver <cyan>{resolver}</cyan> with upload MTU <cyan>{mtu_bytes}</cyan> bytes ({mtu_char_len} chars).</green>"
+                )
             else:
                 self.logger.info(
-                    f"Connection invalid for domain {domain} via resolver <red>{resolver}</red>. <red>Upload MTU test failed or below minimum.</red>")
+                    f"Connection invalid for domain {domain} via resolver <red>{resolver}</red>. <red>Upload MTU test failed or below minimum.</red>"
+                )
 
         self.logger.info(
-            "Testing download MTU sizes for all valid resolver-domain pairs...")
+            "Testing download MTU sizes for all valid resolver-domain pairs..."
+        )
 
     async def sleep(self, seconds: float) -> None:
         """Async sleep helper."""
@@ -358,13 +386,11 @@ class MasterDnsVPNClient:
 
             while not self.should_stop.is_set():
                 self.logger.info("=" * 80)
-                self.logger.info(
-                    "<green>Running MasterDnsVPN Client...</green>")
+                self.logger.info("<green>Running MasterDnsVPN Client...</green>")
                 self.packets_queue.clear()
                 await self.run_client()
                 self.logger.info("=" * 80)
-                self.logger.error(
-                    "<yellow>Retrying in 10 second...</yellow>")
+                self.logger.error("<yellow>Retrying in 10 second...</yellow>")
                 await self.sleep(10)
 
         except asyncio.CancelledError:
@@ -380,13 +406,13 @@ class MasterDnsVPNClient:
         """
         if not self.should_stop.is_set():
             self.logger.info(
-                f"Received signal {signum}. Stopping MasterDnsVPN Client...")
+                f"Received signal {signum}. Stopping MasterDnsVPN Client..."
+            )
             self.should_stop.set()
             self.loop.call_soon_threadsafe(self.loop.stop)
             self.logger.info("MasterDnsVPN Client stopped. Goodbye!")
         else:
-            self.logger.info(
-                f"Received signal {signum} again. Already stopping...")
+            self.logger.info(f"Received signal {signum} again. Already stopping...")
             os._exit(0)
 
 
@@ -394,15 +420,15 @@ def main():
     client = MasterDnsVPNClient()
     try:
         if sys.platform == "win32":
-            asyncio.set_event_loop_policy(
-                asyncio.WindowsSelectorEventLoopPolicy())
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
         try:
             loop.add_signal_handler(
-                signal.SIGINT, lambda: client._signal_handler(signal.SIGINT, None))
+                signal.SIGINT, lambda: client._signal_handler(signal.SIGINT, None)
+            )
         except Exception:
             try:
                 signal.signal(signal.SIGINT, client._signal_handler)
@@ -411,7 +437,8 @@ def main():
 
         try:
             loop.add_signal_handler(
-                signal.SIGTERM, lambda: client._signal_handler(signal.SIGTERM, None))
+                signal.SIGTERM, lambda: client._signal_handler(signal.SIGTERM, None)
+            )
         except Exception:
             try:
                 signal.signal(signal.SIGTERM, client._signal_handler)
@@ -419,10 +446,9 @@ def main():
                 pass
 
         # On Windows, register a Console Ctrl Handler early so Ctrl+C is handled
-        if sys.platform == 'win32':
+        if sys.platform == "win32":
             try:
-                HandlerRoutine = ctypes.WINFUNCTYPE(
-                    wintypes.BOOL, wintypes.DWORD)
+                HandlerRoutine = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
 
                 def _console_handler(dwCtrlType):
                     # CTRL_C_EVENT == 0, CTRL_BREAK_EVENT == 1, others ignored

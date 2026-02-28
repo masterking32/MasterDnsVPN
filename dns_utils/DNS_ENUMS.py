@@ -18,13 +18,11 @@ PACKET_TYPES = {
     "SESSION_CLOSE": 0x05,
     "DATA_PACKET": 0x06,
     "PING": 0x07,
-
     "RESERVE_1": 0x08,
     "RESERVE_2": 0x09,
     "RESERVE_3": 0x0A,
     "RESERVE_4": 0x0B,
     "RESERVE_5": 0x0C,
-
     "QUIC_INIT": 0x0D,
     "QUIC_PACKET": 0x0E,
     "KCP_PACKET": 0x0F,

@@ -1,4 +1,3 @@
-
 # MasterDnsVPN Server Configuration File
 # --------------------------------------
 # Author: MasterkinG32
@@ -9,6 +8,7 @@
 # Adjust these settings to fit your deployment environment and security requirements.
 #
 # Note: Changes to this file require a server restart to take effect.
+
 
 class master_dns_vpn_config:
     # Logging level for server output.
@@ -32,8 +32,8 @@ class master_dns_vpn_config:
     # These should be reliable and fast DNS resolvers.
     # You can add or remove IP addresses as needed.
     DNS_SERVERS = [
-        "8.8.8.8",      # Google Public DNS
-        "1.1.1.1"       # Cloudflare DNS
+        "8.8.8.8",  # Google Public DNS
+        "1.1.1.1",  # Cloudflare DNS
     ]
 
     # Domains used for DNS tunneling.
@@ -43,7 +43,7 @@ class master_dns_vpn_config:
     # For best performance, use domains with shorter names, as they reduce packet size and increase efficiency.
     DOMAIN = [
         "t.example.com",  # Main tunnel domain
-    #    "b.example.com"   # Backup or secondary domain
+        #    "b.example.com"   # Backup or secondary domain
     ]
 
     # Data encryption method.

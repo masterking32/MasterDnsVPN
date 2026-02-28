@@ -15,7 +15,7 @@ def load_text(file_path: str) -> Optional[str]:
     Returns None if the file does not exist or error occurs.
     """
     try:
-        with open(file_path, 'r', encoding='utf-8') as file:
+        with open(file_path, "r", encoding="utf-8") as file:
             return file.read().strip()
     except FileNotFoundError:
         return None
@@ -28,7 +28,7 @@ def save_text(file_path: str, text: str) -> bool:
     Save the given text to a file. Returns True on success, False otherwise.
     """
     try:
-        with open(file_path, 'w', encoding='utf-8') as file:
+        with open(file_path, "w", encoding="utf-8") as file:
             file.write(text)
         return True
     except Exception:
@@ -47,7 +47,7 @@ def get_encrypt_key(method_id: int) -> str:
         length = 24
     else:
         length = 32
-    key_path = 'encrypt_key.txt'
+    key_path = "encrypt_key.txt"
     random_key = load_text(key_path)
     if not random_key or len(random_key) != length:
         random_key = generate_random_hex_text(length)
@@ -62,7 +62,12 @@ def generate_random_hex_text(length: int) -> str:
     return secrets.token_hex(length // 2)
 
 
-def getLogger(log_level: str = "DEBUG", logFile: str = None, max_log_size: int = 1, backup_count: int = 3):
+def getLogger(
+    log_level: str = "DEBUG",
+    logFile: str = None,
+    max_log_size: int = 1,
+    backup_count: int = 3,
+):
     # ---------------------------------------------#
     # Logging configuration
     LOG_LEVEL = log_level.upper()
