@@ -19,7 +19,7 @@ from client_config import master_dns_vpn_config
 
 from dns_utils.utils import getLogger, generate_random_hex_text
 from dns_utils.DnsPacketParser import DnsPacketParser
-from dns_utils.DNS_ENUMS import Packet_Type, DNS_QClass, DNS_Record_Type
+from dns_utils.DNS_ENUMS import Packet_Type, DNS_Record_Type
 
 # Ensure UTF-8 output for consistent logging
 try:
@@ -307,7 +307,7 @@ class MasterDnsVPNClient:
             domain=domain,
             session_id=random.randint(0, 255),
             packet_type=Packet_Type.MTU_UP_REQ,
-            data=random_hex,  # <--- حذف .encode('utf-8')
+            data=random_hex,
             mtu_chars=mtu_char_len,
             encode_data=False,
             qType=DNS_Record_Type.TXT,
@@ -334,7 +334,7 @@ class MasterDnsVPNClient:
         # 1. Convert MTU size to 4 bytes
         data_bytes = mtu_size.to_bytes(4, byteorder="big")
 
-        # 2. Encrypt the data BEFORE sending (CRITICAL FIX)
+        # 2. Encrypt the data BEFORE sending
         encrypted_data = self.dns_packet_parser.codec_transform(
             data_bytes, encrypt=True
         )
@@ -477,6 +477,68 @@ class MasterDnsVPNClient:
 
         return True
 
+    async def _sync_mtu_with_server(self, domain: str, resolver: str) -> bool:
+        """Send the synced MTU values to the server for this session."""
+        self.logger.info(f"Syncing MTU with server for session {self.session_id}...")
+
+        # Pack MTUs into 8 bytes (4 bytes UP, 4 bytes DOWN)
+        data_bytes = self.synced_upload_mtu.to_bytes(
+            4, byteorder="big"
+        ) + self.synced_download_mtu.to_bytes(4, byteorder="big")
+
+        # Encrypt the payload before sending
+        encrypted_data = self.dns_packet_parser.codec_transform(
+            data_bytes, encrypt=True
+        )
+
+        mtu_char_len, _ = self.dns_packet_parser.calculate_upload_mtu(
+            domain=domain, mtu=64
+        )
+        dns_queries = await self.dns_packet_parser.build_request_dns_query(
+            domain=domain,
+            session_id=self.session_id,
+            packet_type=Packet_Type.SET_MTU_REQ,
+            data=encrypted_data,
+            mtu_chars=mtu_char_len,
+            encode_data=True,
+            qType=DNS_Record_Type.TXT,
+        )
+
+        if not dns_queries:
+            return False
+
+        max_retries = 10
+        base_delay = 1.0
+
+        for attempt in range(max_retries):
+            if self.should_stop.is_set():
+                break
+
+            response = await self._send_and_receive_dns(
+                dns_queries[0], resolver, 53, self.timeout
+            )
+
+            if response:
+                packet_type, returned_data = await self._process_received_packet(
+                    response
+                )
+
+                if packet_type == Packet_Type.SET_MTU_RES:
+                    self.logger.success(
+                        "<g>MTU values successfully synced with the server!</g>"
+                    )
+                    return True
+
+            if attempt < max_retries - 1:
+                delay = min(base_delay * (1.5**attempt), 8.0)
+                self.logger.warning(
+                    f"MTU sync failed. Retrying in {delay:.1f}s (Attempt {attempt + 1}/{max_retries})..."
+                )
+                await asyncio.sleep(delay)
+
+        self.logger.error("Failed to sync MTU with the server after multiple attempts.")
+        return False
+
     # ---------------------------------------------------------
     # Core Loop & Session Setup
     # ---------------------------------------------------------
@@ -499,19 +561,37 @@ class MasterDnsVPNClient:
         if not dns_queries:
             return False
 
-        response = await self._send_and_receive_dns(
-            dns_queries[0], resolver, 53, self.timeout
-        )
-        packet_type, returned_data = await self._process_received_packet(response)
+        max_retries = 10
+        base_delay = 1.0
 
-        # Handle response using switch logic
-        if packet_type == Packet_Type.SESSION_ACCEPT and returned_data:
-            try:
-                self.session_id = int(returned_data.decode("utf-8"))
-                return True
-            except ValueError:
-                self.logger.error("Failed to parse Session ID from server.")
+        for attempt in range(max_retries):
+            if self.should_stop.is_set():
+                break
 
+            response = await self._send_and_receive_dns(
+                dns_queries[0], resolver, 53, self.timeout
+            )
+
+            if response:
+                packet_type, returned_data = await self._process_received_packet(
+                    response
+                )
+
+                if packet_type == Packet_Type.SESSION_ACCEPT and returned_data:
+                    try:
+                        self.session_id = int(returned_data.decode("utf-8"))
+                        return True
+                    except ValueError:
+                        self.logger.error("Failed to parse Session ID from server.")
+
+            if attempt < max_retries - 1:
+                delay = min(base_delay * (1.5**attempt), 8.0)
+                self.logger.warning(
+                    f"Session init failed. Retrying in {delay:.1f}s (Attempt {attempt + 1}/{max_retries})..."
+                )
+                await asyncio.sleep(delay)
+
+        self.logger.error("Failed to initialize session after multiple attempts.")
         return False
 
     async def run_client(self) -> None:
@@ -542,7 +622,13 @@ class MasterDnsVPNClient:
                 self.logger.success(
                     f"<g>Session Established! Session ID: {self.session_id}</g>"
                 )
-                await self._main_tunnel_loop()
+
+                if await self._sync_mtu_with_server(
+                    selected_conn["domain"], selected_conn["resolver"]
+                ):
+                    await self._main_tunnel_loop()
+                else:
+                    self.logger.error("Stopping due to MTU sync failure.")
             else:
                 self.logger.error("Session initialization failed.")
 

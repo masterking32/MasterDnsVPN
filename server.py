@@ -124,6 +124,7 @@ class MasterDnsVPNServer:
             Packet_Type.MTU_UP_REQ: self._handle_mtu_up,
             Packet_Type.MTU_DOWN_REQ: self._handle_mtu_down,
             Packet_Type.SESSION_INIT: self._handle_session_init,
+            Packet_Type.SET_MTU_REQ: self._handle_set_mtu,
         }
 
         handler = handlers.get(packet_type, self._handle_unknown)
@@ -135,6 +136,57 @@ class MasterDnsVPNServer:
             parsed_packet=parsed_packet,
             session_id=session_id,
         )
+
+    async def _handle_set_mtu(
+        self,
+        data=None,
+        labels=None,
+        request_domain=None,
+        addr=None,
+        parsed_packet=None,
+        session_id=None,
+    ) -> Optional[bytes]:
+        """Handle SET_MTU_REQ VPN packet and save it to the session."""
+
+        if session_id not in self.sessions:
+            self.logger.warning(
+                f"SET_MTU_REQ received for invalid session_id: {session_id} from {addr}"
+            )
+            return None
+
+        # Extract and decrypt data directly from the labels
+        extracted_data = self.dns_parser.extract_vpn_data_from_labels(labels)
+
+        if not extracted_data or len(extracted_data) < 8:
+            self.logger.warning(f"Invalid or missing SET_MTU_REQ data from {addr}")
+            return None
+
+        # Unpack the 8 bytes (4 bytes UP, 4 bytes DOWN)
+        upload_mtu = int.from_bytes(extracted_data[0:4], byteorder="big")
+        download_mtu = int.from_bytes(extracted_data[4:8], byteorder="big")
+
+        # Save to session map
+        self.sessions[session_id]["upload_mtu"] = upload_mtu
+        self.sessions[session_id]["download_mtu"] = download_mtu
+        self.sessions[session_id]["last_packet_time"] = asyncio.get_event_loop().time()
+
+        self.logger.info(
+            f"Session {session_id} MTU synced - UP: {upload_mtu}B, DOWN: {download_mtu}B"
+        )
+
+        # Prepare response (Acknowledge)
+        response_data = b"OK"
+        data_bytes = self.dns_parser.codec_transform(response_data, encrypt=True)
+
+        response_packet = await self.dns_parser.generate_vpn_response_packet(
+            domain=request_domain,
+            session_id=session_id,
+            packet_type=Packet_Type.SET_MTU_RES,
+            data=data_bytes,
+            question_packet=data,
+        )
+
+        return response_packet
 
     async def _handle_unknown(
         self,
