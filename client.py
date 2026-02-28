@@ -9,7 +9,7 @@ import sys
 import os
 import socket
 import asyncio
-from typing import Optional
+from typing import Optional, Tuple
 import signal
 import ctypes
 from ctypes import wintypes
@@ -19,8 +19,7 @@ from client_config import master_dns_vpn_config
 
 from dns_utils.utils import getLogger, generate_random_hex_text
 from dns_utils.DnsPacketParser import DnsPacketParser
-from dns_utils.UDPClient import UDPClient
-from dns_utils.DNS_ENUMS import PACKET_TYPES, Q_CLASSES, RESOURCE_RECORDS
+from dns_utils.DNS_ENUMS import Packet_Type, DNS_QClass, DNS_Record_Type
 
 # Ensure UTF-8 output for consistent logging
 try:
@@ -54,9 +53,11 @@ class MasterDnsVPNClient:
             "RESOLVER_BALANCING_STRATEGY", 0
         )
         self.encryption_key: str = self.config.get("ENCRYPTION_KEY", None)
+
         if not self.encryption_key:
             self.logger.error("No encryption key provided in configuration.")
             sys.exit(1)
+
         self.dns_packet_parser = DnsPacketParser(
             logger=self.logger,
             encryption_method=self.encryption_method,
@@ -64,7 +65,16 @@ class MasterDnsVPNClient:
         )
 
         self.packets_queue: dict = {}
+        self.connections_map: list = []
+        self.resent_connection_selected = -1
+        self.session_id = 0
+        self.synced_upload_mtu = 0
+        self.synced_download_mtu = 0
+        self.buffer_size = 65507  # Max UDP payload size
 
+    # ---------------------------------------------------------
+    # Connection Management
+    # ---------------------------------------------------------
     async def create_connection_map(self) -> None:
         """Create a map of all domain-resolver combinations."""
         self.connections_map: list = []
@@ -92,10 +102,9 @@ class MasterDnsVPNClient:
         for conn in valid_connections:
             total_packets = conn.get("total_packets", 0)
             lost_packets = conn.get("lost_packets", 0)
-            if total_packets > 0:
-                packet_loss = (lost_packets / total_packets) * 100
-            else:
-                packet_loss = 0
+            packet_loss = (
+                (lost_packets / total_packets) * 100 if total_packets > 0 else 0
+            )
             conn["packet_loss"] = packet_loss
 
         valid_connections = [
@@ -114,36 +123,20 @@ class MasterDnsVPNClient:
             self.resent_connection_selected = (
                 self.resent_connection_selected + 1
             ) % len(valid_connections)
-            selected_connection = valid_connections[self.resent_connection_selected]
-            self.logger.debug(
-                f"Round Robin selected connection, domain: {selected_connection['domain']}, resolver: {selected_connection['resolver']}"
-            )
-            return selected_connection
-
+            return valid_connections[self.resent_connection_selected]
         elif self.resolver_balancing_strategy == 3:
             valid_connections.sort(key=lambda x: x["packet_loss"])
             min_loss = valid_connections[0]["packet_loss"]
             same_loss_connections = [
-                conn for conn in valid_connections if conn["packet_loss"] == min_loss
+                c for c in valid_connections if c["packet_loss"] == min_loss
             ]
-            if len(same_loss_connections) > 1:
-                selected_connection = random.choice(same_loss_connections)
-                self.logger.debug(
-                    f"Least Packet Loss (tie) randomly selected connection with packet loss: {selected_connection['packet_loss']:.2f}%, domain: {selected_connection['domain']}, resolver: {selected_connection['resolver']}"
-                )
-            else:
-                selected_connection = same_loss_connections[0]
-                self.logger.debug(
-                    f"Least Packet Loss selected connection with packet loss: {selected_connection['packet_loss']:.2f}%, domain: {selected_connection['domain']}, resolver: {selected_connection['resolver']}"
-                )
-            return selected_connection
-
-        else:
-            selected_connection = random.choice(valid_connections)
-            self.logger.debug(
-                f"Randomly selected connection, domain: {selected_connection['domain']}, resolver: {selected_connection['resolver']}"
+            return (
+                random.choice(same_loss_connections)
+                if len(same_loss_connections) > 1
+                else same_loss_connections[0]
             )
-            return selected_connection
+        else:
+            return random.choice(valid_connections)
 
     async def get_main_connection_index(
         self, selected_connection: Optional[dict] = None
@@ -163,25 +156,119 @@ class MasterDnsVPNClient:
         self.logger.error("Selected connection not found in connections map.")
         return None
 
+    # ---------------------------------------------------------
+    # Network I/O & Packet Processing
+    # ---------------------------------------------------------
+    async def _send_and_receive_dns(
+        self,
+        query_data: bytes,
+        resolver: str,
+        port: int,
+        timeout: float = 10,
+        buffer_size: int = 0,
+    ) -> Optional[bytes]:
+        """Send a UDP packet and wait for the response."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setblocking(False)
+        if buffer_size <= 0:
+            buffer_size = self.buffer_size
+
+        try:
+            await self.loop.sock_sendto(sock, query_data, (resolver, port))
+            response, _ = await asyncio.wait_for(
+                self.loop.sock_recvfrom(sock, buffer_size), timeout=timeout
+            )
+            return response
+        except asyncio.TimeoutError:
+            return None
+        except Exception as e:
+            self.logger.debug(
+                f"Network error communicating with {resolver}:{port} - {e}"
+            )
+            return None
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+    async def _process_received_packet(
+        self, response_bytes: bytes
+    ) -> Tuple[Optional[int], bytes]:
+        """
+        Parse raw DNS response, extract VPN header, and return packet type alongside assembled data.
+        Acts as the core for switching request/response types.
+        """
+        if not response_bytes:
+            return None, b""
+
+        parsed = await self.dns_packet_parser.parse_dns_packet(response_bytes)
+        if not parsed or not parsed.get("answers"):
+            return None, b""
+
+        chunks = {}
+        detected_packet_type = None
+
+        for answer in parsed.get("answers", []):
+            if answer.get("type") != DNS_Record_Type.TXT:
+                continue
+
+            txt_str = self.dns_packet_parser.extract_txt_from_rData(answer["rData"])
+            if not txt_str:
+                continue
+
+            parts = txt_str.split(".", 2)
+            if len(parts) < 3:
+                continue
+
+            header_str, answer_id_str, chunk_payload = parts[0], parts[1], parts[2]
+            header_bytes = self.dns_packet_parser.decode_and_decrypt_data(
+                header_str, lowerCaseOnly=False
+            )
+
+            if header_bytes and len(header_bytes) >= 2:
+                packet_type = header_bytes[1]
+
+                if detected_packet_type is None:
+                    detected_packet_type = packet_type
+
+                if packet_type == detected_packet_type:
+                    try:
+                        chunks[int(answer_id_str)] = chunk_payload
+                    except ValueError:
+                        pass
+
+        if detected_packet_type is None:
+            return None, b""
+
+        assembled_data_str = ""
+        for i in range(len(chunks)):
+            if i in chunks:
+                assembled_data_str += chunks[i]
+            else:
+                break
+
+        decoded_data = self.dns_packet_parser.decode_and_decrypt_data(
+            assembled_data_str, lowerCaseOnly=False
+        )
+        return detected_packet_type, decoded_data
+
+    # ---------------------------------------------------------
+    # MTU Testing Logic
+    # ---------------------------------------------------------
     async def _binary_search_mtu(
         self, test_callable, min_mtu: int, max_mtu: int, min_threshold: int = 30
     ) -> int:
-        """
-        Generic binary search for MTU tests.
-        `test_callable(size)` should be an async callable returning True on success.
-        Returns the highest successful MTU or 0 if none.
-        """
-        # Quick check max
+        """Generic binary search for finding the optimal MTU size."""
         try:
             if max_mtu <= 0:
                 return 0
 
             if await test_callable(max_mtu):
                 return max_mtu
-            max_candidate = max_mtu - 1
 
             low = min_mtu
-            high = max_candidate
+            high = max_mtu - 1
             optimal = 0
 
             while low <= high:
@@ -208,69 +295,95 @@ class MasterDnsVPNClient:
     async def send_upload_mtu_test(
         self, domain: str, dns_server: str, dns_port: int, mtu_size: int
     ) -> bool:
-
         mtu_char_len, mtu_bytes = self.dns_packet_parser.calculate_upload_mtu(
             domain=domain, mtu=mtu_size
         )
 
-        self.logger.debug(
-            f"Sending upload MTU test of size {mtu_bytes} to domain {domain} via resolver {dns_server}..."
-        )
-
         if mtu_char_len < 29:
-            self.logger.error(
-                f"Calculated MTU character length too small: {mtu_char_len} characters for domain {domain}"
-            )
             return False
 
         random_hex = generate_random_hex_text(mtu_char_len).lower()
         dns_queries = await self.dns_packet_parser.build_request_dns_query(
             domain=domain,
             session_id=random.randint(0, 255),
-            packet_type=PACKET_TYPES["SERVER_UPLOAD_TEST"],
-            data=random_hex,
+            packet_type=Packet_Type.MTU_UP_REQ,
+            data=random_hex,  # <--- حذف .encode('utf-8')
             mtu_chars=mtu_char_len,
             encode_data=False,
-            qType=RESOURCE_RECORDS["TXT"],
+            qType=DNS_Record_Type.TXT,
         )
 
-        if dns_queries is None or len(dns_queries) != 1:
-            self.logger.debug(
-                f"Failed to build DNS query for upload MTU test to domain {domain} via resolver {dns_server}."
-            )
+        if not dns_queries:
             return False
 
-        # TODO SEND TO UDP AND WAIT FOR RESPONSE
+        response = await self._send_and_receive_dns(
+            dns_queries[0], dns_server, dns_port, self.timeout
+        )
+        packet_type, _ = await self._process_received_packet(response)
+
+        # Handle response using switch logic
+        if packet_type == Packet_Type.MTU_UP_RES:
+            return True
+        elif packet_type == Packet_Type.ERROR_DROP:
+            return False
+        return False
+
+    async def send_download_mtu_test(
+        self, domain: str, dns_server: str, dns_port: int, mtu_size: int
+    ) -> bool:
+        # 1. Convert MTU size to 4 bytes
+        data_bytes = mtu_size.to_bytes(4, byteorder="big")
+
+        # 2. Encrypt the data BEFORE sending (CRITICAL FIX)
+        encrypted_data = self.dns_packet_parser.codec_transform(
+            data_bytes, encrypt=True
+        )
+
+        mtu_char_len, _ = self.dns_packet_parser.calculate_upload_mtu(
+            domain=domain, mtu=64
+        )
+
+        # 3. Build the DNS Query with encrypted data
+        dns_queries = await self.dns_packet_parser.build_request_dns_query(
+            domain=domain,
+            session_id=random.randint(0, 255),
+            packet_type=Packet_Type.MTU_DOWN_REQ,
+            data=encrypted_data,  # Pass the encrypted data here!
+            mtu_chars=mtu_char_len,
+            encode_data=True,
+            qType=DNS_Record_Type.TXT,
+        )
+
+        if not dns_queries:
+            return False
+
+        response = await self._send_and_receive_dns(
+            dns_queries[0], dns_server, dns_port, self.timeout
+        )
+        packet_type, returned_data = await self._process_received_packet(response)
+
+        # Handle response using switch logic
+        if packet_type == Packet_Type.MTU_DOWN_RES:
+            return True
         return False
 
     async def test_upload_mtu_size(
         self, domain: str, dns_server: str, dns_port: int, default_mtu: int
     ) -> tuple:
-        """Test and adjust upload MTU size based on network conditions."""
-        self.logger.debug(
-            f"Testing upload MTU size for domain {domain} via resolver {dns_server}..."
-        )
-
         try:
             mtu_char_len, mtu_bytes = self.dns_packet_parser.calculate_upload_mtu(
                 domain=domain, mtu=0
             )
-
             if default_mtu > 512 or default_mtu <= 0:
                 default_mtu = 512
-
             if mtu_bytes > default_mtu:
                 mtu_bytes = default_mtu
-
-            min_mtu = 0
-            max_mtu_candidate = default_mtu
-            optimal_mtu = 0
 
             test_fn = functools.partial(
                 self.send_upload_mtu_test, domain, dns_server, dns_port
             )
             optimal_mtu = await self._binary_search_mtu(
-                test_fn, min_mtu, max_mtu_candidate, min_threshold=30
+                test_fn, 0, default_mtu, min_threshold=30
             )
 
             if optimal_mtu > 29:
@@ -278,26 +391,30 @@ class MasterDnsVPNClient:
                     domain=domain, mtu=optimal_mtu
                 )
                 return True, mtu_bytes, mtu_char_len
-
         except Exception as e:
-            self.logger.debug(
-                f"Error calculating initial upload MTU for domain {domain} via resolver {dns_server}: {e}"
-            )
-
+            self.logger.debug(f"Error calculating upload MTU for {domain}: {e}")
         return False, 0, 0
 
-    async def test_download_mtu_size(self) -> None:
-        """Test and adjust download MTU size based on network conditions."""
-        # Placeholder for MTU testing logic
-        pass
+    async def test_download_mtu_size(
+        self, domain: str, dns_server: str, dns_port: int, default_mtu: int
+    ) -> tuple:
+        try:
+            test_fn = functools.partial(
+                self.send_download_mtu_test, domain, dns_server, dns_port
+            )
+            optimal_mtu = await self._binary_search_mtu(
+                test_fn, 0, default_mtu, min_threshold=30
+            )
 
-    async def test_mtu_sizes(self) -> Optional[bool]:
-        """Test and adjust MTU sizes based on network conditions."""
+            if optimal_mtu >= max(30, self.min_download_mtu):
+                return True, optimal_mtu
+        except Exception as e:
+            self.logger.debug(f"Error calculating download MTU for {domain}: {e}")
+        return False, 0
 
+    async def test_mtu_sizes(self) -> bool:
         self.logger.info("=" * 80)
-        self.logger.info(
-            "<y>Testing upload MTU sizes for all resolver-domain pairs...</y>"
-        )
+        self.logger.info("<y>Testing MTU sizes for all resolver-domain pairs...</y>")
 
         for connection in self.connections_map:
             if not connection or self.should_stop.is_set():
@@ -305,98 +422,178 @@ class MasterDnsVPNClient:
 
             domain = connection.get("domain")
             resolver = connection.get("resolver")
-            dns_server = resolver
             dns_port = 53
-            upload_mtu = self.max_upload_mtu
 
-            # Set initial MTU values
             connection["is_valid"] = False
             connection["upload_mtu_bytes"] = 0
             connection["upload_mtu_chars"] = 0
             connection["download_mtu_bytes"] = 0
             connection["packet_loss"] = 100
 
-            is_valid, mtu_bytes, mtu_char_len = await self.test_upload_mtu_size(
-                domain=domain,
-                dns_server=dns_server,
-                dns_port=dns_port,
-                default_mtu=upload_mtu,
+            # Step 1: Upload MTU
+            up_valid, up_mtu_bytes, up_mtu_char = await self.test_upload_mtu_size(
+                domain, resolver, dns_port, self.max_upload_mtu
             )
 
-            if is_valid and (
-                self.min_upload_mtu == 0 or mtu_bytes >= self.min_upload_mtu
+            if not up_valid or (
+                self.min_upload_mtu > 0 and up_mtu_bytes < self.min_upload_mtu
             ):
-                connection["is_valid"] = True
-                connection["upload_mtu_bytes"] = mtu_bytes
-                connection["upload_mtu_chars"] = mtu_char_len
-                self.logger.info(
-                    f"<green>Connection valid for domain <cyan>{domain}</cyan> via resolver <cyan>{resolver}</cyan> with upload MTU <cyan>{mtu_bytes}</cyan> bytes ({mtu_char_len} chars).</green>"
+                self.logger.warning(
+                    f"Connection invalid for {domain} via {resolver}: Upload MTU failed."
                 )
-            else:
-                self.logger.info(
-                    f"Connection invalid for domain {domain} via resolver <red>{resolver}</red>. <red>Upload MTU test failed or below minimum.</red>"
-                )
+                continue
 
-        self.logger.info(
-            "Testing download MTU sizes for all valid resolver-domain pairs..."
+            # Step 2: Download MTU
+            down_valid, down_mtu_bytes = await self.test_download_mtu_size(
+                domain, resolver, dns_port, self.max_download_mtu
+            )
+
+            if not down_valid or (
+                self.min_download_mtu > 0 and down_mtu_bytes < self.min_download_mtu
+            ):
+                self.logger.warning(
+                    f"Connection invalid for {domain} via {resolver}: Download MTU failed."
+                )
+                continue
+
+            # Marking as Valid
+            connection["is_valid"] = True
+            connection["upload_mtu_bytes"] = up_mtu_bytes
+            connection["upload_mtu_chars"] = up_mtu_char
+            connection["download_mtu_bytes"] = down_mtu_bytes
+            connection["packet_loss"] = 0
+
+            self.logger.info(
+                f"<green>Valid: <cyan>{domain}</cyan> via <cyan>{resolver}</cyan> | "
+                f"UP: {up_mtu_bytes}B ({up_mtu_char}c) | DOWN: {down_mtu_bytes}B</green>"
+            )
+
+        valid_conns = [c for c in self.connections_map if c.get("is_valid")]
+        if not valid_conns:
+            self.logger.error(
+                "<red>No valid connections found after MTU testing!</red>"
+            )
+            return False
+
+        return True
+
+    # ---------------------------------------------------------
+    # Core Loop & Session Setup
+    # ---------------------------------------------------------
+    async def _init_session(self, domain: str, resolver: str) -> bool:
+        """Initialize a new session with the server."""
+        self.logger.info(f"Initializing session via {resolver} for {domain}...")
+
+        mtu_char_len, _ = self.dns_packet_parser.calculate_upload_mtu(
+            domain=domain, mtu=64
+        )
+        dns_queries = await self.dns_packet_parser.build_request_dns_query(
+            domain=domain,
+            session_id=0,  # 0 signals a request for a new session ID
+            packet_type=Packet_Type.SESSION_INIT,
+            data=b"INIT",
+            mtu_chars=mtu_char_len,
+            encode_data=True,
         )
 
-    async def sleep(self, seconds: float) -> None:
-        """Async sleep helper."""
-        try:
-            await asyncio.wait_for(self.should_stop.wait(), timeout=seconds)
-        except asyncio.TimeoutError:
-            pass
+        if not dns_queries:
+            return False
+
+        response = await self._send_and_receive_dns(
+            dns_queries[0], resolver, 53, self.timeout
+        )
+        packet_type, returned_data = await self._process_received_packet(response)
+
+        # Handle response using switch logic
+        if packet_type == Packet_Type.SESSION_ACCEPT and returned_data:
+            try:
+                self.session_id = int(returned_data.decode("utf-8"))
+                return True
+            except ValueError:
+                self.logger.error("Failed to parse Session ID from server.")
+
+        return False
 
     async def run_client(self) -> None:
         """Run the MasterDnsVPN Client main logic."""
         self.logger.info("Setting up connections...")
         try:
             await self.create_connection_map()
-            await self.test_mtu_sizes()
 
-            # new session
-            # set mtu sizes
+            if not await self.test_mtu_sizes():
+                return
+
+            # Sync MTUs - Select lowest possible valid MTU for robust connections
+            valid_conns = [c for c in self.connections_map if c.get("is_valid")]
+            self.synced_upload_mtu = min(c["upload_mtu_bytes"] for c in valid_conns)
+            self.synced_download_mtu = min(c["download_mtu_bytes"] for c in valid_conns)
+
+            self.logger.info(
+                f"<green>Synced Global MTU -> UP: {self.synced_upload_mtu}B, DOWN: {self.synced_download_mtu}B</green>"
+            )
+
+            selected_conn = await self.select_connection()
+            if not selected_conn:
+                return
+
+            if await self._init_session(
+                selected_conn["domain"], selected_conn["resolver"]
+            ):
+                self.logger.success(
+                    f"<g>Session Established! Session ID: {self.session_id}</g>"
+                )
+                await self._main_tunnel_loop()
+            else:
+                self.logger.error("Session initialization failed.")
+
         except Exception as e:
             self.logger.error(f"Error setting up connections: {e}")
             return
 
+    async def _main_tunnel_loop(self):
+        """Placeholder for continuous VPN traffic loop."""
+        self.logger.info("Entering VPN Tunnel Main Loop...")
+        while not self.should_stop.is_set():
+            await asyncio.sleep(1)
+
+    # ---------------------------------------------------------
+    # App Lifecycle
+    # ---------------------------------------------------------
     async def start(self) -> None:
-        """Start the MasterDnsVPN Client."""
         try:
             self.loop = asyncio.get_running_loop()
-
             self.logger.info("=" * 80)
             self.logger.success("<g>Starting MasterDnsVPN Client...</g>")
 
-            self.logger.debug(f"Checking configuration...")
-            if not self.domains:
-                self.logger.error("No domains configured for DNS tunneling.")
+            if not self.domains or not self.resolvers:
+                self.logger.error("Domains or Resolvers are missing in config.")
                 return
-
-            if not self.resolvers:
-                self.logger.error("No DNS resolvers configured.")
-                return
-
-            if self.encryption_method is None or self.encryption_key is None:
-                self.logger.error("Encryption method or key not configured.")
-                return
-
-            self.logger.debug(f"Configuration looks good.")
 
             while not self.should_stop.is_set():
                 self.logger.info("=" * 80)
                 self.logger.info("<green>Running MasterDnsVPN Client...</green>")
                 self.packets_queue.clear()
+
                 await self.run_client()
-                self.logger.info("=" * 80)
-                self.logger.error("<yellow>Retrying in 10 second...</yellow>")
-                await self.sleep(10)
+
+                if not self.should_stop.is_set():
+                    self.logger.info("=" * 80)
+                    self.logger.warning(
+                        "<yellow>Restarting Client workflow in 10 seconds...</yellow>"
+                    )
+                    await self._sleep(10)
 
         except asyncio.CancelledError:
             self.logger.info("MasterDnsVPN Client is stopping...")
         except Exception as e:
             self.logger.error(f"Error in MasterDnsVPN Client: {e}")
+
+    async def _sleep(self, seconds: float) -> None:
+        """Async sleep helper."""
+        try:
+            await asyncio.wait_for(self.should_stop.wait(), timeout=seconds)
+        except asyncio.TimeoutError:
+            pass
 
     def _signal_handler(self, signum, frame) -> None:
         """Handle termination signals to stop the client gracefully.
