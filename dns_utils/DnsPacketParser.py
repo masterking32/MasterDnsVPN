@@ -6,7 +6,7 @@
 from typing import Any
 import random
 import math
-from dns_utils.DNS_ENUMS import PACKET_TYPES, RESOURCE_RECORDS, R_CODES, Q_CLASSES
+from dns_utils.DNS_ENUMS import Packet_Type, DNS_Record_Type, DNS_rCode, DNS_QClass
 from typing import Any, Optional
 import hashlib
 
@@ -283,7 +283,7 @@ class DnsPacketParser:
         Create a simple DNS question packet for the given domain and type.
         """
         try:
-            if qType is None or qType not in RESOURCE_RECORDS.values():
+            if qType is None or qType not in DNS_Record_Type.__dict__.values():
                 self.logger.error(f"Invalid qType value: {qType}.")
                 return b""
 
@@ -300,7 +300,7 @@ class DnsPacketParser:
                     {
                         "qName": domain,
                         "qType": qType,
-                        "qClass": Q_CLASSES["IN"],  # Internet
+                        "qClass": DNS_QClass.IN,  # Internet
                     }
                 ],
                 "answers": [],
@@ -624,7 +624,7 @@ class DnsPacketParser:
         data: bytes,
         mtu_chars: int,
         encode_data: bool = True,
-        qType: int = RESOURCE_RECORDS["TXT"],
+        qType: int = DNS_Record_Type.TXT,
     ) -> bytes:
         labels = self.generate_labels(
             domain, session_id, packet_type, data, mtu_chars, encode_data
@@ -719,8 +719,8 @@ class DnsPacketParser:
 
             answer = {
                 "name": domain,
-                "type": RESOURCE_RECORDS["TXT"],
-                "class": Q_CLASSES["IN"],
+                "type": DNS_Record_Type.TXT,
+                "class": DNS_QClass.IN,
                 "TTL": 0,
                 "rData": bytes([len(full_chunk_str)]) + full_chunk_str.encode("utf-8"),
             }

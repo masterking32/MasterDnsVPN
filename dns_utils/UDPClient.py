@@ -4,13 +4,20 @@
 # Year: 2026
 
 import socket
-import time
 import asyncio
 from typing import Optional
 
 
 class UDPClient:
-    def __init__(self, logger, server_host: str = '127.0.0.1', server_port: int = 53, timeout: float = 10.0, buffer_size: int = 65507, recv_callback=None):
+    def __init__(
+        self,
+        logger,
+        server_host: str = "127.0.0.1",
+        server_port: int = 53,
+        timeout: float = 10.0,
+        buffer_size: int = 65507,
+        recv_callback=None,
+    ):
         """
         Initialize UDP client.
         Args:
@@ -28,7 +35,9 @@ class UDPClient:
         self.logger = logger
         self.recv_callback = recv_callback
 
-    async def send_and_receive_async(self, data: bytes, retries: int = 1) -> Optional[tuple[bytes, tuple]]:
+    async def send_and_receive_async(
+        self, data: bytes, retries: int = 1
+    ) -> Optional[tuple[bytes, tuple]]:
         """
         Async send and receive using asyncio loop.sock_sendto / sock_recvfrom.
         Returns (response_bytes, addr) or None on failure.
@@ -49,17 +58,20 @@ class UDPClient:
 
         for attempt in range(retries):
             if attempt > 0:
-                self.logger.debug(f"Retry attempt {attempt}/{retries-1}")
+                self.logger.debug(f"Retry attempt {attempt}/{retries - 1}")
             try:
-                await loop.sock_sendto(self.sock, data, (self.server_host, self.server_port))
+                await loop.sock_sendto(
+                    self.sock, data, (self.server_host, self.server_port)
+                )
                 try:
-                    resp, addr = await asyncio.wait_for(loop.sock_recvfrom(self.sock, self.buffer_size), timeout=self.timeout)
-                    self.logger.debug(
-                        f"Async received {len(resp)} bytes from {addr}")
+                    resp, addr = await asyncio.wait_for(
+                        loop.sock_recvfrom(self.sock, self.buffer_size),
+                        timeout=self.timeout,
+                    )
+                    self.logger.debug(f"Async received {len(resp)} bytes from {addr}")
                     return resp, addr
                 except asyncio.TimeoutError:
-                    self.logger.debug(
-                        "Timeout: No response from server (async)")
+                    self.logger.debug("Timeout: No response from server (async)")
             except Exception as e:
                 self.logger.debug(f"Failed to send data async: {e}")
 

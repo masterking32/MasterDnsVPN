@@ -18,7 +18,7 @@ from server_config import master_dns_vpn_config
 
 from dns_utils.utils import getLogger, get_encrypt_key
 from dns_utils.DnsPacketParser import DnsPacketParser
-from dns_utils.DNS_ENUMS import PACKET_TYPES, RESOURCE_RECORDS
+from dns_utils.DNS_ENUMS import Packet_Type, DNS_Record_Type
 
 # Ensure UTF-8 output for consistent logging
 try:
@@ -90,6 +90,24 @@ class MasterDnsVPNServer:
             del self.sessions[session_id]
             self.logger.info(f"Closed inactive session with ID: {session_id}")
 
+    async def send_udp_response(self, response: bytes, addr) -> bool:
+        """Async send helper to write UDP response to addr using the server socket."""
+        if not response or addr is None:
+            return False
+        try:
+            if self.udp_sock is None:
+                self.logger.error("UDP socket is not initialized for sending response.")
+                return False
+
+            if self.loop is None:
+                self.loop = asyncio.get_running_loop()
+            await self.loop.sock_sendto(self.udp_sock, response, addr)
+            self.logger.debug(f"Sent DNS response to {addr}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to send DNS response to {addr}: {e}")
+            return False
+
     async def handle_vpn_packet(
         self,
         packet_type: int,
@@ -102,23 +120,45 @@ class MasterDnsVPNServer:
     ) -> Optional[bytes]:
         """Handle VPN packet based on its type."""
 
-        if packet_type == PACKET_TYPES["SERVER_UPLOAD_TEST"]:
-            return await self.handle_packet_upload_test(
-                data=data, request_domain=request_domain
-            )
-        elif packet_type == PACKET_TYPES["SERVER_DOWNLOAD_TEST"]:
-            return await self.handle_packet_download_test(
-                data=data, labels=labels, request_domain=request_domain, addr=addr
-            )
-        elif packet_type == PACKET_TYPES["NEW_SESSION"]:
-            return await self.handle_packet_new_session(
-                data=data, request_domain=request_domain, addr=addr
-            )
+        handlers = {
+            Packet_Type.MTU_UP_REQ: self._handle_mtu_up,
+            Packet_Type.MTU_DOWN_REQ: self._handle_mtu_down,
+            Packet_Type.SESSION_INIT: self._handle_session_init,
+        }
+
+        handler = handlers.get(packet_type, self._handle_unknown)
+        return await handler(
+            data=data,
+            labels=labels,
+            request_domain=request_domain,
+            addr=addr,
+            parsed_packet=parsed_packet,
+            session_id=session_id,
+        )
+
+    async def _handle_unknown(
+        self,
+        data=None,
+        labels=None,
+        request_domain=None,
+        addr=None,
+        parsed_packet=None,
+        session_id=None,
+    ) -> Optional[bytes]:
+        self.logger.info(
+            f"Received unknown packet type from {addr}. No handler available."
+        )
 
         return None
 
-    async def handle_packet_new_session(
-        self, data: bytes, request_domain: str, addr
+    async def _handle_session_init(
+        self,
+        data=None,
+        labels=None,
+        request_domain=None,
+        addr=None,
+        parsed_packet=None,
+        session_id=None,
     ) -> Optional[bytes]:
         """Handle NEW_SESSION VPN packet."""
 
@@ -127,7 +167,7 @@ class MasterDnsVPNServer:
             self.logger.error(
                 f"Failed to create new session for NEW_SESSION packet from {addr}"
             )
-            return False, None
+            return None
 
         txt_str = str(new_session_id)
         data_bytes = self.dns_parser.codec_transform(txt_str.encode(), encrypt=True)
@@ -135,15 +175,21 @@ class MasterDnsVPNServer:
         response_packet = await self.dns_parser.generate_vpn_response_packet(
             domain=request_domain,
             session_id=new_session_id,
-            packet_type=PACKET_TYPES["NEW_SESSION"],
+            packet_type=Packet_Type.SESSION_ACCEPT,
             data=data_bytes,
             question_packet=data,
         )
 
         return response_packet
 
-    async def handle_packet_download_test(
-        self, data: bytes, labels: str, request_domain: str, addr
+    async def _handle_mtu_down(
+        self,
+        data=None,
+        labels=None,
+        request_domain=None,
+        addr=None,
+        parsed_packet=None,
+        session_id=None,
     ) -> Optional[bytes]:
         """Handle SERVER_UPLOAD_TEST VPN packet."""
 
@@ -190,16 +236,22 @@ class MasterDnsVPNServer:
 
         response_packet = await self.dns_parser.generate_vpn_response_packet(
             domain=request_domain,
-            session_id=255,
-            packet_type=PACKET_TYPES["SERVER_DOWNLOAD_TEST"],
+            session_id=session_id if session_id is not None else 255,
+            packet_type=Packet_Type.MTU_DOWN_RES,
             data=data_bytes,
             question_packet=data,
         )
 
         return response_packet
 
-    async def handle_packet_upload_test(
-        self, data: bytes, request_domain: str
+    async def _handle_mtu_up(
+        self,
+        data=None,
+        labels=None,
+        request_domain=None,
+        addr=None,
+        parsed_packet=None,
+        session_id=None,
     ) -> Optional[bytes]:
         """Handle SERVER_UPLOAD_TEST VPN packet."""
 
@@ -208,8 +260,8 @@ class MasterDnsVPNServer:
 
         response_packet = await self.dns_parser.generate_vpn_response_packet(
             domain=request_domain,
-            session_id=1,
-            packet_type=PACKET_TYPES["SERVER_UPLOAD_TEST"],
+            session_id=session_id if session_id is not None else 255,
+            packet_type=Packet_Type.MTU_UP_RES,
             data=data_bytes,
             question_packet=data,
         )
@@ -241,7 +293,7 @@ class MasterDnsVPNServer:
                 "",
             )
 
-            if questions[0]["qType"] != RESOURCE_RECORDS["TXT"]:
+            if questions[0]["qType"] != DNS_Record_Type.TXT:
                 self.logger.warning(
                     f"Invalid DNS query type for VPN packet from {addr}: {questions[0]['qType']}"
                 )
@@ -279,13 +331,14 @@ class MasterDnsVPNServer:
                 return None
 
             packet_type = extracted_header[1]
-            if packet_type not in PACKET_TYPES.values():
+            if packet_type not in DNS_Record_Type.__dict__.values():
                 self.logger.warning(
                     f"Invalid VPN packet type from labels for packet from {addr}: {packet_type}"
                 )
                 return None
 
             session_id = extracted_header[0]
+
             response = await self.handle_vpn_packet(
                 packet_type=packet_type,
                 session_id=session_id,
@@ -302,24 +355,6 @@ class MasterDnsVPNServer:
             self.logger.error(f"Error handling VPN packet from {addr}: {e}")
 
         return None
-
-    async def send_udp_response(self, response: bytes, addr) -> bool:
-        """Async send helper to write UDP response to addr using the server socket."""
-        if not response or addr is None:
-            return False
-        try:
-            if self.udp_sock is None:
-                self.logger.error("UDP socket is not initialized for sending response.")
-                return False
-
-            if self.loop is None:
-                self.loop = asyncio.get_running_loop()
-            await self.loop.sock_sendto(self.udp_sock, response, addr)
-            self.logger.debug(f"Sent DNS response to {addr}")
-            return True
-        except Exception as e:
-            self.logger.error(f"Failed to send DNS response to {addr}: {e}")
-            return False
 
     async def handle_single_request(self, data, addr):
         """
@@ -390,23 +425,6 @@ class MasterDnsVPNServer:
                     self.logger.error(f"Error during session cleanup: {e}")
         finally:
             self.logger.debug("Session cleanup loop stopped.")
-
-    def _cancel_background_tasks(self) -> None:
-        """Cancel background tasks from the event loop thread."""
-        try:
-            if getattr(self, "_dns_task", None):
-                try:
-                    self._dns_task.cancel()
-                except Exception:
-                    pass
-            if getattr(self, "_session_cleanup_task", None):
-                try:
-                    self._session_cleanup_task.cancel()
-                except Exception:
-                    pass
-            self.logger.debug("Background tasks cancellation requested.")
-        except Exception as e:
-            self.logger.error(f"Error cancelling background tasks: {e}")
 
     async def start(self) -> None:
         """Initialize sockets, start background tasks, and wait for shutdown signal."""
@@ -513,6 +531,23 @@ class MasterDnsVPNServer:
 
         os.exit(0)
         self.logger.info("MasterDnsVPN Server stopped.")
+
+    def _cancel_background_tasks(self) -> None:
+        """Cancel background tasks from the event loop thread."""
+        try:
+            if getattr(self, "_dns_task", None):
+                try:
+                    self._dns_task.cancel()
+                except Exception:
+                    pass
+            if getattr(self, "_session_cleanup_task", None):
+                try:
+                    self._session_cleanup_task.cancel()
+                except Exception:
+                    pass
+            self.logger.debug("Background tasks cancellation requested.")
+        except Exception as e:
+            self.logger.error(f"Error cancelling background tasks: {e}")
 
     def _signal_handler(self, signum: int, frame: Any = None) -> None:
         """

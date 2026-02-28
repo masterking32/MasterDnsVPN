@@ -9,17 +9,6 @@ MasterDnsVPN provides both server and client components, featuring robust encryp
 
 ---
 
-# ℹ️ Project Status
-
-### This project is no longer actively maintained. Development was paused due to the emergence of similar DNS tunneling solutions for censorship bypass. However, the codebase remains available as a reference or foundation for your own DNS tunneling VPN implementation.
-
-#### **Note:** The code is incomplete and may require additional development to function as intended.
-
-### For an alternative DNS tunneling project, see [SlipStream Rust Plus](https://github.com/Fox-Fig/slipstream-rust-plus).
-
-
----
-
 ## 🛠️ How It Works
 
 ```
