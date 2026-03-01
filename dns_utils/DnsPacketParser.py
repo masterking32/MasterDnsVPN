@@ -462,10 +462,6 @@ class DnsPacketParser:
         return encoded
 
     def base_decode(self, encoded_str: str, lowerCaseOnly: bool = True) -> bytes:
-        """
-        Decode base lowercase (0-9, a-z) or mixed case string to bytes.
-        """
-
         alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
         if not lowerCaseOnly:
             alphabet = self.base9x_alphabet
@@ -474,19 +470,15 @@ class DnsPacketParser:
         char_map = {c: i for i, c in enumerate(alphabet)}
         num = 0
         for char in encoded_str:
-            if char not in char_map:
-                continue
-            num = num * base + char_map[char]
+            if char in char_map:
+                num = num * base + char_map[char]
 
         if num == 0:
-            return b"\x00"
+            return b""
 
-        byte_length = (num.bit_length() + 7) // 8
-        decoded = num.to_bytes(byte_length, byteorder="big")
-
-        if decoded.startswith(b"\x01"):
-            return decoded[1:]
-        return decoded
+        # تبدیل به بایت و حذف بایت نشانه \x01
+        full_bytes = num.to_bytes((num.bit_length() + 7) // 8, byteorder="big")
+        return full_bytes[1:] if full_bytes.startswith(b"\x01") else full_bytes
 
     def xor_data(self, data: bytes, key: bytes) -> bytes:
         """
@@ -629,6 +621,12 @@ class DnsPacketParser:
         labels = self.generate_labels(
             domain, session_id, packet_type, data, mtu_chars, encode_data
         )
+
+        if packet_type == Packet_Type.DATA_KCP and len(labels) != 1:
+            self.logger.warning(
+                f"DATA_KCP too large for single QNAME, dropping. fragments={len(labels)}"
+            )
+            return []
 
         if not labels or len(labels) == 0:
             self.logger.debug("No labels generated for DNS query.")

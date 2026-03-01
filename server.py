@@ -140,47 +140,6 @@ class MasterDnsVPNServer:
             session_id=session_id,
         )
 
-    async def _handle_data_kcp(
-        self,
-        data=None,
-        labels=None,
-        request_domain=None,
-        addr=None,
-        parsed_packet=None,
-        session_id=None,
-    ) -> Optional[bytes]:
-        """Handle incoming KCP/MUX data from client and return KCP responses."""
-        if session_id not in self.sessions:
-            return None
-
-        self.sessions[session_id]["last_packet_time"] = asyncio.get_event_loop().time()
-        kcp_obj, downlink_queue, _ = self._get_or_create_kcp(session_id)
-
-        extracted_data = self.dns_parser.extract_vpn_data_from_labels(labels)
-        if extracted_data:
-            kcp_obj.input(extracted_data)
-
-        try:
-            response_payload = downlink_queue.get_nowait()
-        except asyncio.QueueEmpty:
-            response_payload = b""
-
-        data_bytes = (
-            self.dns_parser.codec_transform(response_payload, encrypt=True)
-            if response_payload
-            else b""
-        )
-
-        response_packet = await self.dns_parser.generate_vpn_response_packet(
-            domain=request_domain,
-            session_id=session_id,
-            packet_type=Packet_Type.DATA_KCP,
-            data=data_bytes,
-            question_packet=data,
-        )
-
-        return response_packet
-
     async def _handle_set_mtu(
         self,
         data=None,
@@ -577,15 +536,36 @@ class MasterDnsVPNServer:
                 kcp_obj.nodelay(1, 10, 2, 1)
 
             kcp_mtu = int(max(session_info.get("download_mtu", 512) - 50, 100))
+            try:
+                kcp_obj.mtu = kcp_mtu  # Property for RealistikDash KCP
+            except Exception:
+                pass
             if hasattr(kcp_obj, "setmtu"):
-                kcp_obj.setmtu(kcp_mtu)
+                try:
+                    kcp_obj.setmtu(kcp_mtu)
+                except Exception:
+                    pass
             elif hasattr(kcp_obj, "set_mtu"):
-                kcp_obj.set_mtu(kcp_mtu)
+                try:
+                    kcp_obj.set_mtu(kcp_mtu)
+                except Exception:
+                    pass
 
+            try:
+                kcp_obj.snd_wnd = 128  # Property for RealistikDash KCP
+                kcp_obj.rcv_wnd = 128
+            except Exception:
+                pass
             if hasattr(kcp_obj, "set_window_size"):
-                kcp_obj.set_window_size(128, 128)
+                try:
+                    kcp_obj.set_window_size(128, 128)
+                except Exception:
+                    pass
             elif hasattr(kcp_obj, "wndsize"):
-                kcp_obj.wndsize(128, 128)
+                try:
+                    kcp_obj.wndsize(128, 128)
+                except Exception:
+                    pass
 
             session_info["kcp"] = kcp_obj
             self.logger.info(f"Initialized KCP engine for Session {session_id}")
@@ -729,6 +709,7 @@ class MasterDnsVPNServer:
 
         # 1. Feed UDP payload to KCP Engine
         extracted_data = self.dns_parser.extract_vpn_data_from_labels(labels)
+
         if extracted_data:
             try:
                 if hasattr(kcp_obj, "receive"):

@@ -648,12 +648,15 @@ class MasterDnsVPNClient:
             + len(data).to_bytes(2, byteorder="big")
         )
         packet = header + data
-        if hasattr(self.kcp, "enqueue"):
+
+        if hasattr(self.kcp, "send"):
+            self.kcp.send(packet)
+        elif hasattr(self.kcp, "enqueue"):
             self.kcp.enqueue(packet)
             if hasattr(self.kcp, "flush"):
                 self.kcp.flush()
-        elif hasattr(self.kcp, "send"):
-            self.kcp.send(packet)
+        else:
+            self.logger.error("KCP object has no send/enqueue method")
 
     async def _kcp_update_loop(self):
         """Tick the KCP internal clock and read incoming reliable streams."""
@@ -734,32 +737,40 @@ class MasterDnsVPNClient:
                 qType=DNS_Record_Type.TXT,
             )
 
-            if dns_queries:
-                response = await self._send_and_receive_dns(
-                    dns_queries[0], resolver, 53, timeout=3.0
+            if not dns_queries:
+                continue
+
+            if len(dns_queries) != 1:
+                self.logger.warning(
+                    f"DATA_KCP produced {len(dns_queries)} DNS queries (should be 1). "
+                    f"Consider lowering KCP MTU. upload_mtu={self.synced_upload_mtu}"
                 )
-                if response:
-                    packet_type, returned_data = await self._process_received_packet(
-                        response
-                    )
-                    if packet_type == Packet_Type.DATA_KCP and returned_data:
-                        try:
-                            if hasattr(self.kcp, "receive"):
-                                self.kcp.receive(returned_data)
-                            elif hasattr(self.kcp, "input"):
-                                self.kcp.input(returned_data)
-                        except Exception as e:
-                            self.logger.debug(
-                                f"KCP input rejected corrupted packet: {e}"
-                            )
+                continue
 
-                        try:
-                            self.kcp.update()
-                        except Exception:
-                            self.kcp.update(int(time.time() * 1000) & 0xFFFFFFFF)
+            response = await self._send_and_receive_dns(
+                dns_queries[0], resolver, 53, timeout=3.0
+            )
 
-                        if len(returned_data) > 0:
-                            self.kcp_tx_queue.put_nowait(b"")
+            if response:
+                packet_type, returned_data = await self._process_received_packet(
+                    response
+                )
+                if packet_type == Packet_Type.DATA_KCP and returned_data:
+                    try:
+                        if hasattr(self.kcp, "receive"):
+                            self.kcp.receive(returned_data)
+                        elif hasattr(self.kcp, "input"):
+                            self.kcp.input(returned_data)
+                    except Exception as e:
+                        self.logger.debug(f"KCP input rejected corrupted packet: {e}")
+
+                    try:
+                        self.kcp.update()
+                    except Exception:
+                        self.kcp.update(int(time.time() * 1000) & 0xFFFFFFFF)
+
+                    if len(returned_data) > 0:
+                        self.kcp_tx_queue.put_nowait(b"")
 
     async def _close_local_conn(self, conn_id: int):
         """Safely close local TCP connection."""
