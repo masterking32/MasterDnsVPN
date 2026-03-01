@@ -276,6 +276,13 @@ class MasterDnsVPNServer:
             question_packet=data,
         )
 
+        # Ensure KCP engine is created for this session immediately so the first
+        # DATA_KCP packets won't be rejected due to missing session state.
+        try:
+            self._get_or_create_kcp(new_session_id)
+        except Exception:
+            pass
+
         return response_packet
 
     async def _handle_mtu_down(
@@ -729,7 +736,25 @@ class MasterDnsVPNServer:
                 elif hasattr(kcp_obj, "input"):
                     kcp_obj.input(extracted_data)
             except Exception as e:
-                self.logger.debug(f"Server KCP Engine rejected bad packet: {e}")
+                # Log additional debug information to help diagnose conv-id/data issues
+                try:
+                    hex_snippet = extracted_data[:16].hex()
+                    data_len = len(extracted_data)
+                except Exception:
+                    hex_snippet = ""
+                    data_len = 0
+
+                kcp_conv = None
+                try:
+                    # Some KCP implementations expose a conv attribute
+                    if hasattr(kcp_obj, "conv"):
+                        kcp_conv = getattr(kcp_obj, "conv")
+                except Exception:
+                    kcp_conv = None
+
+                self.logger.debug(
+                    f"Server KCP Engine rejected bad packet: {e} | len={data_len} | hex={hex_snippet} | kcp_conv={kcp_conv}"
+                )
 
         # 2. Force immediate KCP update to generate ACKs instantly
         try:
