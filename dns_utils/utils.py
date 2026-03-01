@@ -71,7 +71,7 @@ def getLogger(
     # ---------------------------------------------#
     # Logging configuration
     LOG_LEVEL = log_level.upper()
-    log_format = f"<cyan>[DNSTT Python]</cyan> <green>[{{time:HH:mm:ss}}]</green> <level>[{{level}}]</level> <white><b>{{message}}</b></white>"
+    log_format = f"<cyan>[MasterDnsVPN]</cyan> <green>[{{time:HH:mm:ss}}]</green> <level>[{{level}}]</level> <white><b>{{message}}</b></white>"
 
     logger.remove()
     logger.add(
@@ -82,7 +82,7 @@ def getLogger(
     )
 
     if logFile:
-        log_file_format = "[DNSTT Python] [{time:HH:mm:ss}] [{level}] {message}"
+        log_file_format = "[MasterDnsVPN] [{time:HH:mm:ss}] [{level}] {message}"
 
         logger.add(
             logFile,

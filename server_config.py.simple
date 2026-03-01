@@ -63,3 +63,11 @@ class master_dns_vpn_config:
     # Session Cleanup Interval (in seconds).
     # Frequency at which the server checks for and removes expired sessions.
     SESSION_CLEANUP_INTERVAL = 60  # 1 minute
+
+    # Forwarding Configuration
+    # -------------------------------------------------
+    # IP address and port to which the server will forward decrypted traffic.
+    # This is typically the IP and port of a local service or proxy that will handle the traffic after decryption.
+    # For example, if you have a local proxy running on port 8080, set FORWARD_PORT to 8080.
+    FORWARD_IP = "127.0.0.1"
+    FORWARD_PORT = 8080

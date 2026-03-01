@@ -102,3 +102,10 @@ class master_dns_vpn_config:
     # The maximum time (in seconds) the client will wait for a DNS response from the resolver servers.
     # If no response is received within this time frame, the query is considered failed.
     DNS_QUERY_TIMEOUT = 10
+
+    # Client Listening Configuration
+    # -------------------------------------------------
+    # The IP address and port on which the client will listen for incoming connections from the local machine.
+    # This is typically set to localhost (127.0.0.1) for local testing or internal use.
+    LISTEN_IP = "127.0.0.1"
+    LISTEN_PORT = 1080
