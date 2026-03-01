@@ -15,13 +15,15 @@ class Packet_Type:
     MTU_DOWN_REQ = 0x03  # Client requests Download MTU test
     MTU_DOWN_RES = 0x04  # Server sends Download MTU payload
     SESSION_INIT = 0x05  # Client requests new session with synced MTU
-    SESSION_ACCEPT = 0x06  # Server accepts session and KCP Conv ID
+    SESSION_ACCEPT = 0x06  # Server accepts session and Conv ID
     SET_MTU_REQ = 0x07  # Client sends SET MTU to server
     SET_MTU_RES = 0x08  # Server confirms MTU update
     PING = 0x09  # Client ping for latency check
     PONG = 0x0A  # Server pong response
-    DATA_KCP = 0x0B  # Standard KCP multiplexed payload
-    SESSION_CLOSE = 0x0C  # Client or server signals session close
+    SYN = 0x0B  # Client initiates TCP connection (SYN)
+    SYN_ACK = 0x0C  # Server acknowledges TCP connection (SYN-ACK)
+    ACK = 0x0D  # Client ACKs TCP connection (ACK)
+    DATA = 0x0E  # Client sends data packet
     ERROR_DROP = 0xFF  # Invalid/Drop signal
 
 

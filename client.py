@@ -13,8 +13,6 @@ from typing import Optional, Tuple
 import signal
 import ctypes
 from ctypes import wintypes
-import kcp
-import time
 
 from client_config import master_dns_vpn_config
 
@@ -638,225 +636,25 @@ class MasterDnsVPNClient:
             return
 
     # ---------------------------------------------------------
-    # KCP & TCP Multiplexing Logic
+    # TCP Multiplexing Logic
     # ---------------------------------------------------------
-    def _send_kcp_mux(self, conn_id: int, cmd: int, data: bytes = b""):
-        """Pack and send data via KCP Engine with Length Header [ConnID: 2][CMD: 1][Len: 2][Payload]"""
-        header = (
-            conn_id.to_bytes(2, byteorder="big")
-            + bytes([cmd])
-            + len(data).to_bytes(2, byteorder="big")
-        )
-        packet = header + data
-
-        if hasattr(self.kcp, "send"):
-            self.kcp.send(packet)
-        elif hasattr(self.kcp, "enqueue"):
-            self.kcp.enqueue(packet)
-            if hasattr(self.kcp, "flush"):
-                self.kcp.flush()
-        else:
-            self.logger.error("KCP object has no send/enqueue method")
-
-    async def _kcp_update_loop(self):
-        """Tick the KCP internal clock and read incoming reliable streams."""
-        while not self.should_stop.is_set():
-            try:
-                # Update Clock
-                try:
-                    self.kcp.update()
-                except Exception:
-                    current_ms = int(time.time() * 1000) & 0xFFFFFFFF
-                    self.kcp.update(current_ms)
-
-                # Fetch Data
-                if hasattr(self.kcp, "get_received"):
-                    data = self.kcp.get_received()
-                else:
-                    try:
-                        data = self.kcp.recv()
-                    except Exception:
-                        data = b""
-
-                if data:
-                    self.kcp_rx_buffer.extend(data)
-                    await self._process_rx_buffer()
-
-            except Exception as e:
-                self.logger.debug(f"KCP loop error: {e}")
-
-            await asyncio.sleep(0.01)
-
-    async def _process_rx_buffer(self):
-        """Demux buffered data and split by boundaries."""
-        while len(self.kcp_rx_buffer) >= 5:  # Header size
-            conn_id = int.from_bytes(self.kcp_rx_buffer[0:2], byteorder="big")
-            cmd = self.kcp_rx_buffer[2]
-            payload_len = int.from_bytes(self.kcp_rx_buffer[3:5], byteorder="big")
-
-            total_len = 5 + payload_len
-            if len(self.kcp_rx_buffer) < total_len:
-                break  # Wait for more data
-
-            payload = self.kcp_rx_buffer[5:total_len]
-            del self.kcp_rx_buffer[:total_len]
-
-            if cmd == 0x02:  # DAT
-                if conn_id in self.active_tcp_connections:
-                    writer = self.active_tcp_connections[conn_id][1]
-                    if not writer.is_closing():
-                        writer.write(payload)
-                        await writer.drain()
-            elif cmd == 0x03:  # FIN
-                await self._close_local_conn(conn_id)
-
-    async def _kcp_tx_and_poll_loop(self, domain: str, resolver: str):
-        """Consume KCP output queue and send via DNS, or poll if idle."""
-        mtu_char_len, _ = self.dns_packet_parser.calculate_upload_mtu(
-            domain=domain, mtu=self.synced_upload_mtu
-        )
-
-        while not self.should_stop.is_set():
-            try:
-                data = await asyncio.wait_for(self.kcp_tx_queue.get(), timeout=0.3)
-            except asyncio.TimeoutError:
-                data = b""
-
-            encrypted_data = (
-                self.dns_packet_parser.codec_transform(data, encrypt=True)
-                if data
-                else b""
-            )
-            dns_queries = await self.dns_packet_parser.build_request_dns_query(
-                domain=domain,
-                session_id=self.session_id,
-                packet_type=Packet_Type.DATA_KCP,
-                data=encrypted_data,
-                mtu_chars=mtu_char_len,
-                encode_data=True,
-                qType=DNS_Record_Type.TXT,
-            )
-
-            if not dns_queries:
-                continue
-
-            if len(dns_queries) != 1:
-                self.logger.warning(
-                    f"DATA_KCP produced {len(dns_queries)} DNS queries (should be 1). "
-                    f"Consider lowering KCP MTU. upload_mtu={self.synced_upload_mtu}"
-                )
-                continue
-
-            response = await self._send_and_receive_dns(
-                dns_queries[0], resolver, 53, timeout=3.0
-            )
-
-            if response:
-                packet_type, returned_data = await self._process_received_packet(
-                    response
-                )
-                if packet_type == Packet_Type.DATA_KCP and returned_data:
-                    try:
-                        if hasattr(self.kcp, "receive"):
-                            self.kcp.receive(returned_data)
-                        elif hasattr(self.kcp, "input"):
-                            self.kcp.input(returned_data)
-                    except Exception as e:
-                        self.logger.debug(f"KCP input rejected corrupted packet: {e}")
-
-                    try:
-                        self.kcp.update()
-                    except Exception:
-                        self.kcp.update(int(time.time() * 1000) & 0xFFFFFFFF)
-
-                    if len(returned_data) > 0:
-                        self.kcp_tx_queue.put_nowait(b"")
-
-    async def _close_local_conn(self, conn_id: int):
-        """Safely close local TCP connection."""
-        if conn_id in self.active_tcp_connections:
-            reader, writer = self.active_tcp_connections.pop(conn_id)
-            if not writer.is_closing():
-                writer.close()
-                try:
-                    await writer.wait_closed()
-                except Exception:
-                    pass
-            self.logger.debug(f"Local TCP {conn_id} closed.")
-
-    async def _handle_local_tcp_connection(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ):
-        """Handle incoming browser/local TCP connections and multiplex them."""
-        conn_id = random.randint(1, 65535)
-        while conn_id in self.active_tcp_connections:
-            conn_id = random.randint(1, 65535)
-
-        self.active_tcp_connections[conn_id] = (reader, writer)
-        client_addr = writer.get_extra_info("peername")
-        self.logger.info(f"New local connection {client_addr} -> Conn_ID: {conn_id}")
-
-        self._send_kcp_mux(conn_id, 0x01)  # SYN
-        try:
-            while not self.should_stop.is_set():
-                data = await reader.read(4096)
-                if not data:
-                    break
-                self._send_kcp_mux(conn_id, 0x02, data)  # DATA
-        except Exception as e:
-            self.logger.debug(f"Connection {conn_id} error: {e}")
-        finally:
-            self._send_kcp_mux(conn_id, 0x03)  # FIN
-            await self._close_local_conn(conn_id)
 
     async def _main_tunnel_loop(self):
-        """Initialize KCP and start local TCP server."""
+        """Start local TCP server."""
         self.logger.info("Entering VPN Tunnel Main Loop...")
         self.active_tcp_connections = {}
-        self.kcp_tx_queue = asyncio.Queue()
-        self.kcp_rx_buffer = bytearray()
-
-        self.kcp = kcp.KCP(conv_id=int(self.session_id))
-
-        @self.kcp.outbound_handler
-        def kcp_out(_, data: bytes):
-            if self.loop and not self.should_stop.is_set():
-                self.loop.call_soon_threadsafe(self.kcp_tx_queue.put_nowait, data)
-
-        if hasattr(self.kcp, "set_performance_options"):
-            self.kcp.set_performance_options(True, 10, 2, True)
-        elif hasattr(self.kcp, "nodelay"):
-            self.kcp.nodelay(1, 10, 2, 1)
-
-        kcp_mtu = int(max(self.synced_upload_mtu - 50, 100))
-        if hasattr(self.kcp, "setmtu"):
-            self.kcp.setmtu(kcp_mtu)
-        elif hasattr(self.kcp, "set_mtu"):
-            self.kcp.set_mtu(kcp_mtu)
-
-        if hasattr(self.kcp, "set_window_size"):
-            self.kcp.set_window_size(128, 128)
-        elif hasattr(self.kcp, "wndsize"):
-            self.kcp.wndsize(128, 128)
-
-        self.loop.create_task(self._kcp_update_loop())
-        selected_conn = await self.select_connection()
-        self.loop.create_task(
-            self._kcp_tx_and_poll_loop(
-                selected_conn["domain"], selected_conn["resolver"]
-            )
-        )
-
         listen_ip = self.config.get("LISTEN_IP", "127.0.0.1")
         listen_port = int(self.config.get("LISTEN_PORT", 1080))
-        server = await asyncio.start_server(
-            self._handle_local_tcp_connection, listen_ip, listen_port
-        )
-        self.logger.success(
-            f"<g>Ready! Local Proxy listening on {listen_ip}:{listen_port}</g>"
-        )
-        async with server:
-            await self.should_stop.wait()
+        # server = await asyncio.start_server(
+        #     self._handle_local_tcp_connection, listen_ip, listen_port
+        # )
+
+        # self.logger.success(
+        #     f"<g>Ready! Local Proxy listening on {listen_ip}:{listen_port}</g>"
+        # )
+
+        # async with server:
+        #     await self.should_stop.wait()
 
     # ---------------------------------------------------------
     # App Lifecycle

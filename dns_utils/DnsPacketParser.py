@@ -622,12 +622,6 @@ class DnsPacketParser:
             domain, session_id, packet_type, data, mtu_chars, encode_data
         )
 
-        if packet_type == Packet_Type.DATA_KCP and len(labels) != 1:
-            self.logger.warning(
-                f"DATA_KCP too large for single QNAME, dropping. fragments={len(labels)}"
-            )
-            return []
-
         if not labels or len(labels) == 0:
             self.logger.debug("No labels generated for DNS query.")
             return b""

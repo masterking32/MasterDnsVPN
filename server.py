@@ -13,8 +13,6 @@ import random
 from typing import Optional, Any
 import ctypes
 from ctypes import wintypes
-import kcp
-import time
 
 from server_config import master_dns_vpn_config
 
@@ -60,6 +58,9 @@ class MasterDnsVPNServer:
         self._dns_task = None
         self._session_cleanup_task = None
 
+    # ---------------------------------------------------------
+    # Session Management
+    # ---------------------------------------------------------
     async def new_session(self) -> int:
         """
         Create a new session and return its session ID.
@@ -92,6 +93,56 @@ class MasterDnsVPNServer:
             del self.sessions[session_id]
             self.logger.info(f"Closed inactive session with ID: {session_id}")
 
+    async def _handle_session_init(
+        self,
+        data=None,
+        labels=None,
+        request_domain=None,
+        addr=None,
+        parsed_packet=None,
+        session_id=None,
+    ) -> Optional[bytes]:
+        """Handle NEW_SESSION VPN packet."""
+
+        new_session_id = await self.new_session()
+        if new_session_id is None:
+            self.logger.error(
+                f"Failed to create new session for NEW_SESSION packet from {addr}"
+            )
+            return None
+
+        txt_str = str(new_session_id)
+        data_bytes = self.dns_parser.codec_transform(txt_str.encode(), encrypt=True)
+
+        response_packet = await self.dns_parser.generate_vpn_response_packet(
+            domain=request_domain,
+            session_id=new_session_id,
+            packet_type=Packet_Type.SESSION_ACCEPT,
+            data=data_bytes,
+            question_packet=data,
+        )
+
+        return response_packet
+
+    async def _session_cleanup_loop(self) -> None:
+        """Background task to periodically cleanup inactive sessions."""
+        try:
+            while not self.should_stop.is_set():
+                try:
+                    await asyncio.sleep(self.config.get("SESSION_CLEANUP_INTERVAL", 30))
+                    await self.close_inactive_sessions(
+                        self.config.get("SESSION_TIMEOUT", 300)
+                    )
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    self.logger.error(f"Error during session cleanup: {e}")
+        finally:
+            self.logger.debug("Session cleanup loop stopped.")
+
+    # ---------------------------------------------------------
+    # Network I/O & Packet Processing
+    # ---------------------------------------------------------
     async def send_udp_response(self, response: bytes, addr) -> bool:
         """Async send helper to write UDP response to addr using the server socket."""
         if not response or addr is None:
@@ -127,7 +178,6 @@ class MasterDnsVPNServer:
             Packet_Type.MTU_DOWN_REQ: self._handle_mtu_down,
             Packet_Type.SESSION_INIT: self._handle_session_init,
             Packet_Type.SET_MTU_REQ: self._handle_set_mtu,
-            Packet_Type.DATA_KCP: self._handle_data_kcp,
         }
 
         handler = handlers.get(packet_type, self._handle_unknown)
@@ -139,57 +189,6 @@ class MasterDnsVPNServer:
             parsed_packet=parsed_packet,
             session_id=session_id,
         )
-
-    async def _handle_set_mtu(
-        self,
-        data=None,
-        labels=None,
-        request_domain=None,
-        addr=None,
-        parsed_packet=None,
-        session_id=None,
-    ) -> Optional[bytes]:
-        """Handle SET_MTU_REQ VPN packet and save it to the session."""
-
-        if session_id not in self.sessions:
-            self.logger.warning(
-                f"SET_MTU_REQ received for invalid session_id: {session_id} from {addr}"
-            )
-            return None
-
-        # Extract and decrypt data directly from the labels
-        extracted_data = self.dns_parser.extract_vpn_data_from_labels(labels)
-
-        if not extracted_data or len(extracted_data) < 8:
-            self.logger.warning(f"Invalid or missing SET_MTU_REQ data from {addr}")
-            return None
-
-        # Unpack the 8 bytes (4 bytes UP, 4 bytes DOWN)
-        upload_mtu = int.from_bytes(extracted_data[0:4], byteorder="big")
-        download_mtu = int.from_bytes(extracted_data[4:8], byteorder="big")
-
-        # Save to session map
-        self.sessions[session_id]["upload_mtu"] = upload_mtu
-        self.sessions[session_id]["download_mtu"] = download_mtu
-        self.sessions[session_id]["last_packet_time"] = asyncio.get_event_loop().time()
-
-        self.logger.info(
-            f"Session {session_id} MTU synced - UP: {upload_mtu}B, DOWN: {download_mtu}B"
-        )
-
-        # Prepare response (Acknowledge)
-        response_data = b"OK"
-        data_bytes = self.dns_parser.codec_transform(response_data, encrypt=True)
-
-        response_packet = await self.dns_parser.generate_vpn_response_packet(
-            domain=request_domain,
-            session_id=session_id,
-            packet_type=Packet_Type.SET_MTU_RES,
-            data=data_bytes,
-            question_packet=data,
-        )
-
-        return response_packet
 
     async def _handle_unknown(
         self,
@@ -205,130 +204,6 @@ class MasterDnsVPNServer:
         )
 
         return None
-
-    async def _handle_session_init(
-        self,
-        data=None,
-        labels=None,
-        request_domain=None,
-        addr=None,
-        parsed_packet=None,
-        session_id=None,
-    ) -> Optional[bytes]:
-        """Handle NEW_SESSION VPN packet."""
-
-        new_session_id = await self.new_session()
-        if new_session_id is None:
-            self.logger.error(
-                f"Failed to create new session for NEW_SESSION packet from {addr}"
-            )
-            return None
-
-        txt_str = str(new_session_id)
-        data_bytes = self.dns_parser.codec_transform(txt_str.encode(), encrypt=True)
-
-        response_packet = await self.dns_parser.generate_vpn_response_packet(
-            domain=request_domain,
-            session_id=new_session_id,
-            packet_type=Packet_Type.SESSION_ACCEPT,
-            data=data_bytes,
-            question_packet=data,
-        )
-
-        # Ensure KCP engine is created for this session immediately so the first
-        # DATA_KCP packets won't be rejected due to missing session state.
-        try:
-            self._get_or_create_kcp(new_session_id)
-        except Exception:
-            pass
-
-        return response_packet
-
-    async def _handle_mtu_down(
-        self,
-        data=None,
-        labels=None,
-        request_domain=None,
-        addr=None,
-        parsed_packet=None,
-        session_id=None,
-    ) -> Optional[bytes]:
-        """Handle SERVER_UPLOAD_TEST VPN packet."""
-
-        if "." not in labels:
-            self.logger.warning(
-                f"Invalid SERVER_DOWNLOAD_TEST packet format from {addr}: {labels}"
-            )
-            return None
-
-        first_part_of_data = labels.split(".")[0]
-        if not first_part_of_data:
-            self.logger.warning(
-                f"Empty data in SERVER_DOWNLOAD_TEST packet from {addr}"
-            )
-            return None
-
-        download_size_bytes = self.dns_parser.decode_and_decrypt_data(
-            first_part_of_data, lowerCaseOnly=True
-        )
-
-        if download_size_bytes is None:
-            self.logger.warning(
-                f"Failed to decode download size in SERVER_DOWNLOAD_TEST packet from {addr}"
-            )
-            return None
-
-        download_size = int.from_bytes(download_size_bytes, byteorder="big")
-
-        if download_size < 29:
-            self.logger.warning(
-                f"Download size too small in SERVER_DOWNLOAD_TEST packet from {addr}: {download_size}"
-            )
-            return None
-
-        data_bytes = self.dns_parser.codec_transform(download_size_bytes, encrypt=True)
-        data_bytes = data_bytes + ":".encode()
-        data_bytes = data_bytes + random.randbytes(download_size - len(data_bytes))
-
-        if len(data_bytes) != download_size:
-            self.logger.error(
-                f"Prepared download data size mismatch for packet from {addr}: expected {download_size}, got {len(data_bytes)}"
-            )
-            return None
-
-        response_packet = await self.dns_parser.generate_vpn_response_packet(
-            domain=request_domain,
-            session_id=session_id if session_id is not None else 255,
-            packet_type=Packet_Type.MTU_DOWN_RES,
-            data=data_bytes,
-            question_packet=data,
-        )
-
-        return response_packet
-
-    async def _handle_mtu_up(
-        self,
-        data=None,
-        labels=None,
-        request_domain=None,
-        addr=None,
-        parsed_packet=None,
-        session_id=None,
-    ) -> Optional[bytes]:
-        """Handle SERVER_UPLOAD_TEST VPN packet."""
-
-        txt_str = "1"
-        data_bytes = self.dns_parser.codec_transform(txt_str.encode(), encrypt=True)
-
-        response_packet = await self.dns_parser.generate_vpn_response_packet(
-            domain=request_domain,
-            session_id=session_id if session_id is not None else 255,
-            packet_type=Packet_Type.MTU_UP_RES,
-            data=data_bytes,
-            question_packet=data,
-        )
-
-        return response_packet
 
     async def validate_vpn_packet(
         self, data: bytes, parsed_packet: dict, addr
@@ -472,226 +347,10 @@ class MasterDnsVPNServer:
             except Exception as e:
                 self.logger.error(f"Failed to create task for request from {addr}: {e}")
 
-    async def _session_cleanup_loop(self) -> None:
-        """Background task to periodically cleanup inactive sessions."""
-        try:
-            while not self.should_stop.is_set():
-                try:
-                    await asyncio.sleep(self.config.get("SESSION_CLEANUP_INTERVAL", 30))
-                    await self.close_inactive_sessions(
-                        self.config.get("SESSION_TIMEOUT", 300)
-                    )
-                except asyncio.CancelledError:
-                    break
-                except Exception as e:
-                    self.logger.error(f"Error during session cleanup: {e}")
-        finally:
-            self.logger.debug("Session cleanup loop stopped.")
-
     # ---------------------------------------------------------
-    # KCP & TCP Forwarding Logic
+    # MTU Testing Logic
     # ---------------------------------------------------------
-    def _send_server_kcp_mux(
-        self, session_id: int, conn_id: int, cmd: int, data: bytes = b""
-    ):
-        """Pack and send data via KCP Engine with Length Header"""
-        if session_id not in self.sessions or "kcp" not in self.sessions[session_id]:
-            return
-
-        kcp_obj = self.sessions[session_id]["kcp"]
-        header = (
-            conn_id.to_bytes(2, byteorder="big")
-            + bytes([cmd])
-            + len(data).to_bytes(2, byteorder="big")
-        )
-        packet = header + data
-
-        if hasattr(kcp_obj, "enqueue"):
-            kcp_obj.enqueue(packet)
-            if hasattr(kcp_obj, "flush"):
-                kcp_obj.flush()
-        elif hasattr(kcp_obj, "send"):
-            kcp_obj.send(packet)
-
-    def _get_or_create_kcp(self, session_id: int) -> tuple:
-        """Initialize KCP for a session safely."""
-        session_info = self.sessions[session_id]
-        if "kcp" not in session_info:
-            session_info["tcp_connections"] = {}
-            session_info["downlink_queue"] = asyncio.Queue()
-            session_info["rx_buffer"] = bytearray()
-
-            kcp_obj = kcp.KCP(conv_id=int(session_id))
-
-            @kcp_obj.outbound_handler
-            def kcp_out(_, data: bytes):
-                if self.loop and not self.should_stop.is_set():
-                    self.loop.call_soon_threadsafe(
-                        session_info["downlink_queue"].put_nowait, data
-                    )
-
-            if hasattr(kcp_obj, "set_performance_options"):
-                kcp_obj.set_performance_options(True, 10, 2, True)
-            elif hasattr(kcp_obj, "nodelay"):
-                kcp_obj.nodelay(1, 10, 2, 1)
-
-            kcp_mtu = int(max(session_info.get("download_mtu", 512) - 50, 100))
-            try:
-                kcp_obj.mtu = kcp_mtu  # Property for RealistikDash KCP
-            except Exception:
-                pass
-            if hasattr(kcp_obj, "setmtu"):
-                try:
-                    kcp_obj.setmtu(kcp_mtu)
-                except Exception:
-                    pass
-            elif hasattr(kcp_obj, "set_mtu"):
-                try:
-                    kcp_obj.set_mtu(kcp_mtu)
-                except Exception:
-                    pass
-
-            try:
-                kcp_obj.snd_wnd = 128  # Property for RealistikDash KCP
-                kcp_obj.rcv_wnd = 128
-            except Exception:
-                pass
-            if hasattr(kcp_obj, "set_window_size"):
-                try:
-                    kcp_obj.set_window_size(128, 128)
-                except Exception:
-                    pass
-            elif hasattr(kcp_obj, "wndsize"):
-                try:
-                    kcp_obj.wndsize(128, 128)
-                except Exception:
-                    pass
-
-            session_info["kcp"] = kcp_obj
-            self.logger.info(f"Initialized KCP engine for Session {session_id}")
-
-        return (
-            session_info["kcp"],
-            session_info["downlink_queue"],
-            session_info["tcp_connections"],
-            session_info["rx_buffer"],
-        )
-
-    async def _kcp_update_loop(self):
-        """Global ticker for all active KCP sessions."""
-        while not self.should_stop.is_set():
-            for sid, sinfo in list(self.sessions.items()):
-                if "kcp" in sinfo:
-                    kcp_obj = sinfo["kcp"]
-                    rx_buffer = sinfo["rx_buffer"]
-                    tcp_conns = sinfo["tcp_connections"]
-
-                    try:
-                        try:
-                            kcp_obj.update()
-                        except Exception:
-                            current_ms = int(time.time() * 1000) & 0xFFFFFFFF
-                            kcp_obj.update(current_ms)
-
-                        # Retrieve data
-                        if hasattr(kcp_obj, "get_received"):
-                            data = kcp_obj.get_received()
-                        else:
-                            try:
-                                data = kcp_obj.recv()
-                            except Exception:
-                                data = b""
-
-                        if data:
-                            rx_buffer.extend(data)
-                            await self._process_server_rx_buffer(
-                                sid, rx_buffer, tcp_conns
-                            )
-
-                    except Exception as e:
-                        self.logger.debug(f"Server KCP update error: {e}")
-            await asyncio.sleep(0.01)
-
-    async def _process_server_rx_buffer(
-        self, session_id: int, rx_buffer: bytearray, tcp_conns: dict
-    ):
-        while len(rx_buffer) >= 5:
-            conn_id = int.from_bytes(rx_buffer[0:2], byteorder="big")
-            cmd = rx_buffer[2]
-            payload_len = int.from_bytes(rx_buffer[3:5], byteorder="big")
-
-            total_len = 5 + payload_len
-            if len(rx_buffer) < total_len:
-                break
-
-            payload = rx_buffer[5:total_len]
-            del rx_buffer[:total_len]
-
-            await self._handle_server_mux_command(
-                session_id, conn_id, cmd, payload, tcp_conns
-            )
-
-    async def _handle_server_mux_command(
-        self, session_id: int, conn_id: int, cmd: int, data: bytes, tcp_conns: dict
-    ):
-        if cmd == 0x01:  # SYN
-            self.logger.info(f"Session {session_id} - Opening TCP {conn_id} to remote")
-            try:
-                forward_ip = self.config.get("FORWARD_IP", "127.0.0.1")
-                forward_port = int(self.config.get("FORWARD_PORT", 8080))
-                reader, writer = await asyncio.open_connection(forward_ip, forward_port)
-                tcp_conns[conn_id] = (reader, writer)
-                self.loop.create_task(
-                    self._forward_tcp_to_kcp(session_id, conn_id, reader)
-                )
-            except Exception as e:
-                self.logger.error(f"Failed to connect conn {conn_id} to remote: {e}")
-        elif cmd == 0x02:  # DAT
-            if conn_id in tcp_conns:
-                _, writer = tcp_conns[conn_id]
-                if not writer.is_closing():
-                    writer.write(data)
-                    await writer.drain()
-        elif cmd == 0x03:  # FIN
-            await self._close_server_tcp_conn(tcp_conns, conn_id)
-
-    async def _forward_tcp_to_kcp(
-        self, session_id: int, conn_id: int, reader: asyncio.StreamReader
-    ):
-        """Read data from Target Server and send to Client via MUX KCP."""
-        try:
-            while not self.should_stop.is_set():
-                if session_id not in self.sessions:
-                    break
-                data = await reader.read(4096)
-                if not data:
-                    break
-                self._send_server_kcp_mux(session_id, conn_id, 0x02, data)
-        except Exception as e:
-            self.logger.debug(f"Target read error on conn {conn_id}: {e}")
-        finally:
-            self._send_server_kcp_mux(session_id, conn_id, 0x03)
-            if (
-                session_id in self.sessions
-                and "tcp_connections" in self.sessions[session_id]
-            ):
-                await self._close_server_tcp_conn(
-                    self.sessions[session_id]["tcp_connections"], conn_id
-                )
-
-    async def _close_server_tcp_conn(self, tcp_conns: dict, conn_id: int):
-        """Safely close target TCP connection."""
-        if conn_id in tcp_conns:
-            _, writer = tcp_conns.pop(conn_id)
-            if not writer.is_closing():
-                writer.close()
-                try:
-                    await writer.wait_closed()
-                except Exception:
-                    pass
-            self.logger.debug(f"Server TCP conn {conn_id} cleanly closed.")
-
-    async def _handle_data_kcp(
+    async def _handle_set_mtu(
         self,
         data=None,
         labels=None,
@@ -700,70 +359,141 @@ class MasterDnsVPNServer:
         parsed_packet=None,
         session_id=None,
     ) -> Optional[bytes]:
-        """Process incoming KCP packets and generate responses."""
+        """Handle SET_MTU_REQ VPN packet and save it to the session."""
+
         if session_id not in self.sessions:
+            self.logger.warning(
+                f"SET_MTU_REQ received for invalid session_id: {session_id} from {addr}"
+            )
             return None
 
-        self.sessions[session_id]["last_packet_time"] = asyncio.get_event_loop().time()
-        kcp_obj, downlink_queue, _, _ = self._get_or_create_kcp(session_id)
-
-        # 1. Feed UDP payload to KCP Engine
+        # Extract and decrypt data directly from the labels
         extracted_data = self.dns_parser.extract_vpn_data_from_labels(labels)
 
-        if extracted_data:
-            try:
-                if hasattr(kcp_obj, "receive"):
-                    kcp_obj.receive(extracted_data)
-                elif hasattr(kcp_obj, "input"):
-                    kcp_obj.input(extracted_data)
-            except Exception as e:
-                # Log additional debug information to help diagnose conv-id/data issues
-                try:
-                    hex_snippet = extracted_data[:16].hex()
-                    data_len = len(extracted_data)
-                except Exception:
-                    hex_snippet = ""
-                    data_len = 0
+        if not extracted_data or len(extracted_data) < 8:
+            self.logger.warning(f"Invalid or missing SET_MTU_REQ data from {addr}")
+            return None
 
-                kcp_conv = None
-                try:
-                    # Some KCP implementations expose a conv attribute
-                    if hasattr(kcp_obj, "conv"):
-                        kcp_conv = getattr(kcp_obj, "conv")
-                except Exception:
-                    kcp_conv = None
+        # Unpack the 8 bytes (4 bytes UP, 4 bytes DOWN)
+        upload_mtu = int.from_bytes(extracted_data[0:4], byteorder="big")
+        download_mtu = int.from_bytes(extracted_data[4:8], byteorder="big")
 
-                self.logger.debug(
-                    f"Server KCP Engine rejected bad packet: {e} | len={data_len} | hex={hex_snippet} | kcp_conv={kcp_conv}"
-                )
+        # Save to session map
+        self.sessions[session_id]["upload_mtu"] = upload_mtu
+        self.sessions[session_id]["download_mtu"] = download_mtu
+        self.sessions[session_id]["last_packet_time"] = asyncio.get_event_loop().time()
 
-        # 2. Force immediate KCP update to generate ACKs instantly
-        try:
-            kcp_obj.update()
-        except Exception:
-            kcp_obj.update(int(time.time() * 1000) & 0xFFFFFFFF)
-
-        # 3. Pull ONE complete Datagram from KCP output
-        try:
-            response_payload = downlink_queue.get_nowait()
-        except asyncio.QueueEmpty:
-            response_payload = b""
-
-        data_bytes = (
-            self.dns_parser.codec_transform(response_payload, encrypt=True)
-            if response_payload
-            else b""
+        self.logger.info(
+            f"Session {session_id} MTU synced - UP: {upload_mtu}B, DOWN: {download_mtu}B"
         )
+
+        # Prepare response (Acknowledge)
+        response_data = b"OK"
+        data_bytes = self.dns_parser.codec_transform(response_data, encrypt=True)
 
         response_packet = await self.dns_parser.generate_vpn_response_packet(
             domain=request_domain,
             session_id=session_id,
-            packet_type=Packet_Type.DATA_KCP,
+            packet_type=Packet_Type.SET_MTU_RES,
             data=data_bytes,
             question_packet=data,
         )
+
         return response_packet
 
+    async def _handle_mtu_down(
+        self,
+        data=None,
+        labels=None,
+        request_domain=None,
+        addr=None,
+        parsed_packet=None,
+        session_id=None,
+    ) -> Optional[bytes]:
+        """Handle SERVER_UPLOAD_TEST VPN packet."""
+
+        if "." not in labels:
+            self.logger.warning(
+                f"Invalid SERVER_DOWNLOAD_TEST packet format from {addr}: {labels}"
+            )
+            return None
+
+        first_part_of_data = labels.split(".")[0]
+        if not first_part_of_data:
+            self.logger.warning(
+                f"Empty data in SERVER_DOWNLOAD_TEST packet from {addr}"
+            )
+            return None
+
+        download_size_bytes = self.dns_parser.decode_and_decrypt_data(
+            first_part_of_data, lowerCaseOnly=True
+        )
+
+        if download_size_bytes is None:
+            self.logger.warning(
+                f"Failed to decode download size in SERVER_DOWNLOAD_TEST packet from {addr}"
+            )
+            return None
+
+        download_size = int.from_bytes(download_size_bytes, byteorder="big")
+
+        if download_size < 29:
+            self.logger.warning(
+                f"Download size too small in SERVER_DOWNLOAD_TEST packet from {addr}: {download_size}"
+            )
+            return None
+
+        data_bytes = self.dns_parser.codec_transform(download_size_bytes, encrypt=True)
+        data_bytes = data_bytes + ":".encode()
+        data_bytes = data_bytes + random.randbytes(download_size - len(data_bytes))
+
+        if len(data_bytes) != download_size:
+            self.logger.error(
+                f"Prepared download data size mismatch for packet from {addr}: expected {download_size}, got {len(data_bytes)}"
+            )
+            return None
+
+        response_packet = await self.dns_parser.generate_vpn_response_packet(
+            domain=request_domain,
+            session_id=session_id if session_id is not None else 255,
+            packet_type=Packet_Type.MTU_DOWN_RES,
+            data=data_bytes,
+            question_packet=data,
+        )
+
+        return response_packet
+
+    async def _handle_mtu_up(
+        self,
+        data=None,
+        labels=None,
+        request_domain=None,
+        addr=None,
+        parsed_packet=None,
+        session_id=None,
+    ) -> Optional[bytes]:
+        """Handle SERVER_UPLOAD_TEST VPN packet."""
+
+        txt_str = "1"
+        data_bytes = self.dns_parser.codec_transform(txt_str.encode(), encrypt=True)
+
+        response_packet = await self.dns_parser.generate_vpn_response_packet(
+            domain=request_domain,
+            session_id=session_id if session_id is not None else 255,
+            packet_type=Packet_Type.MTU_UP_RES,
+            data=data_bytes,
+            question_packet=data,
+        )
+
+        return response_packet
+
+    # ---------------------------------------------------------
+    # TCP Forwarding Logic
+    # ---------------------------------------------------------
+
+    # ---------------------------------------------------------
+    # App Lifecycle
+    # ---------------------------------------------------------
     async def start(self) -> None:
         """Initialize sockets, start background tasks, and wait for shutdown signal."""
         try:
@@ -772,8 +502,6 @@ class MasterDnsVPNServer:
 
             host = self.config.get("UDP_HOST", "0.0.0.0")
             port = int(self.config.get("UDP_PORT", 53))
-
-            self._kcp_update_task = self.loop.create_task(self._kcp_update_loop())
 
             self.logger.info("Binding UDP socket ...")
             self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
