@@ -241,11 +241,8 @@ class MasterDnsVPNClient:
             return None, b""
 
         assembled_data_str = ""
-        for i in range(len(chunks)):
-            if i in chunks:
-                assembled_data_str += chunks[i]
-            else:
-                break
+        for i in sorted(chunks.keys()):
+            assembled_data_str += chunks[i]
 
         decoded_data = self.dns_packet_parser.decode_and_decrypt_data(
             assembled_data_str, lowerCaseOnly=False
@@ -263,8 +260,9 @@ class MasterDnsVPNClient:
             if max_mtu <= 0:
                 return 0
 
-            if await test_callable(max_mtu):
-                return max_mtu
+            for _ in range(2):
+                if await test_callable(max_mtu):
+                    return max_mtu
 
             low = min_mtu
             high = max_mtu - 1
@@ -274,11 +272,13 @@ class MasterDnsVPNClient:
                 mid = (low + high) // 2
                 if mid < min_threshold:
                     break
-                try:
-                    ok = await test_callable(mid)
-                except Exception as e:
-                    self.logger.debug(f"MTU test callable raised: {e}")
-                    ok = False
+
+                for _ in range(3):
+                    try:
+                        ok = await test_callable(mid)
+                    except Exception as e:
+                        self.logger.debug(f"MTU test callable raised: {e}")
+                        ok = False
 
                 if ok:
                     optimal = mid
