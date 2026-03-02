@@ -358,7 +358,7 @@ class MasterDnsVPNClient:
             return False
 
         response = await self._send_and_receive_dns(
-            dns_queries[0], dns_server, dns_port, 5
+            dns_queries[0], dns_server, dns_port, 2
         )
 
         parsed_header, _ = await self._process_received_packet(response)
@@ -396,7 +396,7 @@ class MasterDnsVPNClient:
             return False
 
         response = await self._send_and_receive_dns(
-            dns_queries[0], dns_server, dns_port, 5
+            dns_queries[0], dns_server, dns_port, 2
         )
         parsed_header, returned_data = await self._process_received_packet(response)
         packet_type = parsed_header["packet_type"] if parsed_header else None
