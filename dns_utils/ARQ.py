@@ -8,7 +8,9 @@ import time
 
 
 class ARQStream:
-    def __init__(self, stream_id, session_id, enqueue_tx_cb, reader, writer, mtu):
+    def __init__(
+        self, stream_id, session_id, enqueue_tx_cb, reader, writer, mtu, logger=None
+    ):
         self.stream_id = stream_id
         self.session_id = session_id
         self.enqueue_tx = enqueue_tx_cb
@@ -36,20 +38,29 @@ class ARQStream:
         self.rto = 2.0  # Base Retransmission Timeout
         self.closed = False
         self.io_task = asyncio.create_task(self._io_loop())
+        self.logger = logger
 
     async def _io_loop(self):
         """Read from local TCP socket and chunk it to VPN tunnel"""
         try:
             while not self.closed and not self.reader.at_eof():
-                # 1. Flow Control: اگر از سقف مجاز رد شدیم، منتظر می‌مانیم
+                # 1. Flow Control
                 while len(self.snd_buf) >= self.cwnd and not self.closed:
-                    await asyncio.sleep(0.01)
+                    await asyncio.sleep(0.05)
 
                 if self.closed:
+                    if self.logger:
+                        self.logger.debug(
+                            f"[DEBUG-ARQ] Stream {self.stream_id} IO Loop breaking because stream was marked closed."
+                        )
                     break
 
                 raw_data = await self.reader.read(self.mtu)
                 if not raw_data:
+                    if self.logger:
+                        self.logger.debug(
+                            f"[DEBUG-ARQ] Stream {self.stream_id} EOF (End of File) received from local TCP! Application closed the connection."
+                        )
                     break
 
                 self.last_activity = time.time()
@@ -65,10 +76,18 @@ class ARQStream:
                     }
                     await self.enqueue_tx(3, self.stream_id, sn, chunk)
 
-        except Exception:
-            pass
+        except ConnectionResetError:
+            if self.logger:
+                self.logger.debug(
+                    f"[DEBUG-ARQ] Stream {self.stream_id} Connection Reset by peer (TCP RST)."
+                )
+        except Exception as e:
+            if self.logger:
+                self.logger.debug(
+                    f"[DEBUG-ARQ] Stream {self.stream_id} IO Loop Exception: {e}"
+                )
         finally:
-            await self.close()
+            await self.close(reason="IO Loop Ended")
 
     async def receive_data(self, sn, data):
         """Handle incoming VPN data packets"""
@@ -79,13 +98,15 @@ class ARQStream:
         diff = (sn - self.rcv_nxt + 32768) % 65536 - 32768
 
         if diff < 0:
+            # Duplicate packet
             await self.enqueue_tx(4, self.stream_id, sn, b"", is_ack=True)
             return
         elif diff > 0:
             if len(self.rcv_buf) > 1000:
-                self.logger.warning(
-                    "Receiver buffer full! Dropping out-of-order packet."
-                )
+                if self.logger:
+                    self.logger.debug(
+                        f"[DEBUG-ARQ] Stream {self.stream_id} Drop Data! Receive buffer full (>1000 out of order packets)."
+                    )
                 return
 
             expected_sn = (self.rcv_nxt - 1) % 65536
@@ -100,38 +121,53 @@ class ARQStream:
             try:
                 self.writer.write(chunk)
                 await self.writer.drain()
-            except Exception:
-                await self.close()
+            except Exception as e:
+                if self.logger:
+                    self.logger.debug(
+                        f"[DEBUG-ARQ] Stream {self.stream_id} Failed to write to TCP socket: {e}. Closing stream."
+                    )
+                await self.close(reason="TCP Write Failed")
                 break
 
             await self.enqueue_tx(4, self.stream_id, self.rcv_nxt, b"", is_ack=True)
             self.rcv_nxt = (self.rcv_nxt + 1) % 65536
 
     async def receive_ack(self, sn):
-        """Clear from send buffer when ACK is received"""
+        """Clear from send buffer when ACK is received (Cumulative)"""
         self.last_activity = time.time()
 
-        if sn in self.snd_buf:
-            rtt = time.time() - self.snd_buf[sn]["time"]
-            if self.srtt == 0.0:
-                self.srtt = rtt
-                self.rttval = rtt / 2
-            else:
-                self.rttval = 0.75 * self.rttval + 0.25 * abs(self.srtt - rtt)
-                self.srtt = 0.875 * self.srtt + 0.125 * rtt
+        acked_keys = []
+        for k in list(self.snd_buf.keys()):
+            diff = (sn - k + 32768) % 65536 - 32768
+            if diff >= 0:
+                acked_keys.append(k)
 
-            self.rto = max(0.5, min(self.srtt + max(0.1, 4 * self.rttval), 10.0))
+        if acked_keys:
+            for k in acked_keys:
+                pkt = self.snd_buf[k]
+                if k == sn and pkt["retries"] == 0:
+                    rtt = time.time() - pkt["time"]
+                    if self.srtt == 0.0:
+                        self.srtt = rtt
+                        self.rttval = rtt / 2
+                    else:
+                        self.rttval = 0.75 * self.rttval + 0.25 * abs(self.srtt - rtt)
+                        self.srtt = 0.875 * self.srtt + 0.125 * rtt
 
-            del self.snd_buf[sn]
+                    self.rto = max(1.0, min(self.srtt + max(0.1, 4 * self.rttval), 5.0))
+
+                del self.snd_buf[k]
+
             if self.cwnd < self.ssthresh:
-                self.cwnd += 1  # Slow Start
+                self.cwnd += len(acked_keys)
             else:
-                self.cwnd += 1 / self.cwnd  # Congestion Avoidance
+                self.cwnd += len(acked_keys) / self.cwnd
             self.cwnd = min(self.cwnd, 500)
 
             if sn in self.dup_acks:
                 del self.dup_acks[sn]
         else:
+            # Fast Retransmit
             lost_sn = (sn + 1) % 65536
             if lost_sn in self.snd_buf:
                 self.dup_acks[lost_sn] = self.dup_acks.get(lost_sn, 0) + 1
@@ -153,7 +189,7 @@ class ARQStream:
 
         now = time.time()
 
-        if now - self.last_activity > 120:  # 2 Minutes Idle Timeout
+        if now - self.last_activity > 3600:
             await self.close()
             return
 
@@ -164,10 +200,6 @@ class ARQStream:
                 pkt["time"] = now
                 pkt["retries"] += 1
 
-                if pkt["retries"] > 10:  # Dead connection
-                    await self.close()
-                    break
-
                 self.ssthresh = max(int(self.cwnd * 0.5), 10)
                 self.cwnd = 5
 
@@ -176,10 +208,15 @@ class ARQStream:
                     1, self.stream_id, sn, pkt["data"], is_resend=True
                 )
 
-    async def close(self):
+    async def close(self, reason="Unknown"):
         """Gracefully close the TCP connection and stream"""
         if self.closed:
             return
+
+        if self.logger:
+            self.logger.debug(
+                f"[DEBUG-ARQ] Stream {self.stream_id} is closing. Reason: {reason}"
+            )
         self.closed = True
 
         try:

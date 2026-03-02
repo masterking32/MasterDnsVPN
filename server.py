@@ -636,6 +636,7 @@ class MasterDnsVPNServer:
                 reader=reader,
                 writer=writer,
                 mtu=self.sessions[session_id].get("download_mtu", 512),
+                logger=self.logger,
             )
             self.sessions[session_id]["streams"][stream_id] = stream
 

@@ -855,7 +855,7 @@ class MasterDnsVPNClient:
                 )
 
                 if idle_duration < 2.0:
-                    current_timeout = 0.01
+                    current_timeout = 0.1
                 elif idle_duration < 10.0:
                     current_timeout = 1.0
                 else:
@@ -964,6 +964,7 @@ class MasterDnsVPNClient:
                     reader=reader,
                     writer=writer,
                     mtu=self.synced_upload_mtu,
+                    logger=self.logger,
                 )
                 self.active_streams[stream_id] = stream
                 self.logger.info(f"Stream {stream_id} Established with server.")

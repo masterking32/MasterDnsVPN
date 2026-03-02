@@ -481,19 +481,20 @@ class DnsPacketParser:
 
     def xor_data(self, data: bytes, key: bytes) -> bytes:
         """
-        XOR the data with the given key.
+        Ultra-fast XOR using large integers (handled in C-level).
         """
-        try:
-            key_length = len(key)
-            if key_length == 0:
-                raise ValueError("Key length must be greater than 0 for XOR.")
-            xored = bytearray()
-            for i in range(len(data)):
-                xored.append(data[i] ^ key[i % key_length])
-            return bytes(xored)
-        except Exception as e:
-            self.logger.error(f"Failed to XOR data: {e}")
-            return b""
+        if not key or not data:
+            return data
+
+        data_len = len(data)
+        key_len = len(key)
+
+        expanded_key = (key * (data_len // key_len + 1))[:data_len]
+
+        int_data = int.from_bytes(data, byteorder="big")
+        int_key = int.from_bytes(expanded_key, byteorder="big")
+
+        return (int_data ^ int_key).to_bytes(data_len, byteorder="big")
 
     def data_encrypt(self, data: bytes, key: bytes = None, method: int = None) -> bytes:
         """
@@ -600,15 +601,13 @@ class DnsPacketParser:
             return b""
 
     def codec_transform(self, data: bytes, encrypt: bool = True) -> bytes:
-        """Centralized encryption/decryption logic to reduce duplication."""
+        """Centralized encryption/decryption logic."""
         if self.encryption_method == 0:
             return data
 
-        # If method is 1 (XOR), use simple logic, else use cryptography lib
         if self.encryption_method == 1:
-            return bytes([b ^ self.key[i % len(self.key)] for i, b in enumerate(data)])
+            return self.xor_data(data, self.key)
 
-        # Note: High-level ciphers (AES/ChaCha) implementation remains as per your file
         return self.data_encrypt(data) if encrypt else self.data_decrypt(data)
 
     async def build_request_dns_query(
