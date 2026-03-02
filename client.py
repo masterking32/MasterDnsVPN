@@ -664,6 +664,7 @@ class MasterDnsVPNClient:
             f"<g>Ready! Local Proxy listening on {listen_ip}:{listen_port}</g>"
         )
 
+        # for _ in range(15):
         self.loop.create_task(self._tx_worker())
         self.loop.create_task(self._retransmit_worker())
 
@@ -699,21 +700,22 @@ class MasterDnsVPNClient:
         )
 
     async def _tx_worker(self):
-
         while not self.should_stop.is_set():
             try:
-                # Wait for packet, if idle for 0.2s, send a PING to fetch server queued downstream data
                 priority, _, pkt_type, stream_id, sn, data = await asyncio.wait_for(
-                    self.outbound_queue.get(), timeout=0.2
+                    self.outbound_queue.get(), timeout=0.05
                 )
             except asyncio.TimeoutError:
-                priority, pkt_type, stream_id, sn, data = (
-                    5,
-                    Packet_Type.PING,
-                    0,
-                    0,
-                    b"PING",
-                )
+                if self.active_streams:
+                    priority, pkt_type, stream_id, sn, data = (
+                        5,
+                        Packet_Type.PING,
+                        0,
+                        0,
+                        b"PING",
+                    )
+                else:
+                    continue
 
             conn = await self.select_connection()
             if not conn:
@@ -746,12 +748,21 @@ class MasterDnsVPNClient:
             response = await self._send_and_receive_dns(
                 dns_queries[0], conn["resolver"], 53, self.timeout
             )
+
             if response:
                 parsed_header, returned_data = await self._process_received_packet(
                     response
                 )
                 if parsed_header:
                     await self._handle_server_response(parsed_header, returned_data)
+                    if parsed_header["packet_type"] in (
+                        Packet_Type.STREAM_DATA,
+                        Packet_Type.STREAM_RESEND,
+                        Packet_Type.PONG,
+                    ):
+                        await self.outbound_queue.put(
+                            (5, self.loop.time(), Packet_Type.PING, 0, 0, b"PING")
+                        )
 
     async def _handle_server_response(self, header, data):
         ptype = header["packet_type"]

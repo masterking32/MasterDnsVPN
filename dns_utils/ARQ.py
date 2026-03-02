@@ -29,6 +29,12 @@ class ARQStream:
         """Read from local TCP socket and chunk it to VPN tunnel"""
         try:
             while not self.closed and not self.reader.at_eof():
+                while len(self.snd_buf) > 100 and not self.closed:
+                    await asyncio.sleep(0.05)
+
+                if self.closed:
+                    break
+
                 data = await self.reader.read(self.mtu)
                 if not data:
                     break
