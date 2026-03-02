@@ -71,12 +71,14 @@ class MasterDnsVPNClient:
         self.synced_upload_mtu = 0
         self.synced_download_mtu = 0
         self.buffer_size = 65507  # Max UDP payload size
+        self.logger.debug("<magenta>[INIT]</magenta> MasterDnsVPNClient initialized.")
 
     # ---------------------------------------------------------
     # Connection Management
     # ---------------------------------------------------------
     async def create_connection_map(self) -> None:
         """Create a map of all domain-resolver combinations."""
+        self.logger.debug("<magenta>[CONN]</magenta> Creating connection map...")
         self.connections_map: list = []
         self.resent_connection_selected = -1
         self.connections_map = [
@@ -88,6 +90,9 @@ class MasterDnsVPNClient:
         self.connections_map = [
             dict(t) for t in {tuple(d.items()) for d in self.connections_map}
         ]
+        self.logger.debug(
+            f"<magenta>[CONN]</magenta> Total potential connections: {len(self.connections_map)}"
+        )
 
     async def select_connection(self) -> Optional[dict]:
         """Select a connection based on the balancing strategy."""
@@ -119,24 +124,30 @@ class MasterDnsVPNClient:
             )
             return None
 
+        selected = None
         if self.resolver_balancing_strategy == 2:
             self.resent_connection_selected = (
                 self.resent_connection_selected + 1
             ) % len(valid_connections)
-            return valid_connections[self.resent_connection_selected]
+            selected = valid_connections[self.resent_connection_selected]
         elif self.resolver_balancing_strategy == 3:
             valid_connections.sort(key=lambda x: x["packet_loss"])
             min_loss = valid_connections[0]["packet_loss"]
             same_loss_connections = [
                 c for c in valid_connections if c["packet_loss"] == min_loss
             ]
-            return (
+            selected = (
                 random.choice(same_loss_connections)
                 if len(same_loss_connections) > 1
                 else same_loss_connections[0]
             )
         else:
-            return random.choice(valid_connections)
+            selected = random.choice(valid_connections)
+
+        self.logger.debug(
+            f"<magenta>[CONN]</magenta> Selected: {selected.get('domain')} via {selected.get('resolver')}"
+        )
+        return selected
 
     async def get_main_connection_index(
         self, selected_connection: Optional[dict] = None
@@ -174,12 +185,21 @@ class MasterDnsVPNClient:
             buffer_size = self.buffer_size
 
         try:
+            self.logger.debug(
+                f"<blue>[DNS_IO]</blue> Sending query to {resolver}:{port} ({len(query_data)} bytes)"
+            )
             await self.loop.sock_sendto(sock, query_data, (resolver, port))
             response, _ = await asyncio.wait_for(
                 self.loop.sock_recvfrom(sock, buffer_size), timeout=timeout
             )
+            self.logger.debug(
+                f"<blue>[DNS_IO]</blue> Received response from {resolver}:{port} ({len(response)} bytes)"
+            )
             return response
         except asyncio.TimeoutError:
+            self.logger.debug(
+                f"<blue>[DNS_IO]</blue> Timeout waiting for response from {resolver}"
+            )
             return None
         except Exception as e:
             self.logger.debug(
@@ -204,6 +224,9 @@ class MasterDnsVPNClient:
 
         parsed = await self.dns_packet_parser.parse_dns_packet(response_bytes)
         if not parsed or not parsed.get("answers"):
+            self.logger.debug(
+                "<yellow>[PARSER]</yellow> DNS response contains no answers."
+            )
             return None, b""
 
         chunks = {}
@@ -240,6 +263,9 @@ class MasterDnsVPNClient:
                         pass
 
         if detected_packet_type is None:
+            self.logger.debug(
+                "<yellow>[PARSER]</yellow> No valid VPN header found in answers."
+            )
             return None, b""
 
         assembled_data_str = ""
@@ -248,6 +274,9 @@ class MasterDnsVPNClient:
 
         decoded_data = self.dns_packet_parser.decode_and_decrypt_data(
             assembled_data_str, lowerCaseOnly=False
+        )
+        self.logger.debug(
+            f"<yellow>[PARSER]</yellow> Packet Type: {detected_packet_type}, Data Len: {len(decoded_data)}"
         )
         return parsed_header, decoded_data
 
@@ -262,8 +291,12 @@ class MasterDnsVPNClient:
             if max_mtu <= 0:
                 return 0
 
+            self.logger.debug(
+                f"<cyan>[MTU]</cyan> Starting binary search for MTU. Range: {min_mtu}-{max_mtu}"
+            )
             for _ in range(2):
                 if await test_callable(max_mtu):
+                    self.logger.debug(f"<cyan>[MTU]</cyan> Max MTU {max_mtu} is valid.")
                     return max_mtu
 
             low = min_mtu
@@ -275,9 +308,12 @@ class MasterDnsVPNClient:
                 if mid < min_threshold:
                     break
 
+                ok = False
                 for _ in range(3):
                     try:
                         ok = await test_callable(mid)
+                        if ok:
+                            break
                     except Exception as e:
                         self.logger.debug(f"MTU test callable raised: {e}")
                         ok = False
@@ -288,6 +324,7 @@ class MasterDnsVPNClient:
                 else:
                     high = mid - 1
 
+            self.logger.debug(f"<cyan>[MTU]</cyan> Binary search result: {optimal}")
             return optimal
         except Exception as e:
             self.logger.debug(f"Error in MTU binary search: {e}")
@@ -321,7 +358,7 @@ class MasterDnsVPNClient:
             return False
 
         response = await self._send_and_receive_dns(
-            dns_queries[0], dns_server, dns_port, self.timeout
+            dns_queries[0], dns_server, dns_port, 5
         )
 
         parsed_header, _ = await self._process_received_packet(response)
@@ -359,7 +396,7 @@ class MasterDnsVPNClient:
             return False
 
         response = await self._send_and_receive_dns(
-            dns_queries[0], dns_server, dns_port, self.timeout
+            dns_queries[0], dns_server, dns_port, 5
         )
         parsed_header, returned_data = await self._process_received_packet(response)
         packet_type = parsed_header["packet_type"] if parsed_header else None
@@ -375,6 +412,7 @@ class MasterDnsVPNClient:
         self, domain: str, dns_server: str, dns_port: int, default_mtu: int
     ) -> tuple:
         try:
+            self.logger.debug(f"<cyan>[MTU]</cyan> Testing upload MTU for {domain}")
             mtu_char_len, mtu_bytes = self.dns_packet_parser.calculate_upload_mtu(
                 domain=domain, mtu=0
             )
@@ -403,6 +441,7 @@ class MasterDnsVPNClient:
         self, domain: str, dns_server: str, dns_port: int, default_mtu: int
     ) -> tuple:
         try:
+            self.logger.debug(f"<cyan>[MTU]</cyan> Testing download MTU for {domain}")
             test_fn = functools.partial(
                 self.send_download_mtu_test, domain, dns_server, dns_port
             )
@@ -561,6 +600,7 @@ class MasterDnsVPNClient:
             data=b"INIT",
             mtu_chars=mtu_char_len,
             encode_data=True,
+            qType=DNS_Record_Type.TXT,
         )
 
         if not dns_queries:
@@ -586,6 +626,9 @@ class MasterDnsVPNClient:
                 if packet_type == Packet_Type.SESSION_ACCEPT and returned_data:
                     try:
                         self.session_id = int(returned_data.decode("utf-8"))
+                        self.logger.debug(
+                            f"<green>[SESSION]</green> New session ID: {self.session_id}"
+                        )
                         return True
                     except ValueError:
                         self.logger.error("Failed to parse Session ID from server.")
@@ -689,7 +732,11 @@ class MasterDnsVPNClient:
         self.workers = []
         self.workers.append(self.loop.create_task(self._rx_worker()))
 
-        for _ in range(self.config.get("NUM_DNS_WORKERS", 4)):
+        num_workers = self.config.get("NUM_DNS_WORKERS", 4)
+        self.logger.debug(
+            f"<magenta>[LOOP]</magenta> Starting {num_workers} TX workers."
+        )
+        for _ in range(num_workers):
             self.workers.append(self.loop.create_task(self._tx_worker()))
 
         self.workers.append(self.loop.create_task(self._retransmit_worker()))
@@ -738,12 +785,15 @@ class MasterDnsVPNClient:
 
     async def _rx_worker(self):
         """Continuously listen for incoming VPN packets on the tunnel socket."""
+        self.logger.debug("<magenta>[RX]</magenta> RX Worker started.")
         while not self.should_stop.is_set():
             try:
                 data, addr = await asyncio.wait_for(
                     self.loop.sock_recvfrom(self.tunnel_sock, 65536), timeout=1.0
                 )
-
+                self.logger.debug(
+                    f"<magenta>[RX]</magenta> Data from tunnel socket: {len(data)} bytes"
+                )
                 self.loop.create_task(self._process_and_route_incoming(data))
 
             except asyncio.TimeoutError:
@@ -784,11 +834,16 @@ class MasterDnsVPNClient:
             ptype = Packet_Type.STREAM_FIN
         elif is_resend:
             ptype = Packet_Type.STREAM_RESEND
+
+        self.logger.debug(
+            f"<blue>[QUEUE]</blue> Enqueueing {ptype} for SID: {stream_id} SN: {sn} Priority: {priority}"
+        )
         await self.outbound_queue.put(
             (priority, self.loop.time(), ptype, stream_id, sn, data)
         )
 
     async def _tx_worker(self):
+        self.logger.debug("<magenta>[TX]</magenta> TX Worker started.")
         while not self.should_stop.is_set():
             try:
                 # -----------------------------------------------------------
@@ -861,12 +916,16 @@ class MasterDnsVPNClient:
                 encode_data=True,
                 stream_id=stream_id,
                 sequence_num=sn,
+                qType=DNS_Record_Type.TXT,
             )
 
             if not dns_queries:
                 continue
 
             try:
+                self.logger.debug(
+                    f"<magenta>[TX]</magenta> Sending {pkt_type} for SID {stream_id} SN {sn} via {conn['resolver']}"
+                )
                 await self.loop.sock_sendto(
                     self.tunnel_sock, dns_queries[0], (conn["resolver"], 53)
                 )
@@ -889,6 +948,9 @@ class MasterDnsVPNClient:
         ptype = header["packet_type"]
         stream_id = header.get("stream_id", 0)
         sn = header.get("sequence_num", 0)
+        self.logger.debug(
+            f"<yellow>[RESP]</yellow> Server sent {ptype} for SID {stream_id} SN {sn}"
+        )
 
         if ptype == Packet_Type.STREAM_SYN_ACK:
             if stream_id in self.pending_streams:
@@ -910,6 +972,9 @@ class MasterDnsVPNClient:
             if stream_id in self.active_streams:
                 await self.active_streams[stream_id].receive_data(sn, data)
             else:
+                self.logger.debug(
+                    f"<yellow>[RESP]</yellow> Data for unknown SID {stream_id}, sending FIN."
+                )
                 await self._client_enqueue_tx(1, stream_id, 0, b"", is_fin=True)
 
         elif ptype == Packet_Type.STREAM_DATA_ACK:
@@ -931,6 +996,7 @@ class MasterDnsVPNClient:
                 self.session_restart_event.set()
 
     async def _retransmit_worker(self):
+        self.logger.debug("<magenta>[RETRANS]</magenta> Retransmit Worker started.")
         while not self.should_stop.is_set():
             await asyncio.sleep(1)
 
