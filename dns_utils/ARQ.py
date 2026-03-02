@@ -82,15 +82,25 @@ class ARQStream:
         if self.closed:
             return
         self.closed = True
-        if self.io_task:
-            self.io_task.cancel()
+
         try:
-            self.writer.close()
-            await self.writer.wait_closed()
+            # Priority 2 for FIN
+            await self.enqueue_tx(2, self.stream_id, 0, b"", is_fin=True)
         except Exception:
             pass
-        # Priority 2 for FIN
-        await self.enqueue_tx(2, self.stream_id, 0, b"", is_fin=True)
+
+        try:
+            if not self.writer.is_closing():
+                self.writer.close()
+        except Exception:
+            pass
+
+        try:
+            current_task = asyncio.current_task()
+            if self.io_task and self.io_task != current_task:
+                self.io_task.cancel()
+        except Exception:
+            pass
 
     async def check_retransmits(self):
         """Check for unacked packets and resend them"""

@@ -702,9 +702,19 @@ class MasterDnsVPNClient:
     async def _tx_worker(self):
         while not self.should_stop.is_set():
             try:
-                priority, _, pkt_type, stream_id, sn, data = await asyncio.wait_for(
-                    self.outbound_queue.get(), timeout=0.05
-                )
+                if not self.active_streams and not self.pending_streams:
+                    (
+                        priority,
+                        _,
+                        pkt_type,
+                        stream_id,
+                        sn,
+                        data,
+                    ) = await self.outbound_queue.get()
+                else:
+                    priority, _, pkt_type, stream_id, sn, data = await asyncio.wait_for(
+                        self.outbound_queue.get(), timeout=0.05
+                    )
             except asyncio.TimeoutError:
                 if self.active_streams:
                     priority, pkt_type, stream_id, sn, data = (
@@ -716,6 +726,9 @@ class MasterDnsVPNClient:
                     )
                 else:
                     continue
+
+            if pkt_type == Packet_Type.PING and not self.active_streams:
+                continue
 
             conn = await self.select_connection()
             if not conn:
@@ -797,16 +810,33 @@ class MasterDnsVPNClient:
 
         elif ptype == Packet_Type.STREAM_FIN:
             if stream_id in self.active_streams:
+                self.logger.info(f"<y>Stream {stream_id} Closed by server.</y>")
                 await self.active_streams[stream_id].close()
                 del self.active_streams[stream_id]
 
     async def _retransmit_worker(self):
         while not self.should_stop.is_set():
             await asyncio.sleep(1)
-            # Cleanup closed streams to avoid memory leak
+
             dead_streams = [sid for sid, s in self.active_streams.items() if s.closed]
             for sid in dead_streams:
+                self.logger.info(f"<y>Stream {sid} Closed by local client.</y>")
                 del self.active_streams[sid]
+
+            dead_pending = []
+            for sid, (reader, writer) in self.pending_streams.items():
+                if reader.at_eof() or writer.is_closing():
+                    dead_pending.append(sid)
+                    try:
+                        writer.close()
+                    except Exception:
+                        pass
+            for sid in dead_pending:
+                self.logger.info(
+                    f"<y>Pending Stream {sid} aborted by local client.</y>"
+                )
+                del self.pending_streams[sid]
+                await self._client_enqueue_tx(2, sid, 0, b"", is_fin=True)
 
             for stream in self.active_streams.values():
                 await stream.check_retransmits()
