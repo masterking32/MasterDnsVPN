@@ -651,7 +651,7 @@ class MasterDnsVPNClient:
         self.outbound_queue = asyncio.PriorityQueue()
         self.active_streams = {}
         self.pending_streams = {}
-        self.next_stream_id = 1
+        self.last_activity_time = self.loop.time()
 
         listen_ip = self.config.get("LISTEN_IP", "127.0.0.1")
         listen_port = int(self.config.get("LISTEN_PORT", 1080))
@@ -705,6 +705,21 @@ class MasterDnsVPNClient:
     async def _tx_worker(self):
         while not self.should_stop.is_set():
             try:
+                # -----------------------------------------------------------
+                # (Adaptive Polling / Smart Backoff)
+                # -----------------------------------------------------------
+                current_time = self.loop.time()
+                idle_duration = current_time - getattr(
+                    self, "last_activity_time", current_time
+                )
+
+                if idle_duration < 2.0:
+                    current_timeout = 0.05
+                elif idle_duration < 10.0:
+                    current_timeout = 1.0
+                else:
+                    current_timeout = 5.0
+
                 if not self.active_streams and not self.pending_streams:
                     (
                         priority,
@@ -714,10 +729,14 @@ class MasterDnsVPNClient:
                         sn,
                         data,
                     ) = await self.outbound_queue.get()
+                    self.last_activity_time = self.loop.time()
                 else:
                     priority, _, pkt_type, stream_id, sn, data = await asyncio.wait_for(
-                        self.outbound_queue.get(), timeout=0.05
+                        self.outbound_queue.get(), timeout=current_timeout
                     )
+                    if pkt_type != Packet_Type.PING:
+                        self.last_activity_time = self.loop.time()
+
             except asyncio.TimeoutError:
                 if self.active_streams:
                     priority, pkt_type, stream_id, sn, data = (
@@ -771,11 +790,14 @@ class MasterDnsVPNClient:
                 )
                 if parsed_header:
                     await self._handle_server_response(parsed_header, returned_data)
+
                     if parsed_header["packet_type"] in (
                         Packet_Type.STREAM_DATA,
                         Packet_Type.STREAM_RESEND,
-                        Packet_Type.PONG,
+                        Packet_Type.STREAM_SYN_ACK,
+                        Packet_Type.STREAM_FIN,
                     ):
+                        self.last_activity_time = self.loop.time()
                         await self.outbound_queue.put(
                             (5, self.loop.time(), Packet_Type.PING, 0, 0, b"PING")
                         )
