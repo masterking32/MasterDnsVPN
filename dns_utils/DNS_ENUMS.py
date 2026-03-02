@@ -20,10 +20,12 @@ class Packet_Type:
     SET_MTU_RES = 0x08  # Server confirms MTU update
     PING = 0x09  # Client ping for latency check
     PONG = 0x0A  # Server pong response
-    SYN = 0x0B  # Client initiates TCP connection (SYN)
-    SYN_ACK = 0x0C  # Server acknowledges TCP connection (SYN-ACK)
-    ACK = 0x0D  # Client ACKs TCP connection (ACK)
-    DATA = 0x0E  # Client sends data packet
+    STREAM_SYN = 0x0B  # Client initiates TCP connection (SYN)
+    STREAM_SYN_ACK = 0x0C  # Server acknowledges TCP connection (SYN-ACK)
+    STREAM_FIN = 0x0D  # Client finishes TCP connection (FIN)
+    STREAM_DATA = 0x0E  # Client/Server sends TCP data packet
+    STREAM_DATA_ACK = 0x0F  # Server/Client acknowledges TCP data packet fully received
+    STREAM_RESEND = 0x10  # Client/Server requests resend of lost packet
     ERROR_DROP = 0xFF  # Invalid/Drop signal
 
 

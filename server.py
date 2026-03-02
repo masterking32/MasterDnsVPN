@@ -261,20 +261,17 @@ class MasterDnsVPNServer:
                 )
                 return None
 
-            if len(extracted_header) != 2:
-                self.logger.warning(
-                    f"Invalid VPN header length from labels for packet from {addr}: {len(extracted_header)}"
-                )
-                return None
+            packet_type = extracted_header["packet_type"]
+            session_id = extracted_header["session_id"]
 
-            packet_type = extracted_header[1]
-            if packet_type not in DNS_Record_Type.__dict__.values():
+            valid_packet_types = [
+                v for k, v in Packet_Type.__dict__.items() if not k.startswith("__")
+            ]
+            if packet_type not in valid_packet_types:
                 self.logger.warning(
                     f"Invalid VPN packet type from labels for packet from {addr}: {packet_type}"
                 )
                 return None
-
-            session_id = extracted_header[0]
 
             response = await self.handle_vpn_packet(
                 packet_type=packet_type,

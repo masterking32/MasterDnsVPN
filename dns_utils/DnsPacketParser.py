@@ -6,8 +6,8 @@
 from typing import Any
 import random
 import math
-from dns_utils.DNS_ENUMS import Packet_Type, DNS_Record_Type, DNS_rCode, DNS_QClass
-from typing import Any, Optional
+from dns_utils.DNS_ENUMS import Packet_Type, DNS_Record_Type, DNS_QClass
+from typing import Optional
 import hashlib
 
 
@@ -757,7 +757,15 @@ class DnsPacketParser:
         # 2. Prepare Header Overhead
         # Create a dummy header to measure its exact encoded size
         # We assume worst-case scenario (encryption adds size + max base36 expansion)
-        test_header = self.create_vpn_header(session_id=255, packet_type=255)
+        test_header = self.create_vpn_header(
+            session_id=255,
+            packet_type=Packet_Type.STREAM_DATA,
+            stream_id=65535,
+            sequence_num=65535,
+            fragment_id=255,
+            total_fragments=255,
+            total_data_length=65535,
+        )
 
         # Header Overhead = Encoded Header + 1 dot separator
         header_overhead_chars = len(test_header) + 1
@@ -842,10 +850,7 @@ class DnsPacketParser:
                 header_encoded, lowerCaseOnly=True
             )
 
-            if not header_decrypted or len(header_decrypted) != 2:
-                return b""
-
-            return header_decrypted
+            return self.parse_vpn_header_bytes(header_decrypted)
         except Exception as e:
             self.logger.error(f"Failed to extract VPN header: {e}")
             return b""
@@ -915,6 +920,82 @@ class DnsPacketParser:
             self.logger.error(f"Failed to extract VPN data: {e}")
             return b""
 
+    def parse_vpn_header_bytes(self, header_bytes: bytes) -> dict:
+        """
+        Reverse of create_vpn_header. Parses dynamic header bytes into a dictionary.
+        """
+        if not header_bytes or len(header_bytes) < 2:
+            return None
+
+        header_data = {
+            "session_id": header_bytes[0],
+            "packet_type": header_bytes[1],
+        }
+
+        offset = 2
+        ptype = header_data["packet_type"]
+
+        try:
+            # Extract stream_id
+            if ptype in (
+                Packet_Type.STREAM_SYN,
+                Packet_Type.STREAM_SYN_ACK,
+                Packet_Type.STREAM_FIN,
+                Packet_Type.STREAM_DATA,
+                Packet_Type.STREAM_DATA_ACK,
+                Packet_Type.STREAM_RESEND,
+                Packet_Type.MTU_UP_REQ,
+                Packet_Type.MTU_DOWN_RES,
+            ):
+                if len(header_bytes) >= offset + 2:
+                    header_data["stream_id"] = int.from_bytes(
+                        header_bytes[offset : offset + 2], byteorder="big"
+                    )
+                    offset += 2
+
+            # Extract sequence_num
+            if ptype in (
+                Packet_Type.STREAM_DATA_ACK,
+                Packet_Type.STREAM_DATA,
+                Packet_Type.STREAM_RESEND,
+                Packet_Type.MTU_UP_REQ,
+                Packet_Type.MTU_DOWN_RES,
+            ):
+                if len(header_bytes) >= offset + 2:
+                    header_data["sequence_num"] = int.from_bytes(
+                        header_bytes[offset : offset + 2], byteorder="big"
+                    )
+                    offset += 2
+
+            # Extract fragment_id
+            if ptype in (
+                Packet_Type.STREAM_DATA,
+                Packet_Type.STREAM_RESEND,
+                Packet_Type.MTU_UP_REQ,
+                Packet_Type.MTU_DOWN_RES,
+            ):
+                if len(header_bytes) >= offset + 1:
+                    header_data["fragment_id"] = header_bytes[offset]
+                    offset += 1
+
+                    # Extract total_fragments and total_data_length
+                    if (
+                        header_data.get("sequence_num", -1) == 0
+                        and header_data.get("fragment_id", -1) == 0
+                    ):
+                        if len(header_bytes) >= offset + 3:
+                            header_data["total_fragments"] = header_bytes[offset]
+                            offset += 1
+                            header_data["total_data_length"] = int.from_bytes(
+                                header_bytes[offset : offset + 2], byteorder="big"
+                            )
+                            offset += 2
+
+            return header_data
+        except Exception as e:
+            self.logger.error(f"Failed to parse dynamic VPN header bytes: {e}")
+            return None
+
     #
     # Custom VPN Packet Header Structure (for data fragmentation over DNS)
     #
@@ -927,8 +1008,28 @@ class DnsPacketParser:
     #   [0]  1 byte  (uint8)  : Session ID
     #   [1]  1 byte  (uint8)  : Packet Type
     #
+    # Extended Headers for STREAM_SYN, STREAM_SYN_ACK, STREAM_FIN, STREAM_DATA, STREAM_DATA_ACK, STREAM_RESEND, MTU_UP_REQ, MTU_DOWN_RES
+    #   [2]  2 bytes (uint16) : Stream ID (for STREAM_DATA packets)
+    #
+    # Extended Headers for STREAM_DATA_ACK, STREAM_DATA, STREAM_RESEND, MTU_UP_REQ, MTU_DOWN_RES
+    #   [3]  2 bytes (uint16) : Sequence Number (for STREAM_DATA packets)
+    #
+    # Extended Headers for STREAM_DATA, STREAM_RESEND, MTU_UP_REQ, MTU_DOWN_RES
+    #   [4]  1 byte  (uint8)  : Fragment ID (for STREAM_DATA packets)
+    # Extended Header for STREAM_DATA or MTU_UP_REQ or MTU_DOWN_RES, If sequence number = 0 and fragment ID = 0
+    #   [5]  1 byte  (uint8)  : Total Fragments (for first packet of a stream)
+    #   [6]  2 bytes (uint16) : Total Data Length (for first packet of a stream)
+    #
     def create_vpn_header(
-        self, session_id: int, packet_type: int, base36_encode: bool = True
+        self,
+        session_id: int,
+        packet_type: int,
+        base36_encode: bool = True,
+        stream_id: int = 0,
+        sequence_num: int = 0,
+        fragment_id: int = 0,
+        total_fragments: int = 0,
+        total_data_length: int = 0,
     ) -> bytes:
         """
         Construct custom VPN header for a DNS packet.
@@ -936,7 +1037,11 @@ class DnsPacketParser:
         Args:
             session_id (int): VPN session identifier (0-255).
             packet_type (int): Type of VPN packet (0-255).
-            base36_encode (bool): Whether to base36 encode the header
+            base36_encode (bool): Whether to base36 encode the header,
+            stream_id (int): Stream ID for STREAM_DATA packets (0-65535).
+            sequence_num (int): Sequence number for STREAM_DATA packets (0-65535).
+            fragment_id (int): Fragment ID for STREAM_DATA packets (0-255).
+            total_fragments (int): Total fragments for the stream (0-255).
         Returns:
             bytes: Encoded VPN header.
 
@@ -949,10 +1054,62 @@ class DnsPacketParser:
         if not (0 <= packet_type <= 0xFF):
             raise ValueError("packet_type must be in 0-255.")
 
+        if not (0 <= stream_id <= 0xFFFF):
+            raise ValueError("stream_id must be in 0-65535.")
+
+        if not (0 <= sequence_num <= 0xFFFF):
+            raise ValueError("sequence_num must be in 0-65535.")
+
+        if not (0 <= fragment_id <= 0xFF):
+            raise ValueError("fragment_id must be in 0-255.")
+
+        if not (0 <= total_fragments <= 0xFF):
+            raise ValueError("total_fragments must be in 0-255.")
+
+        if not (0 <= total_data_length <= 0xFFFF):
+            raise ValueError("total_data_length must be in 0-65535.")
+
         # Compose header
         header = bytearray()
         header.append(session_id)
         header.append(packet_type)
+
+        if packet_type in (
+            Packet_Type.STREAM_SYN,
+            Packet_Type.STREAM_SYN_ACK,
+            Packet_Type.STREAM_FIN,
+            Packet_Type.STREAM_DATA,
+            Packet_Type.STREAM_DATA_ACK,
+            Packet_Type.STREAM_RESEND,
+            Packet_Type.MTU_UP_REQ,
+            Packet_Type.MTU_DOWN_RES,
+        ):
+            header += stream_id.to_bytes(2, byteorder="big")
+
+        if packet_type in (
+            Packet_Type.STREAM_DATA_ACK,
+            Packet_Type.STREAM_DATA,
+            Packet_Type.STREAM_RESEND,
+            Packet_Type.MTU_UP_REQ,
+            Packet_Type.MTU_DOWN_RES,
+        ):
+            header += sequence_num.to_bytes(2, byteorder="big")
+
+        if packet_type in (
+            Packet_Type.STREAM_DATA,
+            Packet_Type.STREAM_RESEND,
+            Packet_Type.MTU_UP_REQ,
+            Packet_Type.MTU_DOWN_RES,
+        ):
+            header.append(fragment_id)
+            if sequence_num == 0 and fragment_id == 0:
+                header.append(total_fragments)
+                header += total_data_length.to_bytes(2, byteorder="big")
+
+        if len(header) > 255:
+            raise ValueError(
+                "Header length exceeds 255 bytes, cannot encode in a single label."
+            )
 
         encrypted_header = self.codec_transform(bytes(header), encrypt=True)
 

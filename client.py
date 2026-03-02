@@ -225,8 +225,9 @@ class MasterDnsVPNClient:
                 header_str, lowerCaseOnly=False
             )
 
-            if header_bytes and len(header_bytes) >= 2:
-                packet_type = header_bytes[1]
+            parsed_header = self.dns_packet_parser.parse_vpn_header_bytes(header_bytes)
+            if parsed_header:
+                packet_type = parsed_header["packet_type"]
 
                 if detected_packet_type is None:
                     detected_packet_type = packet_type
