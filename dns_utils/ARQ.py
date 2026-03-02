@@ -39,7 +39,8 @@ class ARQStream:
                 if not data:
                     break
                 sn = self.snd_nxt
-                self.snd_nxt += 1
+                # Wrap around to zero if the sequence number reaches the maximum value (65535 for 16-bit)
+                self.snd_nxt = (self.snd_nxt + 1) % 65536
                 self.snd_buf[sn] = {"data": data, "time": time.time(), "retries": 0}
 
                 # Priority 3 for normal data
@@ -53,7 +54,11 @@ class ARQStream:
         """Handle incoming VPN data packets"""
         if self.closed:
             return
-        if sn < self.rcv_nxt:
+
+        # Calculate circular distance to detect duplicate packets when the sequence number wraps around
+        diff = (sn - self.rcv_nxt + 32768) % 65536 - 32768
+
+        if diff < 0:
             # Already received, resend ACK
             await self.enqueue_tx(4, self.stream_id, sn, b"", is_ack=True)
             return
@@ -70,7 +75,7 @@ class ARQStream:
                 break
             # Priority 4 for ACK
             await self.enqueue_tx(4, self.stream_id, self.rcv_nxt, b"", is_ack=True)
-            self.rcv_nxt += 1
+            self.rcv_nxt = (self.rcv_nxt + 1) % 65536
 
     async def receive_ack(self, sn):
         """Clear from send buffer when ACK is received"""

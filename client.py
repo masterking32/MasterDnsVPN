@@ -672,10 +672,13 @@ class MasterDnsVPNClient:
             await self.should_stop.wait()
 
     async def _handle_local_tcp_connection(self, reader, writer):
-        stream_id = self.next_stream_id
-        self.next_stream_id = (self.next_stream_id + 1) % 65535
-        if stream_id == 0:
-            stream_id = 1
+        stream_id = 1
+        while stream_id in self.active_streams or stream_id in self.pending_streams:
+            stream_id += 1
+            if stream_id > 65535:
+                self.logger.error("No available Stream IDs! Too many connections.")
+                writer.close()
+                return
 
         self.logger.info(f"New local connection, assigning Stream ID: {stream_id}")
 
