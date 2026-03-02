@@ -136,7 +136,7 @@ class ARQStream:
             if lost_sn in self.snd_buf:
                 self.dup_acks[lost_sn] = self.dup_acks.get(lost_sn, 0) + 1
                 if self.dup_acks[lost_sn] == 3:
-                    self.ssthresh = max(int(self.cwnd / 2), 10)
+                    self.ssthresh = max(int(self.cwnd * 0.8), 20)
                     self.cwnd = self.ssthresh
                     self.dup_acks[lost_sn] = 0
 
@@ -168,8 +168,8 @@ class ARQStream:
                     await self.close()
                     break
 
-                self.ssthresh = max(int(self.cwnd / 2), 10)
-                self.cwnd = 1
+                self.ssthresh = max(int(self.cwnd * 0.5), 10)
+                self.cwnd = 5
 
                 # Priority 1 for RESEND
                 await self.enqueue_tx(

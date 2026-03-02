@@ -653,6 +653,16 @@ class MasterDnsVPNClient:
         self.last_activity_time = self.loop.time()
 
         self.tunnel_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            self.tunnel_sock.setsockopt(
+                socket.SOL_SOCKET, socket.SO_RCVBUF, 8 * 1024 * 1024
+            )
+            self.tunnel_sock.setsockopt(
+                socket.SOL_SOCKET, socket.SO_SNDBUF, 8 * 1024 * 1024
+            )
+        except Exception as e:
+            self.logger.debug(f"Failed to increase socket buffer: {e}")
+
         self.tunnel_sock.bind(("0.0.0.0", 0))
 
         if sys.platform == "win32":

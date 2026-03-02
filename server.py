@@ -664,6 +664,16 @@ class MasterDnsVPNServer:
             self.logger.info("Binding UDP socket ...")
             self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             try:
+                self.udp_sock.setsockopt(
+                    socket.SOL_SOCKET, socket.SO_RCVBUF, 8 * 1024 * 1024
+                )
+                self.udp_sock.setsockopt(
+                    socket.SOL_SOCKET, socket.SO_SNDBUF, 8 * 1024 * 1024
+                )
+            except Exception as e:
+                self.logger.debug(f"Failed to increase server socket buffer: {e}")
+
+            try:
                 self.udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             except Exception:
                 pass

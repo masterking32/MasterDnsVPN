@@ -476,7 +476,6 @@ class DnsPacketParser:
         if num == 0:
             return b""
 
-        # تبدیل به بایت و حذف بایت نشانه \x01
         full_bytes = num.to_bytes((num.bit_length() + 7) // 8, byteorder="big")
         return full_bytes[1:] if full_bytes.startswith(b"\x01") else full_bytes
 
