@@ -15,8 +15,12 @@ import ctypes
 from ctypes import wintypes
 
 from client_config import master_dns_vpn_config
-
-from dns_utils.utils import getLogger, generate_random_hex_text
+from dns_utils.utils import (
+    getLogger,
+    generate_random_hex_text,
+    async_recvfrom,
+    async_sendto,
+)
 from dns_utils.DnsPacketParser import DnsPacketParser
 from dns_utils.DNS_ENUMS import Packet_Type, DNS_Record_Type
 
@@ -69,8 +73,10 @@ class MasterDnsVPNClient:
         self.resent_connection_selected = -1
         self.session_id = 0
         self.synced_upload_mtu = 0
+        self.synced_upload_mtu_chars = 0
         self.synced_download_mtu = 0
         self.buffer_size = 65507  # Max UDP payload size
+        self.packet_duplication = self.config.get("PACKET_DUPLICATION_COUNT", 1)
         self.logger.debug("<magenta>[INIT]</magenta> MasterDnsVPNClient initialized.")
 
     # ---------------------------------------------------------
@@ -149,6 +155,34 @@ class MasterDnsVPNClient:
         )
         return selected
 
+    async def select_target_connections(self) -> list:
+        """Select primary connection and fallback resolvers for duplication."""
+        primary_conn = await self.select_connection()
+        if not primary_conn:
+            return []
+
+        targets = [primary_conn]
+        if self.packet_duplication > 1:
+            same_domain_conns = [
+                c
+                for c in self.connections_map
+                if c.get("is_valid")
+                and c["domain"] == primary_conn["domain"]
+                and c["resolver"] != primary_conn["resolver"]
+                and c.get("packet_loss", 0) <= self.skip_resolver_with_packet_loss
+            ]
+
+            if same_domain_conns:
+                if self.resolver_balancing_strategy == 3:  # Lowest Loss
+                    same_domain_conns.sort(key=lambda x: x.get("packet_loss", 0))
+                elif self.resolver_balancing_strategy in (0, 1):  # Random
+                    random.shuffle(same_domain_conns)
+
+                needed = self.packet_duplication - 1
+                targets.extend(same_domain_conns[:needed])
+
+        return targets
+
     async def get_main_connection_index(
         self, selected_connection: Optional[dict] = None
     ) -> Optional[int]:
@@ -188,9 +222,9 @@ class MasterDnsVPNClient:
             self.logger.debug(
                 f"<blue>[DNS_IO]</blue> Sending query to {resolver}:{port} ({len(query_data)} bytes)"
             )
-            await self.loop.sock_sendto(sock, query_data, (resolver, port))
+            await async_sendto(self.loop, sock, query_data, (resolver, port))
             response, _ = await asyncio.wait_for(
-                self.loop.sock_recvfrom(sock, buffer_size), timeout=timeout
+                async_recvfrom(self.loop, sock, buffer_size), timeout=timeout
             )
             self.logger.debug(
                 f"<blue>[DNS_IO]</blue> Received response from {resolver}:{port} ({len(response)} bytes)"
@@ -660,6 +694,9 @@ class MasterDnsVPNClient:
 
             valid_conns = [c for c in self.connections_map if c.get("is_valid")]
             self.synced_upload_mtu = min(c["upload_mtu_bytes"] for c in valid_conns)
+            self.synced_upload_mtu_chars = min(
+                c["upload_mtu_chars"] for c in valid_conns
+            )
             self.synced_download_mtu = min(c["download_mtu_bytes"] for c in valid_conns)
 
             self.logger.info(
@@ -794,7 +831,7 @@ class MasterDnsVPNClient:
         while not self.should_stop.is_set():
             try:
                 data, addr = await asyncio.wait_for(
-                    self.loop.sock_recvfrom(self.tunnel_sock, 65536), timeout=1.0
+                    async_recvfrom(self.loop, self.tunnel_sock, 65536), timeout=1.0
                 )
                 self.logger.debug(
                     f"<magenta>[RX]</magenta> Data from tunnel socket: {len(data)} bytes"
@@ -898,10 +935,12 @@ class MasterDnsVPNClient:
             if pkt_type == Packet_Type.PING and not self.active_streams:
                 continue
 
-            conn = await self.select_connection()
-            if not conn:
+            target_conns = await self.select_target_connections()
+            if not target_conns:
                 await asyncio.sleep(1)
                 continue
+
+            primary_conn = target_conns[0]
 
             data_bytes = (
                 self.dns_packet_parser.codec_transform(data, encrypt=True)
@@ -909,11 +948,9 @@ class MasterDnsVPNClient:
                 else b""
             )
 
-            mtu_char_len, _ = self.dns_packet_parser.calculate_upload_mtu(
-                conn["domain"], self.synced_upload_mtu
-            )
+            mtu_char_len = self.synced_upload_mtu_chars
             dns_queries = await self.dns_packet_parser.build_request_dns_query(
-                domain=conn["domain"],
+                domain=primary_conn["domain"],
                 session_id=self.session_id,
                 packet_type=pkt_type,
                 data=data_bytes,
@@ -928,16 +965,20 @@ class MasterDnsVPNClient:
                 continue
 
             try:
-                self.logger.debug(
-                    f"<magenta>[TX]</magenta> Sending {pkt_type} for SID {stream_id} SN {sn} via {conn['resolver']}"
-                )
-                await self.loop.sock_sendto(
-                    self.tunnel_sock, dns_queries[0], (conn["resolver"], 53)
-                )
+                for conn in target_conns:
+                    self.logger.debug(
+                        f"<magenta>[TX]</magenta> Sending {pkt_type} for SID {stream_id} SN {sn} via {conn['resolver']}"
+                    )
+                    await async_sendto(
+                        self.loop,
+                        self.tunnel_sock,
+                        dns_queries[0],
+                        (conn["resolver"], 53),
+                    )
 
-                conn["total_packets"] = conn.get("total_packets", 0) + 1
-                if pkt_type == Packet_Type.STREAM_RESEND:
-                    conn["lost_packets"] = conn.get("lost_packets", 0) + 1
+                    conn["total_packets"] = conn.get("total_packets", 0) + 1
+                    if pkt_type == Packet_Type.STREAM_RESEND:
+                        conn["lost_packets"] = conn.get("lost_packets", 0) + 1
 
                 if pkt_type in (
                     Packet_Type.STREAM_DATA,
@@ -1004,7 +1045,7 @@ class MasterDnsVPNClient:
     async def _retransmit_worker(self):
         self.logger.debug("<magenta>[RETRANS]</magenta> Retransmit Worker started.")
         while not self.should_stop.is_set():
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.1)
 
             dead_streams = [sid for sid, s in self.active_streams.items() if s.closed]
             for sid in dead_streams:

@@ -7,6 +7,76 @@ from loguru import logger
 import sys
 from typing import Optional
 import secrets
+import asyncio
+import socket
+
+
+async def async_recvfrom(loop, sock: socket.socket, nbytes: int):
+    """Backwards compatible async UDP receive for Python < 3.11"""
+    if hasattr(loop, "sock_recvfrom"):
+        return await loop.sock_recvfrom(sock, nbytes)
+
+    try:
+        return sock.recvfrom(nbytes)
+    except BlockingIOError:
+        pass
+
+    future = loop.create_future()
+    fd = sock.fileno()
+
+    def cb():
+        try:
+            data, addr = sock.recvfrom(nbytes)
+            loop.remove_reader(fd)
+            if not future.done():
+                future.set_result((data, addr))
+        except BlockingIOError:
+            pass
+        except Exception as e:
+            loop.remove_reader(fd)
+            if not future.done():
+                future.set_exception(e)
+
+    loop.add_reader(fd, cb)
+    try:
+        return await future
+    except asyncio.CancelledError:
+        loop.remove_reader(fd)
+        raise
+
+
+async def async_sendto(loop, sock: socket.socket, data: bytes, addr):
+    """Backwards compatible async UDP send for Python < 3.11"""
+    if hasattr(loop, "sock_sendto"):
+        return await loop.sock_sendto(sock, data, addr)
+
+    try:
+        return sock.sendto(data, addr)
+    except BlockingIOError:
+        pass
+
+    future = loop.create_future()
+    fd = sock.fileno()
+
+    def cb():
+        try:
+            sent = sock.sendto(data, addr)
+            loop.remove_writer(fd)
+            if not future.done():
+                future.set_result(sent)
+        except BlockingIOError:
+            pass
+        except Exception as e:
+            loop.remove_writer(fd)
+            if not future.done():
+                future.set_exception(e)
+
+    loop.add_writer(fd, cb)
+    try:
+        return await future
+    except asyncio.CancelledError:
+        loop.remove_writer(fd)
+        raise
 
 
 def load_text(file_path: str) -> Optional[str]:

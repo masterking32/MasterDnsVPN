@@ -15,8 +15,7 @@ import ctypes
 from ctypes import wintypes
 
 from server_config import master_dns_vpn_config
-
-from dns_utils.utils import getLogger, get_encrypt_key
+from dns_utils.utils import getLogger, get_encrypt_key, async_recvfrom, async_sendto
 from dns_utils.DnsPacketParser import DnsPacketParser
 from dns_utils.DNS_ENUMS import Packet_Type, DNS_Record_Type
 
@@ -156,7 +155,8 @@ class MasterDnsVPNServer:
 
             if self.loop is None:
                 self.loop = asyncio.get_running_loop()
-            await self.loop.sock_sendto(self.udp_sock, response, addr)
+
+            await async_sendto(self.loop, self.udp_sock, response, addr)
             self.logger.debug(f"Sent DNS response to {addr}")
             return True
         except Exception as e:
@@ -314,7 +314,7 @@ class MasterDnsVPNServer:
             )
 
             if questions[0]["qType"] != DNS_Record_Type.TXT:
-                self.logger.warning(
+                self.logger.debug(
                     f"Invalid DNS query type for VPN packet from {addr}: {questions[0]['qType']}"
                 )
                 return None
@@ -416,7 +416,7 @@ class MasterDnsVPNServer:
             try:
                 try:
                     data, addr = await asyncio.wait_for(
-                        self.loop.sock_recvfrom(self.udp_sock, 65536), timeout=1.0
+                        async_recvfrom(self.loop, self.udp_sock, 65536), timeout=0.1
                     )
                 except asyncio.TimeoutError:
                     continue
@@ -655,7 +655,7 @@ class MasterDnsVPNServer:
 
     async def _server_retransmit_loop(self):
         while not self.should_stop.is_set():
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.1)
             for session_id, session in list(self.sessions.items()):
                 streams = session.get("streams", {})
                 # Cleanup closed streams to avoid memory leaks

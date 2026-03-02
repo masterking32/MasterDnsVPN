@@ -27,8 +27,8 @@ class ARQStream:
         self.rttval = 0.0  # RTT Variance
 
         # 1. Flow Control (Congestion Window)
-        self.cwnd = 20
-        self.ssthresh = 100
+        self.cwnd = 100
+        self.ssthresh = 200
 
         # 2. Fast Retransmit Tracking
         self.dup_acks = {}
@@ -171,16 +171,17 @@ class ARQStream:
             lost_sn = (sn + 1) % 65536
             if lost_sn in self.snd_buf:
                 self.dup_acks[lost_sn] = self.dup_acks.get(lost_sn, 0) + 1
+
                 if self.dup_acks[lost_sn] == 3:
-                    self.ssthresh = max(int(self.cwnd * 0.8), 20)
+                    self.ssthresh = max(int(self.cwnd * 0.8), 50)
                     self.cwnd = self.ssthresh
                     self.dup_acks[lost_sn] = 0
 
-                    pkt = self.snd_buf[lost_sn]
-                    pkt["time"] = time.time()
-                    await self.enqueue_tx(
-                        1, self.stream_id, lost_sn, pkt["data"], is_resend=True
-                    )
+                pkt = self.snd_buf[lost_sn]
+                pkt["time"] = time.time()
+                await self.enqueue_tx(
+                    1, self.stream_id, lost_sn, pkt["data"], is_resend=True
+                )
 
     async def check_retransmits(self):
         """Check for unacked packets and resend them with Dynamic Backoff"""
@@ -194,14 +195,14 @@ class ARQStream:
             return
 
         for sn, pkt in list(self.snd_buf.items()):
-            current_rto = min(self.rto * (1.5 ** pkt["retries"]), 10.0)
+            current_rto = min(self.rto * (1.5 ** pkt["retries"]), 3.0)
 
             if now - pkt["time"] > current_rto:
                 pkt["time"] = now
                 pkt["retries"] += 1
 
-                self.ssthresh = max(int(self.cwnd * 0.5), 10)
-                self.cwnd = 5
+                self.ssthresh = max(int(self.cwnd * 0.5), 50)
+                self.cwnd = max(self.cwnd, 50)
 
                 # Priority 1 for RESEND
                 await self.enqueue_tx(
