@@ -1031,8 +1031,9 @@ class MasterDnsVPNClient:
         elif ptype == Packet_Type.STREAM_FIN:
             if stream_id in self.active_streams:
                 self.logger.info(f"<y>Stream {stream_id} Closed by server.</y>")
-                await self.active_streams[stream_id].close()
-                del self.active_streams[stream_id]
+                stream = self.active_streams.pop(stream_id, None)
+                if stream:
+                    await stream.close()
 
         elif ptype == Packet_Type.ERROR_DROP:
             self.logger.error(
@@ -1050,7 +1051,7 @@ class MasterDnsVPNClient:
             dead_streams = [sid for sid, s in self.active_streams.items() if s.closed]
             for sid in dead_streams:
                 self.logger.info(f"<y>Stream {sid} Closed by local client.</y>")
-                del self.active_streams[sid]
+                self.active_streams.pop(sid, None)
 
             dead_pending = []
             for sid, (reader, writer) in self.pending_streams.items():
