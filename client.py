@@ -3,7 +3,6 @@
 # Github: https://github.com/masterking32
 # Year: 2026
 
-import time
 import random
 import functools
 import sys
@@ -739,7 +738,7 @@ class MasterDnsVPNClient:
 
             except asyncio.TimeoutError:
                 if self.active_streams:
-                    priority, pkt_type, stream_id, sn, data = (
+                    _, pkt_type, stream_id, sn, data = (
                         5,
                         Packet_Type.PING,
                         0,

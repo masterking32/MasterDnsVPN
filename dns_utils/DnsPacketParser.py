@@ -530,13 +530,12 @@ class DnsPacketParser:
                     modes,
                 )
                 from cryptography.hazmat.backends import default_backend
+                from cryptography.hazmat.primitives.ciphers.aead import AESGCM
                 import os
 
-                nonce = os.urandom(16)
-                algorithm = algorithms.AES(key)
-                cipher = Cipher(algorithm, modes.CTR(nonce), backend=default_backend())
-                encryptor = cipher.encryptor()
-                encrypted_data = encryptor.update(data) + encryptor.finalize()
+                nonce = os.urandom(12)  # GCM استاندارد 12 بایت nonce می‌خواهد
+                aesgcm = AESGCM(key)
+                encrypted_data = aesgcm.encrypt(nonce, data, None)
                 return nonce + encrypted_data
             else:
                 self.logger.error(f"Unknown encryption method: {method}")
@@ -579,14 +578,19 @@ class DnsPacketParser:
                     modes,
                 )
                 from cryptography.hazmat.backends import default_backend
+                from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-                nonce = data[:16]
-                encrypted_data = data[16:]
-                algorithm = algorithms.AES(key)
-                cipher = Cipher(algorithm, modes.CTR(nonce), backend=default_backend())
-                decryptor = cipher.decryptor()
-                decrypted_data = decryptor.update(encrypted_data) + decryptor.finalize()
-                return decrypted_data
+                nonce = data[:12]
+                encrypted_data = data[12:]
+                aesgcm = AESGCM(key)
+                try:
+                    decrypted_data = aesgcm.decrypt(nonce, encrypted_data, None)
+                    return decrypted_data
+                except Exception as e:
+                    self.logger.error(
+                        "Authentication failed! Packet altered or wrong key."
+                    )
+                    return b""
             else:
                 self.logger.error(f"Unknown decryption method: {method}")
                 return data

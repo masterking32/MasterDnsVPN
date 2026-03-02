@@ -36,6 +36,7 @@ class MasterDnsVPNServer:
         self.udp_sock: Optional[socket.socket] = None
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.should_stop = asyncio.Event()
+        self.max_concurrent_requests = asyncio.Semaphore(5000)
 
         self.config = master_dns_vpn_config.__dict__
         self.logger = getLogger(log_level=self.config.get("LOG_LEVEL", "INFO"))
@@ -387,6 +388,10 @@ class MasterDnsVPNServer:
 
         await self.send_udp_response(response, addr)
 
+    async def _bounded_handle_request(self, data, addr):
+        async with self.max_concurrent_requests:
+            await self.handle_single_request(data, addr)
+
     async def handle_dns_requests(self) -> None:
         """
         Asynchronously handle incoming DNS requests and spawn a new task for each.
@@ -513,8 +518,13 @@ class MasterDnsVPNServer:
             return None
 
         data_bytes = self.dns_parser.codec_transform(download_size_bytes, encrypt=True)
-        data_bytes = data_bytes + ":".encode()
-        data_bytes = data_bytes + random.randbytes(download_size - len(data_bytes))
+        data_bytes = data_bytes + b":"
+
+        padding_len = download_size - len(data_bytes)
+        if padding_len > 0:
+            data_bytes += random.randbytes(padding_len)
+        elif padding_len < 0:
+            data_bytes = data_bytes[:download_size]
 
         if len(data_bytes) != download_size:
             self.logger.error(
