@@ -652,6 +652,17 @@ class MasterDnsVPNClient:
         self.pending_streams = {}
         self.last_activity_time = self.loop.time()
 
+        self.tunnel_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.tunnel_sock.bind(("0.0.0.0", 0))
+
+        if sys.platform == "win32":
+            try:
+                SIO_UDP_CONNRESET = -1744830452
+                self.tunnel_sock.ioctl(SIO_UDP_CONNRESET, False)
+            except Exception as e:
+                self.logger.debug(f"Failed to set SIO_UDP_CONNRESET: {e}")
+        self.tunnel_sock.setblocking(False)
+
         listen_ip = self.config.get("LISTEN_IP", "127.0.0.1")
         listen_port = int(self.config.get("LISTEN_PORT", 1080))
 
@@ -663,12 +674,36 @@ class MasterDnsVPNClient:
             f"<g>Ready! Local Proxy listening on {listen_ip}:{listen_port}</g>"
         )
 
+        self.loop.create_task(self._rx_worker())
+
         for _ in range(self.config.get("NUM_DNS_WORKERS", 4)):
             self.loop.create_task(self._tx_worker())
+
         self.loop.create_task(self._retransmit_worker())
 
         async with server:
             await self.should_stop.wait()
+
+    async def _rx_worker(self):
+        """Continuously listen for incoming VPN packets on the tunnel socket."""
+        while not self.should_stop.is_set():
+            try:
+                data, addr = await asyncio.wait_for(
+                    self.loop.sock_recvfrom(self.tunnel_sock, 65536), timeout=1.0
+                )
+
+                self.loop.create_task(self._process_and_route_incoming(data))
+
+            except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                self.logger.debug(f"RX Worker error: {e}")
+
+    async def _process_and_route_incoming(self, data):
+        """Helper to process incoming data asynchronously."""
+        parsed_header, returned_data = await self._process_received_packet(data)
+        if parsed_header:
+            await self._handle_server_response(parsed_header, returned_data)
 
     async def _handle_local_tcp_connection(self, reader, writer):
         stream_id = 1
@@ -779,27 +814,20 @@ class MasterDnsVPNClient:
             if not dns_queries:
                 continue
 
-            response = await self._send_and_receive_dns(
-                dns_queries[0], conn["resolver"], 53, self.timeout
-            )
-
-            if response:
-                parsed_header, returned_data = await self._process_received_packet(
-                    response
+            try:
+                await self.loop.sock_sendto(
+                    self.tunnel_sock, dns_queries[0], (conn["resolver"], 53)
                 )
-                if parsed_header:
-                    await self._handle_server_response(parsed_header, returned_data)
 
-                    if parsed_header["packet_type"] in (
-                        Packet_Type.STREAM_DATA,
-                        Packet_Type.STREAM_RESEND,
-                        Packet_Type.STREAM_SYN_ACK,
-                        Packet_Type.STREAM_FIN,
-                    ):
-                        self.last_activity_time = self.loop.time()
-                        await self.outbound_queue.put(
-                            (5, self.loop.time(), Packet_Type.PING, 0, 0, b"PING")
-                        )
+                if pkt_type in (
+                    Packet_Type.STREAM_DATA,
+                    Packet_Type.STREAM_RESEND,
+                    Packet_Type.STREAM_SYN_ACK,
+                    Packet_Type.STREAM_FIN,
+                ):
+                    self.last_activity_time = self.loop.time()
+            except Exception as e:
+                self.logger.debug(f"Send error in TX worker: {e}")
 
     async def _handle_server_response(self, header, data):
         ptype = header["packet_type"]

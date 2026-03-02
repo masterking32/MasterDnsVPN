@@ -672,6 +672,13 @@ class MasterDnsVPNServer:
 
             self.logger.info(f"UDP socket bound on {host}:{port}")
 
+            if sys.platform == "win32":
+                try:
+                    SIO_UDP_CONNRESET = -1744830452
+                    self.udp_sock.ioctl(SIO_UDP_CONNRESET, False)
+                except Exception as e:
+                    self.logger.debug(f"Failed to set SIO_UDP_CONNRESET: {e}")
+
             self._dns_task = self.loop.create_task(self.handle_dns_requests())
             self._session_cleanup_task = self.loop.create_task(
                 self._session_cleanup_loop()

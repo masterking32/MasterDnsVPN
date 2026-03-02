@@ -21,6 +21,9 @@ class ARQStream:
         self.snd_buf = {}
         self.rcv_buf = {}
 
+        self.srtt = 0.0  # Smoothed Round Trip Time
+        self.rttval = 0.0  # RTT Variance
+
         # 1. Flow Control (Congestion Window)
         self.cwnd = 20
         self.ssthresh = 100
@@ -79,6 +82,12 @@ class ARQStream:
             await self.enqueue_tx(4, self.stream_id, sn, b"", is_ack=True)
             return
         elif diff > 0:
+            if len(self.rcv_buf) > 1000:
+                self.logger.warning(
+                    "Receiver buffer full! Dropping out-of-order packet."
+                )
+                return
+
             expected_sn = (self.rcv_nxt - 1) % 65536
             await self.enqueue_tx(4, self.stream_id, expected_sn, b"", is_ack=True)
             self.rcv_buf[sn] = data
@@ -103,6 +112,16 @@ class ARQStream:
         self.last_activity = time.time()
 
         if sn in self.snd_buf:
+            rtt = time.time() - self.snd_buf[sn]["time"]
+            if self.srtt == 0.0:
+                self.srtt = rtt
+                self.rttval = rtt / 2
+            else:
+                self.rttval = 0.75 * self.rttval + 0.25 * abs(self.srtt - rtt)
+                self.srtt = 0.875 * self.srtt + 0.125 * rtt
+
+            self.rto = max(0.5, min(self.srtt + max(0.1, 4 * self.rttval), 10.0))
+
             del self.snd_buf[sn]
             if self.cwnd < self.ssthresh:
                 self.cwnd += 1  # Slow Start
