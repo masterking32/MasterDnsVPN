@@ -664,8 +664,8 @@ class MasterDnsVPNClient:
             f"<g>Ready! Local Proxy listening on {listen_ip}:{listen_port}</g>"
         )
 
-        # for _ in range(15):
-        self.loop.create_task(self._tx_worker())
+        for _ in range(self.config.get("NUM_DNS_WORKERS", 4)):
+            self.loop.create_task(self._tx_worker())
         self.loop.create_task(self._retransmit_worker())
 
         async with server:
@@ -788,6 +788,8 @@ class MasterDnsVPNClient:
         elif ptype in (Packet_Type.STREAM_DATA, Packet_Type.STREAM_RESEND):
             if stream_id in self.active_streams:
                 await self.active_streams[stream_id].receive_data(sn, data)
+            else:
+                await self._client_enqueue_tx(1, stream_id, 0, b"", is_fin=True)
 
         elif ptype == Packet_Type.STREAM_DATA_ACK:
             if stream_id in self.active_streams:

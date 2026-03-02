@@ -220,6 +220,11 @@ class MasterDnsVPNServer:
                 await self.sessions[session_id]["streams"][stream_id].receive_data(
                     sn, extracted_data
                 )
+            else:
+                if session_id in self.sessions:
+                    await self._server_enqueue_tx(
+                        session_id, 1, stream_id, 0, b"", is_fin=True
+                    )
         elif packet_type == Packet_Type.STREAM_DATA_ACK:
             if session_id in self.sessions and stream_id in self.sessions[
                 session_id

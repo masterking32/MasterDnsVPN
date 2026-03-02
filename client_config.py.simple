@@ -109,3 +109,12 @@ class master_dns_vpn_config:
     # This is typically set to localhost (127.0.0.1) for local testing or internal use.
     LISTEN_IP = "127.0.0.1"
     LISTEN_PORT = 1080
+
+    # Number of DNS Workers
+    # -------------------------------------------------
+    # The number of concurrent worker tasks that will handle DNS queries and responses.
+    # Increasing this number can improve performance on high-traffic clients but may increase resource usage.
+    # Start with a moderate number (e.g., 4) and adjust based on your client's performance and load.
+    NUM_DNS_WORKERS = 4
+
+    
