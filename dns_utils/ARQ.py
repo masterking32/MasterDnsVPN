@@ -76,6 +76,8 @@ class ARQStream:
                     }
                     await self.enqueue_tx(3, self.stream_id, sn, chunk)
 
+        except asyncio.CancelledError:
+            raise
         except ConnectionResetError:
             if self.logger:
                 self.logger.debug(
@@ -87,7 +89,12 @@ class ARQStream:
                     f"[DEBUG-ARQ] Stream {self.stream_id} IO Loop Exception: {e}"
                 )
         finally:
-            await self.close(reason="IO Loop Ended")
+            if not self.closed:
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self.close(reason="IO Loop Ended"))
+                except Exception:
+                    pass
 
     async def receive_data(self, sn, data):
         """Handle incoming VPN data packets"""
