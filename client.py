@@ -3,6 +3,7 @@
 # Github: https://github.com/masterking32
 # Year: 2026
 
+import time
 import random
 import functools
 import sys
@@ -642,25 +643,160 @@ class MasterDnsVPNClient:
             return
 
     # ---------------------------------------------------------
-    # TCP Multiplexing Logic
+    # TCP Multiplexing Logic & KCP Handlers
     # ---------------------------------------------------------
-
     async def _main_tunnel_loop(self):
-        """Start local TCP server."""
+        """Start local TCP server and main worker tasks."""
         self.logger.info("Entering VPN Tunnel Main Loop...")
-        self.active_tcp_connections = {}
+        self.outbound_queue = asyncio.PriorityQueue()
+        self.active_streams = {}
+        self.pending_streams = {}
+        self.next_stream_id = 1
+
         listen_ip = self.config.get("LISTEN_IP", "127.0.0.1")
         listen_port = int(self.config.get("LISTEN_PORT", 1080))
-        # server = await asyncio.start_server(
-        #     self._handle_local_tcp_connection, listen_ip, listen_port
-        # )
 
-        # self.logger.success(
-        #     f"<g>Ready! Local Proxy listening on {listen_ip}:{listen_port}</g>"
-        # )
+        server = await asyncio.start_server(
+            self._handle_local_tcp_connection, listen_ip, listen_port
+        )
 
-        # async with server:
-        #     await self.should_stop.wait()
+        self.logger.success(
+            f"<g>Ready! Local Proxy listening on {listen_ip}:{listen_port}</g>"
+        )
+
+        self.loop.create_task(self._tx_worker())
+        self.loop.create_task(self._retransmit_worker())
+
+        async with server:
+            await self.should_stop.wait()
+
+    async def _handle_local_tcp_connection(self, reader, writer):
+        stream_id = self.next_stream_id
+        self.next_stream_id = (self.next_stream_id + 1) % 65535
+        if stream_id == 0:
+            stream_id = 1
+
+        self.logger.info(f"New local connection, assigning Stream ID: {stream_id}")
+
+        # Priority 2 (Control)
+        await self.outbound_queue.put(
+            (2, self.loop.time(), Packet_Type.STREAM_SYN, stream_id, 0, b"")
+        )
+        self.pending_streams[stream_id] = (reader, writer)
+
+    async def _client_enqueue_tx(
+        self, priority, stream_id, sn, data, is_ack=False, is_fin=False, is_resend=False
+    ):
+        ptype = Packet_Type.STREAM_DATA
+        if is_ack:
+            ptype = Packet_Type.STREAM_DATA_ACK
+        elif is_fin:
+            ptype = Packet_Type.STREAM_FIN
+        elif is_resend:
+            ptype = Packet_Type.STREAM_RESEND
+        await self.outbound_queue.put(
+            (priority, self.loop.time(), ptype, stream_id, sn, data)
+        )
+
+    async def _tx_worker(self):
+
+        while not self.should_stop.is_set():
+            try:
+                # Wait for packet, if idle for 0.2s, send a PING to fetch server queued downstream data
+                priority, _, pkt_type, stream_id, sn, data = await asyncio.wait_for(
+                    self.outbound_queue.get(), timeout=0.2
+                )
+            except asyncio.TimeoutError:
+                priority, pkt_type, stream_id, sn, data = (
+                    5,
+                    Packet_Type.PING,
+                    0,
+                    0,
+                    b"PING",
+                )
+
+            conn = await self.select_connection()
+            if not conn:
+                await asyncio.sleep(1)
+                continue
+
+            data_bytes = (
+                self.dns_packet_parser.codec_transform(data, encrypt=True)
+                if data
+                else b""
+            )
+
+            mtu_char_len, _ = self.dns_packet_parser.calculate_upload_mtu(
+                conn["domain"], self.synced_upload_mtu
+            )
+            dns_queries = await self.dns_packet_parser.build_request_dns_query(
+                domain=conn["domain"],
+                session_id=self.session_id,
+                packet_type=pkt_type,
+                data=data_bytes,
+                mtu_chars=mtu_char_len,
+                encode_data=True,
+                stream_id=stream_id,
+                sequence_num=sn,
+            )
+
+            if not dns_queries:
+                continue
+
+            response = await self._send_and_receive_dns(
+                dns_queries[0], conn["resolver"], 53, self.timeout
+            )
+            if response:
+                parsed_header, returned_data = await self._process_received_packet(
+                    response
+                )
+                if parsed_header:
+                    await self._handle_server_response(parsed_header, returned_data)
+
+    async def _handle_server_response(self, header, data):
+        ptype = header["packet_type"]
+        stream_id = header.get("stream_id", 0)
+        sn = header.get("sequence_num", 0)
+
+        if ptype == Packet_Type.STREAM_SYN_ACK:
+            if stream_id in self.pending_streams:
+                reader, writer = self.pending_streams.pop(stream_id)
+                from dns_utils.ARQ import ARQStream
+
+                stream = ARQStream(
+                    stream_id=stream_id,
+                    session_id=self.session_id,
+                    enqueue_tx_cb=self._client_enqueue_tx,
+                    reader=reader,
+                    writer=writer,
+                    mtu=self.synced_upload_mtu,
+                )
+                self.active_streams[stream_id] = stream
+                self.logger.info(f"Stream {stream_id} Established with server.")
+
+        elif ptype in (Packet_Type.STREAM_DATA, Packet_Type.STREAM_RESEND):
+            if stream_id in self.active_streams:
+                await self.active_streams[stream_id].receive_data(sn, data)
+
+        elif ptype == Packet_Type.STREAM_DATA_ACK:
+            if stream_id in self.active_streams:
+                await self.active_streams[stream_id].receive_ack(sn)
+
+        elif ptype == Packet_Type.STREAM_FIN:
+            if stream_id in self.active_streams:
+                await self.active_streams[stream_id].close()
+                del self.active_streams[stream_id]
+
+    async def _retransmit_worker(self):
+        while not self.should_stop.is_set():
+            await asyncio.sleep(1)
+            # Cleanup closed streams to avoid memory leak
+            dead_streams = [sid for sid, s in self.active_streams.items() if s.closed]
+            for sid in dead_streams:
+                del self.active_streams[sid]
+
+            for stream in self.active_streams.values():
+                await stream.check_retransmits()
 
     # ---------------------------------------------------------
     # App Lifecycle

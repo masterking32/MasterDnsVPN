@@ -171,27 +171,87 @@ class MasterDnsVPNServer:
         parsed_packet: dict = None,
         addr=None,
         request_domain: str = "",
-        extracted_header: dict = None,  # <--
+        extracted_header: dict = None,
     ) -> Optional[bytes]:
-        """Handle VPN packet based on its type."""
 
-        handlers = {
-            Packet_Type.MTU_UP_REQ: self._handle_mtu_up,
-            Packet_Type.MTU_DOWN_REQ: self._handle_mtu_down,
-            Packet_Type.SESSION_INIT: self._handle_session_init,
-            Packet_Type.SET_MTU_REQ: self._handle_set_mtu,
-        }
+        # 1. Update session Last Packet Time
+        if session_id in self.sessions:
+            self.sessions[session_id]["last_packet_time"] = (
+                asyncio.get_event_loop().time()
+            )
 
-        handler = handlers.get(packet_type, self._handle_unknown)
-        return await handler(
-            data=data,
-            labels=labels,
-            request_domain=request_domain,
-            addr=addr,
-            parsed_packet=parsed_packet,
-            session_id=session_id,
-            extracted_header=extracted_header,
+        # 2. Extract Data Payload (Decrypts it too)
+        extracted_data = self.dns_parser.extract_vpn_data_from_labels(labels)
+
+        # 3. Route specific incoming Packets
+        if packet_type == Packet_Type.MTU_UP_REQ:
+            return await self._handle_mtu_up(
+                request_domain=request_domain, session_id=session_id, data=data
+            )
+        elif packet_type == Packet_Type.MTU_DOWN_REQ:
+            return await self._handle_mtu_down(
+                request_domain=request_domain,
+                session_id=session_id,
+                labels=labels,
+                data=data,
+            )
+        elif packet_type == Packet_Type.SESSION_INIT:
+            return await self._handle_session_init(
+                request_domain=request_domain, data=data
+            )
+        elif packet_type == Packet_Type.SET_MTU_REQ:
+            return await self._handle_set_mtu(
+                request_domain=request_domain,
+                session_id=session_id,
+                labels=labels,
+                data=data,
+            )
+
+        # --- KCP Routing (Streams) ---
+        stream_id = extracted_header.get("stream_id", 0)
+        sn = extracted_header.get("sequence_num", 0)
+
+        if packet_type == Packet_Type.STREAM_SYN:
+            await self._handle_stream_syn(session_id, stream_id)
+        elif packet_type in (Packet_Type.STREAM_DATA, Packet_Type.STREAM_RESEND):
+            if session_id in self.sessions and stream_id in self.sessions[
+                session_id
+            ].get("streams", {}):
+                await self.sessions[session_id]["streams"][stream_id].receive_data(
+                    sn, extracted_data
+                )
+        elif packet_type == Packet_Type.STREAM_DATA_ACK:
+            if session_id in self.sessions and stream_id in self.sessions[
+                session_id
+            ].get("streams", {}):
+                await self.sessions[session_id]["streams"][stream_id].receive_ack(sn)
+        elif packet_type == Packet_Type.STREAM_FIN:
+            if session_id in self.sessions and stream_id in self.sessions[
+                session_id
+            ].get("streams", {}):
+                await self.sessions[session_id]["streams"][stream_id].close()
+
+        # 4. Dequeue outward packet (Piggybacking) from PriorityQueue
+        out_queue = self.sessions.get(session_id, {}).get("outbound_queue")
+        res_ptype, res_stream_id, res_sn, res_data = Packet_Type.PONG, 0, 0, b"PONG"
+
+        if out_queue and not out_queue.empty():
+            _, _, res_ptype, res_stream_id, res_sn, res_data = out_queue.get_nowait()
+
+        data_bytes = (
+            self.dns_parser.codec_transform(res_data, encrypt=True) if res_data else b""
         )
+
+        response_packet = await self.dns_parser.generate_vpn_response_packet(
+            domain=request_domain,
+            session_id=session_id,
+            packet_type=res_ptype,
+            data=data_bytes,
+            question_packet=data,  # data here is the raw question UDP bytes
+            stream_id=res_stream_id,
+            sequence_num=res_sn,
+        )
+        return response_packet
 
     async def _handle_unknown(
         self,
@@ -493,8 +553,86 @@ class MasterDnsVPNServer:
         return response_packet
 
     # ---------------------------------------------------------
-    # TCP Forwarding Logic
+    # TCP Forwarding Logic & Server Retransmits
     # ---------------------------------------------------------
+    async def _server_enqueue_tx(
+        self,
+        session_id,
+        priority,
+        stream_id,
+        sn,
+        data,
+        is_ack=False,
+        is_fin=False,
+        is_syn_ack=False,
+        is_resend=False,
+    ):
+        if session_id not in self.sessions:
+            return
+        out_queue = self.sessions[session_id].setdefault(
+            "outbound_queue", asyncio.PriorityQueue()
+        )
+        ptype = Packet_Type.STREAM_DATA
+        if is_ack:
+            ptype = Packet_Type.STREAM_DATA_ACK
+        elif is_fin:
+            ptype = Packet_Type.STREAM_FIN
+        elif is_syn_ack:
+            ptype = Packet_Type.STREAM_SYN_ACK
+        elif is_resend:
+            ptype = Packet_Type.STREAM_RESEND
+
+        import time
+
+        await out_queue.put((priority, time.time(), ptype, stream_id, sn, data))
+
+    async def _handle_stream_syn(self, session_id, stream_id):
+        self.sessions[session_id].setdefault("streams", {})
+        if stream_id in self.sessions[session_id]["streams"]:
+            return  # Already handled
+
+        try:
+            reader, writer = await asyncio.open_connection(
+                self.config["FORWARD_IP"], int(self.config["FORWARD_PORT"])
+            )
+            from dns_utils.ARQ import ARQStream
+
+            stream = ARQStream(
+                stream_id=stream_id,
+                session_id=session_id,
+                enqueue_tx_cb=lambda p, sid, sn, d, **kw: self._server_enqueue_tx(
+                    session_id, p, sid, sn, d, **kw
+                ),
+                reader=reader,
+                writer=writer,
+                mtu=self.sessions[session_id].get("download_mtu", 512),
+            )
+            self.sessions[session_id]["streams"][stream_id] = stream
+
+            # Send SYN_ACK
+            await self._server_enqueue_tx(
+                session_id, 2, stream_id, 0, b"", is_syn_ack=True
+            )
+            self.logger.info(
+                f"Stream {stream_id} connected to Forward Target: {self.config['FORWARD_IP']}"
+            )
+        except Exception as e:
+            self.logger.error(
+                f"Failed to connect to forward target for stream {stream_id}: {e}"
+            )
+            await self._server_enqueue_tx(session_id, 2, stream_id, 0, b"", is_fin=True)
+
+    async def _server_retransmit_loop(self):
+        while not self.should_stop.is_set():
+            await asyncio.sleep(1)
+            for session_id, session in list(self.sessions.items()):
+                streams = session.get("streams", {})
+                # Cleanup closed streams to avoid memory leaks
+                dead_streams = [sid for sid, s in streams.items() if s.closed]
+                for sid in dead_streams:
+                    del streams[sid]
+                for stream in streams.values():
+                    await stream.check_retransmits()
 
     # ---------------------------------------------------------
     # App Lifecycle
@@ -524,8 +662,10 @@ class MasterDnsVPNServer:
                 self._session_cleanup_loop()
             )
 
+            self._retransmit_task = self.loop.create_task(
+                self._server_retransmit_loop()
+            )
             self.logger.info("MasterDnsVPN Server started successfully.")
-
             try:
                 await self.should_stop.wait()
             except asyncio.CancelledError:
