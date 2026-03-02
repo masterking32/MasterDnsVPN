@@ -617,20 +617,31 @@ class DnsPacketParser:
         mtu_chars: int,
         encode_data: bool = True,
         qType: int = DNS_Record_Type.TXT,
+        stream_id: int = 0,
+        sequence_num: int = 0,
+        fragment_id: int = 0,
+        total_fragments: int = 0,
+        total_data_length: int = 0,
     ) -> bytes:
         labels = self.generate_labels(
-            domain, session_id, packet_type, data, mtu_chars, encode_data
+            domain,
+            session_id,
+            packet_type,
+            data,
+            mtu_chars,
+            encode_data,
+            stream_id,
+            sequence_num,
+            fragment_id,
+            total_fragments,
+            total_data_length,
         )
-
         if not labels or len(labels) == 0:
-            self.logger.debug("No labels generated for DNS query.")
             return b""
-
         packets = []
         for label in labels:
             packet = await self.simple_question_packet(label, qType)
             packets.append(packet)
-
         return packets
 
     def generate_labels(
@@ -641,28 +652,26 @@ class DnsPacketParser:
         data: bytes,
         mtu_chars: int,
         encode_data: bool = True,
+        stream_id: int = 0,
+        sequence_num: int = 0,
+        fragment_id: int = 0,
+        total_fragments: int = 0,
+        total_data_length: int = 0,
     ) -> str:
-        """
-        Generate DNS labels with encoded VPN header and data.
-        Args:
-            domain (str): The domain name used for DNS tunneling.
-            session_id (int): The session ID for the VPN header.
-            packet_type (int): The packet type for the VPN header.
-            data (bytes): The raw data to be encoded and sent.
-            mtu_chars (int): Maximum characters per DNS query label.
-            encode_data (bool): Whether to base-encode the data.
-
-        Returns:
-            list[str]: List of DNS labels with encoded data and VPN header.
-        """
-
-        # 1. Create VPN Header
-        header = self.create_vpn_header(session_id, packet_type)
-
+        # 1. Create VPN Header with arguments
+        header = self.create_vpn_header(
+            session_id,
+            packet_type,
+            base36_encode=True,
+            stream_id=stream_id,
+            sequence_num=sequence_num,
+            fragment_id=fragment_id,
+            total_fragments=total_fragments,
+            total_data_length=total_data_length,
+        )
         # 2. Encode Data
         if encode_data:
             data = self.base_encode(data, lowerCaseOnly=True)
-
         # 3. Create Labels
         data_labels = []
         for i in range(0, len(data), mtu_chars):
@@ -670,7 +679,6 @@ class DnsPacketParser:
             chunk_label = self.data_to_labels(chunk)
             chunk_label += "." + header + "." + domain
             data_labels.append(chunk_label)
-
         return data_labels
 
     async def generate_vpn_response_packet(
@@ -680,35 +688,40 @@ class DnsPacketParser:
         packet_type: int,
         data: bytes,
         question_packet: bytes = b"",
+        stream_id: int = 0,
+        sequence_num: int = 0,
+        fragment_id: int = 0,
+        total_fragments: int = 0,
+        total_data_length: int = 0,
     ) -> bytes:
-        MAX_ALLOWED_CHARS_PER_TXT = 191  # Conservative limit for TXT record
-        header = self.create_vpn_header(session_id, packet_type, base36_encode=False)
-
+        MAX_ALLOWED_CHARS_PER_TXT = 191
+        # Create header with KCP arguments
+        header = self.create_vpn_header(
+            session_id,
+            packet_type,
+            base36_encode=False,
+            stream_id=stream_id,
+            sequence_num=sequence_num,
+            fragment_id=fragment_id,
+            total_fragments=total_fragments,
+            total_data_length=total_data_length,
+        )
         data_str = self.base_encode(data, lowerCaseOnly=False)
         answers = []
         answer_id = 0
-
         current_data_idx = 0
-        answer_id = 0
 
         while current_data_idx < len(data_str):
-            prefix = ""
-            if answer_id == 0:
-                prefix = header + "."
+            prefix = (header + ".") if answer_id == 0 else ""
             prefix += str(answer_id) + "."
-
-            overhead_len = len(prefix)
-            available_space = MAX_ALLOWED_CHARS_PER_TXT - overhead_len
+            available_space = MAX_ALLOWED_CHARS_PER_TXT - len(prefix)
 
             if available_space <= 0:
                 break
-
             chunk_payload = data_str[
                 current_data_idx : current_data_idx + available_space
             ]
-
             full_chunk_str = prefix + chunk_payload
-
             answer = {
                 "name": domain,
                 "type": DNS_Record_Type.TXT,
@@ -761,8 +774,8 @@ class DnsPacketParser:
             session_id=255,
             packet_type=Packet_Type.STREAM_DATA,
             stream_id=65535,
-            sequence_num=65535,
-            fragment_id=255,
+            sequence_num=0,
+            fragment_id=0,
             total_fragments=255,
             total_data_length=65535,
         )

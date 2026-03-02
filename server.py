@@ -101,6 +101,7 @@ class MasterDnsVPNServer:
         addr=None,
         parsed_packet=None,
         session_id=None,
+        extracted_header=None,
     ) -> Optional[bytes]:
         """Handle NEW_SESSION VPN packet."""
 
@@ -166,10 +167,11 @@ class MasterDnsVPNServer:
         packet_type: int,
         session_id: int,
         data: bytes = b"",
-        labels: dict = {},
+        labels: str = "",
         parsed_packet: dict = None,
         addr=None,
         request_domain: str = "",
+        extracted_header: dict = None,  # <--
     ) -> Optional[bytes]:
         """Handle VPN packet based on its type."""
 
@@ -188,6 +190,7 @@ class MasterDnsVPNServer:
             addr=addr,
             parsed_packet=parsed_packet,
             session_id=session_id,
+            extracted_header=extracted_header,
         )
 
     async def _handle_unknown(
@@ -198,6 +201,7 @@ class MasterDnsVPNServer:
         addr=None,
         parsed_packet=None,
         session_id=None,
+        extracted_header=None,
     ) -> Optional[bytes]:
         self.logger.info(
             f"Received unknown packet type from {addr}. No handler available."
@@ -281,6 +285,7 @@ class MasterDnsVPNServer:
                 parsed_packet=parsed_packet,
                 addr=addr,
                 request_domain=request_domain,
+                extracted_header=extracted_header,
             )
 
             if response:
@@ -355,6 +360,7 @@ class MasterDnsVPNServer:
         addr=None,
         parsed_packet=None,
         session_id=None,
+        extracted_header=None,
     ) -> Optional[bytes]:
         """Handle SET_MTU_REQ VPN packet and save it to the session."""
 
@@ -406,6 +412,7 @@ class MasterDnsVPNServer:
         addr=None,
         parsed_packet=None,
         session_id=None,
+        extracted_header=None,
     ) -> Optional[bytes]:
         """Handle SERVER_UPLOAD_TEST VPN packet."""
 
@@ -468,6 +475,7 @@ class MasterDnsVPNServer:
         addr=None,
         parsed_packet=None,
         session_id=None,
+        extracted_header=None,
     ) -> Optional[bytes]:
         """Handle SERVER_UPLOAD_TEST VPN packet."""
 

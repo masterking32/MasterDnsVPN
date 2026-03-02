@@ -248,7 +248,7 @@ class MasterDnsVPNClient:
         decoded_data = self.dns_packet_parser.decode_and_decrypt_data(
             assembled_data_str, lowerCaseOnly=False
         )
-        return detected_packet_type, decoded_data
+        return parsed_header, decoded_data
 
     # ---------------------------------------------------------
     # MTU Testing Logic
@@ -322,7 +322,9 @@ class MasterDnsVPNClient:
         response = await self._send_and_receive_dns(
             dns_queries[0], dns_server, dns_port, self.timeout
         )
-        packet_type, _ = await self._process_received_packet(response)
+
+        parsed_header, _ = await self._process_received_packet(response)
+        packet_type = parsed_header["packet_type"] if parsed_header else None
 
         if packet_type == Packet_Type.MTU_UP_RES:
             return True
@@ -358,7 +360,8 @@ class MasterDnsVPNClient:
         response = await self._send_and_receive_dns(
             dns_queries[0], dns_server, dns_port, self.timeout
         )
-        packet_type, returned_data = await self._process_received_packet(response)
+        parsed_header, returned_data = await self._process_received_packet(response)
+        packet_type = parsed_header["packet_type"] if parsed_header else None
 
         if packet_type == Packet_Type.MTU_DOWN_RES:
             if returned_data and len(returned_data) == mtu_size:
@@ -519,9 +522,10 @@ class MasterDnsVPNClient:
             )
 
             if response:
-                packet_type, returned_data = await self._process_received_packet(
+                parsed_header, returned_data = await self._process_received_packet(
                     response
                 )
+                packet_type = parsed_header["packet_type"] if parsed_header else None
 
                 if packet_type == Packet_Type.SET_MTU_RES:
                     self.logger.success(
@@ -573,9 +577,10 @@ class MasterDnsVPNClient:
             )
 
             if response:
-                packet_type, returned_data = await self._process_received_packet(
+                parsed_header, returned_data = await self._process_received_packet(
                     response
                 )
+                packet_type = parsed_header["packet_type"] if parsed_header else None
 
                 if packet_type == Packet_Type.SESSION_ACCEPT and returned_data:
                     try:
