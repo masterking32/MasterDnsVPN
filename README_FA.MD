@@ -1,7 +1,7 @@
 
 # 🚀 MasterDnsVPN
 
-## [نسخه فارسی](https://github.com/masterking32/MasterDnsVPN/blob/main/README_FA.MD) | [English Version](https://github.com/masterking32/MasterDnsVPN/blob/main/README.MD)
+## [نسخه فارسی](https://github.com/masterking32/MasterDnsVPN/blob/main/README_FA.MD) | [English Version](https://github.com/masterking32/MasterDnsVPN/blob/main/README.MD) | [Spanish Version](https://github.com/masterking32/MasterDnsVPN/blob/main/README_ES.MD)
 
 پروژه MasterDnsVPN یک ابزار تونل‌زنی DNS با کارایی بالا است که برای محصورسازی ترافیک VPN درون پرس‌وجوهای DNS طراحی شده است. این پروژه به‌خصوص برای عبور از سانسور شبکه و دیواره‌های آتش سخت‌گیرانه که پروتکل‌های معمول VPN مسدود می‌شوند، ساخته شده است.
 
