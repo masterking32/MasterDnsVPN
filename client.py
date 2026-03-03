@@ -187,7 +187,7 @@ class MasterDnsVPNClient:
 
     async def _process_received_packet(
         self, response_bytes: bytes
-    ) -> Tuple[Optional[int], bytes]:
+    ) -> Tuple[Optional[dict], bytes]:
         """
         Parse raw DNS response, extract VPN header, and return packet type alongside assembled data.
         Acts as the core for switching request/response types.
@@ -204,6 +204,7 @@ class MasterDnsVPNClient:
 
         chunks = {}
         detected_packet_type = None
+        final_parsed_header = None
 
         for answer in parsed.get("answers", []):
             if answer.get("type") != DNS_Record_Type.TXT:
@@ -214,28 +215,37 @@ class MasterDnsVPNClient:
                 continue
 
             parts = txt_str.split(".", 2)
-            if len(parts) < 3:
-                continue
 
-            header_str, answer_id_str, chunk_payload = parts[0], parts[1], parts[2]
-            header_bytes = self.dns_packet_parser.decode_and_decrypt_data(
-                header_str, lowerCaseOnly=False
-            )
+            if len(parts) == 3:
+                header_str, answer_id_str, chunk_payload = parts[0], parts[1], parts[2]
+                header_bytes = self.dns_packet_parser.decode_and_decrypt_data(
+                    header_str, lowerCaseOnly=False
+                )
 
-            parsed_header = self.dns_packet_parser.parse_vpn_header_bytes(header_bytes)
-            if parsed_header:
-                packet_type = parsed_header["packet_type"]
+                parsed_header = self.dns_packet_parser.parse_vpn_header_bytes(
+                    header_bytes
+                )
+                if parsed_header:
+                    packet_type = parsed_header["packet_type"]
 
-                if detected_packet_type is None:
-                    detected_packet_type = packet_type
+                    if detected_packet_type is None:
+                        detected_packet_type = packet_type
+                        final_parsed_header = parsed_header
 
-                if packet_type == detected_packet_type:
-                    try:
-                        chunks[int(answer_id_str)] = chunk_payload
-                    except ValueError:
-                        pass
+                    if packet_type == detected_packet_type:
+                        try:
+                            chunks[int(answer_id_str)] = chunk_payload
+                        except ValueError:
+                            pass
 
-        if detected_packet_type is None:
+            elif len(parts) == 2:
+                answer_id_str, chunk_payload = parts[0], parts[1]
+                try:
+                    chunks[int(answer_id_str)] = chunk_payload
+                except ValueError:
+                    pass
+
+        if detected_packet_type is None or final_parsed_header is None:
             self.logger.debug(
                 "<yellow>[PARSER]</yellow> No valid VPN header found in answers."
             )
@@ -251,7 +261,7 @@ class MasterDnsVPNClient:
         self.logger.debug(
             f"<yellow>[PARSER]</yellow> Packet Type: {detected_packet_type}, Data Len: {len(decoded_data)}"
         )
-        return parsed_header, decoded_data
+        return final_parsed_header, decoded_data
 
     # ---------------------------------------------------------
     # MTU Testing Logic
@@ -927,9 +937,8 @@ class MasterDnsVPNClient:
                 await self.active_streams[stream_id].receive_data(sn, data)
             else:
                 self.logger.debug(
-                    f"<yellow>[RESP]</yellow> Data for unknown SID {stream_id}, sending FIN."
+                    f"<yellow>[RESP]</yellow> Data for unknown SID {stream_id}, dropped (Out of order)."
                 )
-                await self._client_enqueue_tx(1, stream_id, 0, b"", is_fin=True)
 
         elif ptype == Packet_Type.STREAM_DATA_ACK:
             if stream_id in self.active_streams:

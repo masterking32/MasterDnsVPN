@@ -19,7 +19,7 @@ class ARQStream:
         self.rcv_buf = {}
 
         self.last_activity = time.time()
-        self.rto = 15.0
+        self.rto = 3.0
         self.closed = False
         self.logger = logger
         self.io_task = asyncio.create_task(self._io_loop())
@@ -60,18 +60,26 @@ class ARQStream:
         self.last_activity = time.time()
 
         diff = (sn - self.rcv_nxt + 32768) % 65536 - 32768
+
         if diff < 0:
             await self.enqueue_tx(4, self.stream_id, sn, b"", is_ack=True)
             return
 
+        if sn in self.rcv_buf:
+            return
+
         self.rcv_buf[sn] = data
+
         while self.rcv_nxt in self.rcv_buf:
             chunk = self.rcv_buf.pop(self.rcv_nxt)
+            current_sn = self.rcv_nxt
+
+            self.rcv_nxt = (self.rcv_nxt + 1) % 65536
+
             try:
                 self.writer.write(chunk)
                 await self.writer.drain()
-                await self.enqueue_tx(4, self.stream_id, self.rcv_nxt, b"", is_ack=True)
-                self.rcv_nxt = (self.rcv_nxt + 1) % 65536
+                await self.enqueue_tx(4, self.stream_id, current_sn, b"", is_ack=True)
             except Exception:
                 await self.close(reason="Local TCP Write Error")
                 break
