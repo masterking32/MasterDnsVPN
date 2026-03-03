@@ -91,6 +91,12 @@ class MasterDnsVPNServer:
             if current_time - session_info["last_packet_time"] > timeout
         ]
         for session_id in inactive_sessions:
+            session = self.sessions.get(session_id)
+            if session:
+                streams = session.get("streams", {})
+                for stream in list(streams.values()):
+                    await stream.close(reason="Session Cleanup")
+
             del self.sessions[session_id]
             self.logger.info(f"Closed inactive session with ID: {session_id}")
 
@@ -662,16 +668,17 @@ class MasterDnsVPNServer:
             for session_id, session in list(self.sessions.items()):
                 streams = session.get("streams", {})
 
-                dead_streams = [sid for sid, s in streams.items() if s.closed]
-                for sid in dead_streams:
-                    stream = streams.pop(sid)
-                    if hasattr(stream, "io_task") and not stream.io_task.done():
-                        stream.io_task.cancel()
-                        self._background_tasks.add(stream.io_task)
-                        stream.io_task.add_done_callback(self._background_tasks.discard)
+                closed_ids = [sid for sid, s in streams.items() if s.closed]
+                for sid in closed_ids:
+                    streams.pop(sid, None)
 
-                for stream in streams.values():
-                    await stream.check_retransmits()
+                for stream in list(streams.values()):
+                    try:
+                        await stream.check_retransmits()
+                    except Exception as e:
+                        self.logger.error(
+                            f"Error in retransmit sid {stream.stream_id}: {e}"
+                        )
 
     # ---------------------------------------------------------
     # App Lifecycle

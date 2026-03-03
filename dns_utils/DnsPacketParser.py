@@ -177,7 +177,9 @@ class DnsPacketParser:
                 offset += 1
                 break
             offset += 1
-            labels.append(data[offset : offset + length].decode("utf-8"))
+            labels.append(
+                data[offset : offset + length].decode("utf-8", errors="ignore")
+            )
             offset += length
         if not jumped:
             return ".".join(labels), offset
@@ -445,9 +447,8 @@ class DnsPacketParser:
     """
 
     def base_encode(self, data_bytes: bytes, lowerCaseOnly: bool = True) -> str:
-        """
-        Encode bytes to base lowercase (0-9, a-z) or mixed case.
-        """
+        if not data_bytes:
+            return ""
         alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
         if not lowerCaseOnly:
             alphabet = self.base9x_alphabet
@@ -455,11 +456,12 @@ class DnsPacketParser:
         base = len(alphabet)
         num = int.from_bytes(b"\x01" + data_bytes, byteorder="big")
 
-        encoded = ""
+        encoded = []
         while num > 0:
             num, rem = divmod(num, base)
-            encoded = alphabet[rem] + encoded
-        return encoded
+            encoded.append(alphabet[rem])
+
+        return "".join(reversed(encoded))
 
     def base_decode(self, encoded_str: str, lowerCaseOnly: bool = True) -> bytes:
         alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"

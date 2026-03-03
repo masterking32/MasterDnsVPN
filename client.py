@@ -3,6 +3,7 @@
 # Github: https://github.com/masterking32
 # Year: 2026
 
+import time
 import random
 import functools
 import sys
@@ -77,6 +78,8 @@ class MasterDnsVPNClient:
         self.synced_download_mtu = 0
         self.buffer_size = 65507  # Max UDP payload size
         self._background_tasks = set()
+        self.last_stat_update = 0
+        self.cached_valid_connections = []
         self.packet_duplication = self.config.get("PACKET_DUPLICATION_COUNT", 1)
         self.logger.debug("<magenta>[INIT]</magenta> MasterDnsVPNClient initialized.")
 
@@ -102,47 +105,32 @@ class MasterDnsVPNClient:
         )
 
     async def select_connection(self) -> Optional[dict]:
-        """Select a connection based on the balancing strategy."""
-        valid_connections = [
-            conn for conn in self.connections_map if conn.get("is_valid", True)
-        ]
+        current_time = self.loop.time()
 
-        if not valid_connections:
-            self.logger.error("No valid connections available.")
+        if (
+            current_time - self.last_stat_update > 2.0
+            or not self.cached_valid_connections
+        ):
+            valid_conns = [
+                conn for conn in self.connections_map if conn.get("is_valid", True)
+            ]
+            for conn in valid_conns:
+                total = conn.get("total_packets", 0)
+                lost = conn.get("lost_packets", 0)
+                conn["packet_loss"] = (lost / total * 100) if total > 0 else 0
+            self.cached_valid_connections = valid_conns
+            self.last_stat_update = current_time
+
+        if not self.cached_valid_connections:
             return None
 
-        for conn in valid_connections:
-            total_packets = conn.get("total_packets", 0)
-            lost_packets = conn.get("lost_packets", 0)
-            packet_loss = (
-                (lost_packets / total_packets) * 100 if total_packets > 0 else 0
-            )
-            conn["packet_loss"] = packet_loss
-
-        selected = None
-        if self.resolver_balancing_strategy == 2:
+        if self.resolver_balancing_strategy == 2:  # Round Robin
             self.resent_connection_selected = (
                 self.resent_connection_selected + 1
-            ) % len(valid_connections)
-            selected = valid_connections[self.resent_connection_selected]
-        elif self.resolver_balancing_strategy == 3:
-            valid_connections.sort(key=lambda x: x["packet_loss"])
-            min_loss = valid_connections[0]["packet_loss"]
-            same_loss_connections = [
-                c for c in valid_connections if c["packet_loss"] == min_loss
-            ]
-            selected = (
-                random.choice(same_loss_connections)
-                if len(same_loss_connections) > 1
-                else same_loss_connections[0]
-            )
-        else:
-            selected = random.choice(valid_connections)
+            ) % len(self.cached_valid_connections)
+            return self.cached_valid_connections[self.resent_connection_selected]
 
-        self.logger.debug(
-            f"<magenta>[CONN]</magenta> Selected: {selected.get('domain')} via {selected.get('resolver')}"
-        )
-        return selected
+        return random.choice(self.cached_valid_connections)
 
     async def select_target_connections(self) -> list:
         """Select primary connection and fallback resolvers for duplication."""
@@ -747,67 +735,78 @@ class MasterDnsVPNClient:
         listen_ip = self.config.get("LISTEN_IP", "127.0.0.1")
         listen_port = int(self.config.get("LISTEN_PORT", 1080))
 
-        server = await asyncio.start_server(
-            self._handle_local_tcp_connection, listen_ip, listen_port
-        )
+        server = None
+        try:
+            server = await asyncio.start_server(
+                self._handle_local_tcp_connection,
+                listen_ip,
+                listen_port,
+                reuse_address=True,
+                reuse_port=True,
+            )
 
-        self.logger.success(
-            f"<g>Ready! Local Proxy listening on {listen_ip}:{listen_port}</g>"
-        )
+            self.logger.success(
+                f"<g>Ready! Local Proxy listening on {listen_ip}:{listen_port}</g>"
+            )
 
-        self.workers = []
-        self.workers.append(self.loop.create_task(self._rx_worker()))
+            self.workers = []
+            self.workers.append(self.loop.create_task(self._rx_worker()))
 
-        num_workers = self.config.get("NUM_DNS_WORKERS", 4)
-        self.logger.debug(
-            f"<magenta>[LOOP]</magenta> Starting {num_workers} TX workers."
-        )
-        for _ in range(num_workers):
-            self.workers.append(self.loop.create_task(self._tx_worker()))
+            num_workers = self.config.get("NUM_DNS_WORKERS", 4)
+            self.logger.debug(
+                f"<magenta>[LOOP]</magenta> Starting {num_workers} TX workers."
+            )
+            for _ in range(num_workers):
+                self.workers.append(self.loop.create_task(self._tx_worker()))
 
-        self.workers.append(self.loop.create_task(self._retransmit_worker()))
+            self.workers.append(self.loop.create_task(self._retransmit_worker()))
 
-        stop_task = asyncio.create_task(self.should_stop.wait())
-        restart_task = asyncio.create_task(self.session_restart_event.wait())
+            stop_task = asyncio.create_task(self.should_stop.wait())
+            restart_task = asyncio.create_task(self.session_restart_event.wait())
 
-        await asyncio.wait(
-            [stop_task, restart_task], return_when=asyncio.FIRST_COMPLETED
-        )
+            await asyncio.wait(
+                [stop_task, restart_task], return_when=asyncio.FIRST_COMPLETED
+            )
+        finally:
+            self.logger.info("Cleaning up tunnel resources...")
+
+            if server:
+                try:
+                    server.close()
+                    await server.wait_closed()
+                except Exception:
+                    pass
+
+            for w in getattr(self, "workers", []):
+                w.cancel()
+
+            for stream in list(getattr(self, "active_streams", {}).values()):
+                try:
+                    await stream.close()
+                except Exception:
+                    pass
+
+            if hasattr(self, "tunnel_sock") and self.tunnel_sock:
+                try:
+                    self.tunnel_sock.close()
+                except Exception:
+                    pass
 
         stop_task.cancel()
         restart_task.cancel()
 
         self.logger.info("Cleaning up old connections before reconnecting...")
 
-        for w in self.workers:
-            w.cancel()
-
         await asyncio.gather(*self.workers, return_exceptions=True)
-
-        for stream in list(self.active_streams.values()):
-            try:
-                await stream.close()
-            except Exception:
-                pass
-        self.active_streams.clear()
 
         for sid, (reader, writer) in self.pending_streams.items():
             try:
                 writer.close()
             except Exception:
                 pass
+
+        self.active_streams.clear()
         self.pending_streams.clear()
-
-        try:
-            server.close()
-            await server.wait_closed()
-        except Exception:
-            pass
-
-        try:
-            self.tunnel_sock.close()
-        except Exception:
-            pass
 
     async def _rx_worker(self):
         """Continuously listen for incoming VPN packets on the tunnel socket."""
@@ -871,108 +870,116 @@ class MasterDnsVPNClient:
     async def _tx_worker(self):
         self.logger.debug("<magenta>[TX]</magenta> TX Worker started.")
         while not self.should_stop.is_set():
+            # -----------------------------------------------------------
+            # (Adaptive Polling / Smart Backoff)
+            # -----------------------------------------------------------
+
+            now = self.loop.time()
+            has_recent_pending = any(
+                now - ptime < 5.0 for _, _, ptime in self.pending_streams.values()
+            )
+
+            if self.active_streams or has_recent_pending:
+                current_timeout = 0.2
+            else:
+                current_timeout = 5.0
+
             try:
-                # -----------------------------------------------------------
-                # (Adaptive Polling / Smart Backoff)
-                # -----------------------------------------------------------
-                current_time = self.loop.time()
-                idle_duration = current_time - getattr(
-                    self, "last_activity_time", current_time
+                priority, _, pkt_type, stream_id, sn, data = await asyncio.wait_for(
+                    self.outbound_queue.get(), timeout=current_timeout
+                )
+                self.last_activity_time = now
+            except asyncio.TimeoutError:
+                dynamic_data = (
+                    f"P{int(time.time() % 60)}R{random.randint(100, 999)}".encode()
+                )
+                priority, pkt_type, stream_id, sn, data = (
+                    10,
+                    Packet_Type.PING,
+                    0,
+                    0,
+                    dynamic_data,
                 )
 
-                if idle_duration < 2.0:
-                    current_timeout = 0.1
-                elif idle_duration < 10.0:
-                    current_timeout = 0.5
-                else:
-                    current_timeout = 2.0
-
-                if not self.active_streams and not self.pending_streams:
-                    (
-                        priority,
-                        _,
-                        pkt_type,
-                        stream_id,
-                        sn,
-                        data,
-                    ) = await self.outbound_queue.get()
-                    self.last_activity_time = self.loop.time()
-                else:
-                    priority, _, pkt_type, stream_id, sn, data = await asyncio.wait_for(
-                        self.outbound_queue.get(), timeout=current_timeout
-                    )
-                    if pkt_type != Packet_Type.PING:
-                        self.last_activity_time = self.loop.time()
-
-            except asyncio.TimeoutError:
-                if self.active_streams:
-                    _, pkt_type, stream_id, sn, data = (
-                        5,
-                        Packet_Type.PING,
-                        0,
-                        0,
-                        b"PING",
-                    )
-                else:
-                    continue
-
-            if pkt_type == Packet_Type.PING and not self.active_streams:
-                continue
-
-            target_conns = await self.select_target_connections()
-            if not target_conns:
-                await asyncio.sleep(1)
-                continue
-
-            primary_conn = target_conns[0]
-
-            data_bytes = (
-                self.dns_packet_parser.codec_transform(data, encrypt=True)
-                if data
-                else b""
-            )
-
-            mtu_char_len = self.synced_upload_mtu_chars
-            dns_queries = await self.dns_packet_parser.build_request_dns_query(
-                domain=primary_conn["domain"],
-                session_id=self.session_id,
-                packet_type=pkt_type,
-                data=data_bytes,
-                mtu_chars=mtu_char_len,
-                encode_data=True,
-                stream_id=stream_id,
-                sequence_num=sn,
-                qType=DNS_Record_Type.TXT,
-            )
-
-            if not dns_queries:
-                continue
+                if not self.active_streams and not has_recent_pending:
+                    if now - self.last_activity_time < 10.0:
+                        continue
 
             try:
-                for conn in target_conns:
-                    self.logger.debug(
-                        f"<magenta>[TX]</magenta> Sending {pkt_type} for SID {stream_id} SN {sn} via {conn['resolver']}"
-                    )
-                    await async_sendto(
-                        self.loop,
-                        self.tunnel_sock,
-                        dns_queries[0],
-                        (conn["resolver"], 53),
+                if pkt_type == Packet_Type.PING:
+                    data_to_encode = data
+                else:
+                    data_to_encode = (
+                        self.dns_packet_parser.codec_transform(data, encrypt=True)
+                        if data
+                        else b""
                     )
 
-                    conn["total_packets"] = conn.get("total_packets", 0) + 1
-                    if pkt_type == Packet_Type.STREAM_RESEND:
-                        conn["lost_packets"] = conn.get("lost_packets", 0) + 1
+                encoded_str = self.dns_packet_parser.base_encode(
+                    data_to_encode, lowerCaseOnly=True
+                )
 
-                if pkt_type in (
-                    Packet_Type.STREAM_DATA,
-                    Packet_Type.STREAM_RESEND,
-                    Packet_Type.STREAM_SYN_ACK,
-                    Packet_Type.STREAM_FIN,
-                ):
+                header_label = self.dns_packet_parser.create_vpn_header(
+                    self.session_id,
+                    pkt_type,
+                    base36_encode=True,
+                    stream_id=stream_id,
+                    sequence_num=sn,
+                )
+
+                mtu_chars = self.synced_upload_mtu_chars
+                chunks = [
+                    encoded_str[i : i + mtu_chars]
+                    for i in range(0, len(encoded_str), mtu_chars)
+                ]
+                if not chunks:
+                    chunks = [""]
+
+                for chunk_data in chunks:
+                    target_conns = await self.select_target_connections()
+                    if not target_conns:
+                        continue
+
+                    seen_resolvers = set()
+                    unique_targets = []
+                    for c in target_conns:
+                        if c["resolver"] not in seen_resolvers:
+                            seen_resolvers.add(c["resolver"])
+                            unique_targets.append(c)
+                        if len(unique_targets) >= self.packet_duplication:
+                            break
+
+                    chunk_labels = self.dns_packet_parser.data_to_labels(chunk_data)
+
+                    for conn in unique_targets:
+                        qname = (
+                            f"{chunk_labels}.{header_label}.{conn['domain']}"
+                            if chunk_labels
+                            else f"{header_label}.{conn['domain']}"
+                        )
+
+                        query_packet = (
+                            await self.dns_packet_parser.simple_question_packet(
+                                qname, DNS_Record_Type.TXT
+                            )
+                        )
+
+                        await async_sendto(
+                            self.loop,
+                            self.tunnel_sock,
+                            query_packet,
+                            (conn["resolver"], 53),
+                        )
+
+                        conn["total_packets"] = conn.get("total_packets", 0) + 1
+                        if pkt_type == Packet_Type.STREAM_RESEND:
+                            conn["lost_packets"] = conn.get("lost_packets", 0) + 1
+
+                if pkt_type != Packet_Type.PING:
                     self.last_activity_time = self.loop.time()
+
             except Exception as e:
-                self.logger.debug(f"Send error in TX worker: {e}")
+                self.logger.debug(f"TX Worker error during fragment processing: {e}")
 
     async def _handle_server_response(self, header, data):
         ptype = header["packet_type"]
@@ -1030,46 +1037,29 @@ class MasterDnsVPNClient:
     async def _retransmit_worker(self):
         self.logger.debug("<magenta>[RETRANS]</magenta> Retransmit Worker started.")
         SYN_RETRY_INTERVAL = 8.0
-        SYN_MAX_AGE = 120.0
-        syn_last_sent = {}  # sid -> timestamp
+        syn_last_sent = {}
 
         while not self.should_stop.is_set():
             await asyncio.sleep(0.1)
 
-            # Clean up closed active streams
             dead_streams = [sid for sid, s in self.active_streams.items() if s.closed]
             for sid in dead_streams:
-                self.logger.info(f"<y>Stream {sid} Closed by local client.</y>")
-                stream = self.active_streams.pop(sid, None)
-                if stream and hasattr(stream, "io_task") and not stream.io_task.done():
-                    stream.io_task.cancel()
-                    self._background_tasks.add(stream.io_task)
-                    stream.io_task.add_done_callback(self._background_tasks.discard)
+                self.active_streams.pop(sid, None)
 
-            # Handle pending streams (SYN retry + EOF detection)
             dead_pending = []
             now = self.loop.time()
 
-            for sid, (reader, writer, syn_time) in list(self.pending_streams.items()):
-                # Check if local client already closed the connection
+            for sid, stream_data in list(self.pending_streams.items()):
+                reader, writer, syn_time = stream_data
+
                 if reader.at_eof() or writer.is_closing():
                     dead_pending.append(sid)
-                    try:
-                        writer.close()
-                    except Exception:
-                        pass
                     continue
 
-                age = now - syn_time
-                if age > SYN_MAX_AGE:
+                if now - syn_time > 30.0:  # Timeout
                     dead_pending.append(sid)
-                    try:
-                        writer.close()
-                    except Exception:
-                        pass
                     continue
 
-                # Retry SYN if not recently sent
                 if now - syn_last_sent.get(sid, 0) > SYN_RETRY_INTERVAL:
                     syn_last_sent[sid] = now
                     await self.outbound_queue.put(
@@ -1077,15 +1067,13 @@ class MasterDnsVPNClient:
                     )
 
             for sid in dead_pending:
-                self.logger.info(
-                    f"<y>Pending Stream {sid} aborted by local client.</y>"
-                )
-                del self.pending_streams[sid]
-                syn_last_sent.pop(sid, None)  # Clean up tracking
+                self.logger.info(f"Pending Stream {sid} aborted.")
+                data = self.pending_streams.pop(sid, None)
+                if data:
+                    data[1].close()
                 await self._client_enqueue_tx(2, sid, 0, b"", is_fin=True)
 
-            # Retransmit unacked packets for active streams
-            for stream in self.active_streams.values():
+            for stream in list(self.active_streams.values()):
                 await stream.check_retransmits()
 
     # ---------------------------------------------------------
