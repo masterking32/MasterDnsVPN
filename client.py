@@ -952,7 +952,7 @@ class MasterDnsVPNClient:
 
     async def _retransmit_worker(self):
         self.logger.debug("<magenta>[RETRANS]</magenta> Retransmit Worker started.")
-        SYN_RETRY_INTERVAL = 8.0
+        SYN_RETRY_INTERVAL = 20.0
         syn_last_sent = {}
 
         while not self.should_stop.is_set():
@@ -972,7 +972,7 @@ class MasterDnsVPNClient:
                     dead_pending.append(sid)
                     continue
 
-                if now - syn_time > 30.0:  # Timeout
+                if now - syn_time > 90.0:  # Timeout
                     dead_pending.append(sid)
                     continue
 

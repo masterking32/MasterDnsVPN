@@ -238,24 +238,30 @@ class MasterDnsVPNServer:
             if session_id in self.sessions and stream_id in self.sessions[
                 session_id
             ].get("streams", {}):
-                await self.sessions[session_id]["streams"][stream_id].receive_data(
-                    sn, extracted_data
-                )
+                stream = self.sessions[session_id]["streams"][stream_id]
+                if stream != "PENDING":
+                    await stream.receive_data(sn, extracted_data)
             else:
                 if session_id in self.sessions:
                     await self._server_enqueue_tx(
                         session_id, 1, stream_id, 0, b"", is_fin=True
                     )
+
         elif packet_type == Packet_Type.STREAM_DATA_ACK:
             if session_id in self.sessions and stream_id in self.sessions[
                 session_id
             ].get("streams", {}):
-                await self.sessions[session_id]["streams"][stream_id].receive_ack(sn)
+                stream = self.sessions[session_id]["streams"][stream_id]
+                if stream != "PENDING":
+                    await stream.receive_ack(sn)
+
         elif packet_type == Packet_Type.STREAM_FIN:
             if session_id in self.sessions and stream_id in self.sessions[
                 session_id
             ].get("streams", {}):
-                await self.sessions[session_id]["streams"][stream_id].close()
+                stream = self.sessions[session_id]["streams"][stream_id]
+                if stream != "PENDING":
+                    await stream.close()
 
         # 4. Dequeue outward packet (Piggybacking) from PriorityQueue
         out_queue = self.sessions.get(session_id, {}).get("outbound_queue")
@@ -630,6 +636,8 @@ class MasterDnsVPNServer:
         if stream_id in self.sessions[session_id]["streams"]:
             return  # Already handled
 
+        self.sessions[session_id]["streams"][stream_id] = "PENDING"
+
         try:
             reader, writer = await asyncio.open_connection(
                 self.config["FORWARD_IP"], int(self.config["FORWARD_PORT"])
@@ -647,6 +655,7 @@ class MasterDnsVPNServer:
                 mtu=self.sessions[session_id].get("download_mtu", 512),
                 logger=self.logger,
             )
+
             self.sessions[session_id]["streams"][stream_id] = stream
 
             # Send SYN_ACK
@@ -660,6 +669,7 @@ class MasterDnsVPNServer:
             self.logger.error(
                 f"Failed to connect to forward target for stream {stream_id}: {e}"
             )
+            self.sessions[session_id]["streams"].pop(stream_id, None)
             await self._server_enqueue_tx(session_id, 2, stream_id, 0, b"", is_fin=True)
 
     async def _server_retransmit_loop(self):

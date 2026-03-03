@@ -727,7 +727,8 @@ class DnsPacketParser:
         total_data_length: int = 0,
     ) -> bytes:
         MAX_ALLOWED_CHARS_PER_TXT = 191
-        # Create header with KCP arguments
+
+        # Create header with arguments
         header = self.create_vpn_header(
             session_id,
             packet_type,
@@ -738,22 +739,12 @@ class DnsPacketParser:
             total_fragments=total_fragments,
             total_data_length=total_data_length,
         )
+
         data_str = self.base_encode(data, lowerCaseOnly=False)
         answers = []
-        answer_id = 0
-        current_data_idx = 0
 
-        while current_data_idx < len(data_str):
-            prefix = (header + ".") if answer_id == 0 else ""
-            prefix += str(answer_id) + "."
-            available_space = MAX_ALLOWED_CHARS_PER_TXT - len(prefix)
-
-            if available_space <= 0:
-                break
-            chunk_payload = data_str[
-                current_data_idx : current_data_idx + available_space
-            ]
-            full_chunk_str = prefix + chunk_payload
+        if not data_str:
+            full_chunk_str = f"{header}.0."
             answer = {
                 "name": domain,
                 "type": DNS_Record_Type.TXT,
@@ -762,8 +753,33 @@ class DnsPacketParser:
                 "rData": bytes([len(full_chunk_str)]) + full_chunk_str.encode("utf-8"),
             }
             answers.append(answer)
-            current_data_idx += len(chunk_payload)
-            answer_id += 1
+        else:
+            answer_id = 0
+            current_data_idx = 0
+            while current_data_idx < len(data_str):
+                prefix = (header + ".") if answer_id == 0 else ""
+                prefix += str(answer_id) + "."
+                available_space = MAX_ALLOWED_CHARS_PER_TXT - len(prefix)
+
+                if available_space <= 0:
+                    break
+
+                chunk_payload = data_str[
+                    current_data_idx : current_data_idx + available_space
+                ]
+                full_chunk_str = prefix + chunk_payload
+
+                answer = {
+                    "name": domain,
+                    "type": DNS_Record_Type.TXT,
+                    "class": DNS_QClass.IN,
+                    "TTL": 0,
+                    "rData": bytes([len(full_chunk_str)])
+                    + full_chunk_str.encode("utf-8"),
+                }
+                answers.append(answer)
+                current_data_idx += len(chunk_payload)
+                answer_id += 1
 
         packet = await self.simple_answer_packet(answers, question_packet)
         return packet

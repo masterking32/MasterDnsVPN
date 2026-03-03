@@ -19,7 +19,7 @@ class ARQStream:
         self.rcv_buf = {}
 
         self.last_activity = time.time()
-        self.rto = 5.0
+        self.rto = 15.0
         self.closed = False
         self.logger = logger
         self.io_task = asyncio.create_task(self._io_loop())
