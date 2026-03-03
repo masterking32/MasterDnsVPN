@@ -661,28 +661,56 @@ class DnsPacketParser:
         fragment_id: int = 0,
         total_fragments: int = 0,
         total_data_length: int = 0,
-    ) -> str:
-        # 1. Create VPN Header with arguments
-        header = self.create_vpn_header(
-            session_id,
-            packet_type,
-            base36_encode=True,
-            stream_id=stream_id,
-            sequence_num=sequence_num,
-            fragment_id=fragment_id,
-            total_fragments=total_fragments,
-            total_data_length=total_data_length,
-        )
-        # 2. Encode Data
-        if encode_data:
-            data = self.base_encode(data, lowerCaseOnly=True)
-        # 3. Create Labels
+    ) -> list:
+        if encode_data and data:
+            data_str = self.base_encode(data, lowerCaseOnly=True)
+        else:
+            data_str = (
+                data.decode("utf-8", errors="ignore")
+                if isinstance(data, bytes)
+                else data
+            )
+
+        if not data_str:
+            data_str = ""
+
+        if len(data_str) == 0:
+            calculated_total_fragments = 1
+        else:
+            calculated_total_fragments = max(
+                1, (len(data_str) + mtu_chars - 1) // mtu_chars
+            )
+
+        if calculated_total_fragments > 255:
+            self.logger.error("Data too large, exceeds maximum 255 fragments.")
+            return []
+
         data_labels = []
-        for i in range(0, len(data), mtu_chars):
-            chunk = data[i : i + mtu_chars]
-            chunk_label = self.data_to_labels(chunk)
-            chunk_label += "." + header + "." + domain
-            data_labels.append(chunk_label)
+        for frag_id in range(calculated_total_fragments):
+            if len(data_str) > 0:
+                chunk_str = data_str[frag_id * mtu_chars : (frag_id + 1) * mtu_chars]
+            else:
+                chunk_str = ""
+
+            header = self.create_vpn_header(
+                session_id=session_id,
+                packet_type=packet_type,
+                base36_encode=True,
+                stream_id=stream_id,
+                sequence_num=sequence_num,
+                fragment_id=frag_id,
+                total_fragments=calculated_total_fragments,
+                total_data_length=len(data) if data else 0,
+            )
+
+            if chunk_str:
+                chunk_label = self.data_to_labels(chunk_str)
+                final_label = f"{chunk_label}.{header}.{domain}"
+            else:
+                final_label = f"{header}.{domain}"
+
+            data_labels.append(final_label)
+
         return data_labels
 
     async def generate_vpn_response_packet(

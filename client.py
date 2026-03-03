@@ -24,6 +24,8 @@ from dns_utils.utils import (
 )
 from dns_utils.DnsPacketParser import DnsPacketParser
 from dns_utils.DNS_ENUMS import Packet_Type, DNS_Record_Type
+from dns_utils.PingManager import PingManager
+from dns_utils.DNSBalancer import DNSBalancer
 
 # Ensure UTF-8 output for consistent logging
 try:
@@ -71,7 +73,6 @@ class MasterDnsVPNClient:
 
         self.packets_queue: dict = {}
         self.connections_map: list = []
-        self.resent_connection_selected = -1
         self.session_id = 0
         self.synced_upload_mtu = 0
         self.synced_upload_mtu_chars = 0
@@ -81,6 +82,11 @@ class MasterDnsVPNClient:
         self.last_stat_update = 0
         self.cached_valid_connections = []
         self.packet_duplication = self.config.get("PACKET_DUPLICATION_COUNT", 1)
+        self.balancer = DNSBalancer(
+            resolvers=self.connections_map, strategy=self.resolver_balancing_strategy
+        )
+        self.ping_manager = PingManager(self.balancer, self._send_ping_packet)
+
         self.logger.debug("<magenta>[INIT]</magenta> MasterDnsVPNClient initialized.")
 
     # ---------------------------------------------------------
@@ -103,75 +109,6 @@ class MasterDnsVPNClient:
         self.logger.debug(
             f"<magenta>[CONN]</magenta> Total potential connections: {len(self.connections_map)}"
         )
-
-    async def select_connection(self) -> Optional[dict]:
-        current_time = self.loop.time()
-
-        if (
-            current_time - self.last_stat_update > 2.0
-            or not self.cached_valid_connections
-        ):
-            valid_conns = [
-                conn for conn in self.connections_map if conn.get("is_valid", True)
-            ]
-            for conn in valid_conns:
-                total = conn.get("total_packets", 0)
-                lost = conn.get("lost_packets", 0)
-                conn["packet_loss"] = (lost / total * 100) if total > 0 else 0
-            self.cached_valid_connections = valid_conns
-            self.last_stat_update = current_time
-
-        if not self.cached_valid_connections:
-            return None
-
-        if self.resolver_balancing_strategy == 2:  # Round Robin
-            self.resent_connection_selected = (
-                self.resent_connection_selected + 1
-            ) % len(self.cached_valid_connections)
-            return self.cached_valid_connections[self.resent_connection_selected]
-
-        return random.choice(self.cached_valid_connections)
-
-    async def select_target_connections(self) -> list:
-        """Select primary connection and fallback resolvers for duplication."""
-        primary_conn = await self.select_connection()
-        if not primary_conn:
-            return []
-
-        targets = [primary_conn]
-        if self.packet_duplication > 1:
-            valid_conns = [c for c in self.connections_map if c.get("is_valid")]
-            if not valid_conns:
-                valid_conns = [primary_conn]
-
-            if self.resolver_balancing_strategy == 3:
-                valid_conns.sort(key=lambda x: x.get("packet_loss", 0))
-            elif self.resolver_balancing_strategy in (0, 1):
-                random.shuffle(valid_conns)
-
-            needed = self.packet_duplication - 1
-            for i in range(needed):
-                targets.append(valid_conns[i % len(valid_conns)])
-
-        return targets
-
-    async def get_main_connection_index(
-        self, selected_connection: Optional[dict] = None
-    ) -> Optional[int]:
-        """Find and return the main connection (connections_map) based on the selected connection."""
-        if selected_connection is None:
-            selected_connection = await self.select_connection()
-            if selected_connection is None:
-                return None
-
-        for index, conn in enumerate(self.connections_map):
-            if conn.get("domain") == selected_connection.get("domain") and conn.get(
-                "resolver"
-            ) == selected_connection.get("resolver"):
-                return index
-
-        self.logger.error("Selected connection not found in connections map.")
-        return None
 
     # ---------------------------------------------------------
     # Network I/O & Packet Processing
@@ -217,6 +154,36 @@ class MasterDnsVPNClient:
                 sock.close()
             except Exception:
                 pass
+
+    async def _send_ping_packet(self, server, is_ping=True):
+        if not is_ping or not server:
+            return
+
+        import time
+
+        dynamic_data = f"P{int(time.time() % 60)}R{random.randint(100, 999)}".encode()
+
+        try:
+            query_packets = await self.dns_packet_parser.build_request_dns_query(
+                domain=server["domain"],
+                session_id=self.session_id,
+                packet_type=Packet_Type.PING,
+                data=dynamic_data,
+                mtu_chars=self.synced_upload_mtu_chars,
+                encode_data=True,
+                qType=DNS_Record_Type.TXT,
+                stream_id=0,
+                sequence_num=0,
+            )
+            if query_packets:
+                await async_sendto(
+                    self.loop,
+                    self.tunnel_sock,
+                    query_packets[0],
+                    (server["resolver"], 53),
+                )
+        except Exception as e:
+            self.logger.debug(f"Failed to send PING: {e}")
 
     async def _process_received_packet(
         self, response_bytes: bytes
@@ -653,18 +620,16 @@ class MasterDnsVPNClient:
         """Run the MasterDnsVPN Client main logic."""
         self.logger.info("Setting up connections...")
         try:
-            valid_conns = [c for c in self.connections_map if c.get("is_valid")]
+            await self.create_connection_map()
 
-            if not valid_conns:
-                await self.create_connection_map()
-                if not await self.test_mtu_sizes():
-                    return
-            else:
-                self.logger.info(
-                    "<green>Using cached MTU values. Skipping MTU tests...</green>"
-                )
+            if not await self.test_mtu_sizes():
+                self.logger.error("No valid servers found to connect.")
+                return
 
             valid_conns = [c for c in self.connections_map if c.get("is_valid")]
+
+            self.balancer.resolvers = valid_conns
+
             self.synced_upload_mtu = min(c["upload_mtu_bytes"] for c in valid_conns)
             self.synced_upload_mtu_chars = min(
                 c["upload_mtu_chars"] for c in valid_conns
@@ -675,7 +640,7 @@ class MasterDnsVPNClient:
                 f"<green>Synced Global MTU -> UP: {self.synced_upload_mtu}B, DOWN: {self.synced_download_mtu}B</green>"
             )
 
-            selected_conn = await self.select_connection()
+            selected_conn = self.balancer.get_best_server()
             if not selected_conn:
                 return
 
@@ -760,6 +725,7 @@ class MasterDnsVPNClient:
                 self.workers.append(self.loop.create_task(self._tx_worker()))
 
             self.workers.append(self.loop.create_task(self._retransmit_worker()))
+            self.workers.append(self.loop.create_task(self.ping_manager.ping_loop()))
 
             stop_task = asyncio.create_task(self.should_stop.wait())
             restart_task = asyncio.create_task(self.session_restart_event.wait())
@@ -870,100 +836,51 @@ class MasterDnsVPNClient:
     async def _tx_worker(self):
         self.logger.debug("<magenta>[TX]</magenta> TX Worker started.")
         while not self.should_stop.is_set():
-            # -----------------------------------------------------------
-            # (Adaptive Polling / Smart Backoff)
-            # -----------------------------------------------------------
-
-            now = self.loop.time()
-            has_recent_pending = any(
-                now - ptime < 5.0 for _, _, ptime in self.pending_streams.values()
+            self.ping_manager.active_connections = len(self.active_streams) + len(
+                self.pending_streams
             )
-
-            if self.active_streams or has_recent_pending:
-                current_timeout = 0.2
-            else:
-                current_timeout = 5.0
 
             try:
                 priority, _, pkt_type, stream_id, sn, data = await asyncio.wait_for(
-                    self.outbound_queue.get(), timeout=current_timeout
-                )
-                self.last_activity_time = now
-            except asyncio.TimeoutError:
-                dynamic_data = (
-                    f"P{int(time.time() % 60)}R{random.randint(100, 999)}".encode()
-                )
-                priority, pkt_type, stream_id, sn, data = (
-                    10,
-                    Packet_Type.PING,
-                    0,
-                    0,
-                    dynamic_data,
+                    self.outbound_queue.get(), timeout=1.0
                 )
 
-                if not self.active_streams and not has_recent_pending:
-                    if now - self.last_activity_time < 10.0:
-                        continue
+                self.ping_manager.update_activity()
+                self.last_activity_time = self.loop.time()
+
+            except asyncio.TimeoutError:
+                continue
 
             try:
-                if pkt_type == Packet_Type.PING:
-                    data_to_encode = data
-                else:
-                    data_to_encode = (
-                        self.dns_packet_parser.codec_transform(data, encrypt=True)
-                        if data
-                        else b""
+                data_encrypted = (
+                    self.dns_packet_parser.codec_transform(data, encrypt=True)
+                    if data
+                    else b""
+                )
+
+                target_conns = self.balancer.get_unique_servers(self.packet_duplication)
+                if not target_conns:
+                    continue
+
+                for conn in target_conns:
+                    query_packets = (
+                        await self.dns_packet_parser.build_request_dns_query(
+                            domain=conn["domain"],
+                            session_id=self.session_id,
+                            packet_type=pkt_type,
+                            data=data_encrypted,
+                            mtu_chars=self.synced_upload_mtu_chars,
+                            encode_data=True,
+                            qType=DNS_Record_Type.TXT,
+                            stream_id=stream_id,
+                            sequence_num=sn,
+                        )
                     )
 
-                encoded_str = self.dns_packet_parser.base_encode(
-                    data_to_encode, lowerCaseOnly=True
-                )
-
-                header_label = self.dns_packet_parser.create_vpn_header(
-                    self.session_id,
-                    pkt_type,
-                    base36_encode=True,
-                    stream_id=stream_id,
-                    sequence_num=sn,
-                )
-
-                mtu_chars = self.synced_upload_mtu_chars
-                chunks = [
-                    encoded_str[i : i + mtu_chars]
-                    for i in range(0, len(encoded_str), mtu_chars)
-                ]
-                if not chunks:
-                    chunks = [""]
-
-                for chunk_data in chunks:
-                    target_conns = await self.select_target_connections()
-                    if not target_conns:
+                    if not query_packets:
                         continue
 
-                    seen_resolvers = set()
-                    unique_targets = []
-                    for c in target_conns:
-                        if c["resolver"] not in seen_resolvers:
-                            seen_resolvers.add(c["resolver"])
-                            unique_targets.append(c)
-                        if len(unique_targets) >= self.packet_duplication:
-                            break
-
-                    chunk_labels = self.dns_packet_parser.data_to_labels(chunk_data)
-
-                    for conn in unique_targets:
-                        qname = (
-                            f"{chunk_labels}.{header_label}.{conn['domain']}"
-                            if chunk_labels
-                            else f"{header_label}.{conn['domain']}"
-                        )
-
-                        query_packet = (
-                            await self.dns_packet_parser.simple_question_packet(
-                                qname, DNS_Record_Type.TXT
-                            )
-                        )
-
+                    for query_packet in query_packets:
                         await async_sendto(
                             self.loop,
                             self.tunnel_sock,
@@ -971,15 +888,14 @@ class MasterDnsVPNClient:
                             (conn["resolver"], 53),
                         )
 
-                        conn["total_packets"] = conn.get("total_packets", 0) + 1
-                        if pkt_type == Packet_Type.STREAM_RESEND:
-                            conn["lost_packets"] = conn.get("lost_packets", 0) + 1
-
-                if pkt_type != Packet_Type.PING:
-                    self.last_activity_time = self.loop.time()
+                    conn["total_packets"] = conn.get("total_packets", 0) + 1
+                    if pkt_type == Packet_Type.STREAM_RESEND:
+                        conn["lost_packets"] = conn.get("lost_packets", 0) + 1
 
             except Exception as e:
-                self.logger.debug(f"TX Worker error during fragment processing: {e}")
+                self.logger.debug(
+                    f"TX Worker error during packet building/sending: {e}"
+                )
 
     async def _handle_server_response(self, header, data):
         ptype = header["packet_type"]
