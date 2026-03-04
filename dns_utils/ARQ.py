@@ -4,6 +4,7 @@
 # Year: 2026
 
 import asyncio
+import socket
 import time
 
 
@@ -18,52 +19,57 @@ class ARQStream:
         mtu,
         logger=None,
     ):
-        self.stream_id = stream_id  # Unique stream identifier (0-65535)
-        self.session_id = session_id  # Parent session identifier
-        self.enqueue_tx = enqueue_tx_cb  # Callback to enqueue outgoing packets
-        self.reader = reader  # asyncio StreamReader for incoming data
-        self.writer = writer  # asyncio StreamWriter for outgoing data
-        self.mtu = mtu  # Maximum Transmission Unit for this stream
+        self.stream_id = stream_id
+        self.session_id = session_id
+        self.enqueue_tx = enqueue_tx_cb
+        self.reader = reader
+        self.writer = writer
+        self.mtu = mtu
 
-        self.snd_nxt = 0  # Next SN to send
-        self.rcv_nxt = 0  # Next SN expected to receive
-        self.snd_buf = {}  # SN -> {"data": bytes, "time": timestamp, "retries": int}
-        self.rcv_buf = {}  # SN -> bytes (out-of-order received data)
+        self.snd_nxt = 0
+        self.rcv_nxt = 0
+        self.snd_buf = {}
+        self.rcv_buf = {}
 
-        self.last_activity = time.time()  # Timestamp of last send/receive activity
-        self.rto = 2.0  # Retransmission Timeout (initially 1 second)
-        self.closed = False  # Stream closed flag
-        self.logger = logger  # Optional logger for debug/info messages
-        self._write_lock = asyncio.Lock()  # Ensure ordered writes to the TCP stream
-        self._snd_lock = asyncio.Lock()  # Lock for snd_buf access
+        self.last_activity = time.time()
+        self.rto = 2.0
+        self.closed = False
+        self.logger = logger
+        self._fin_sent = False
+        self._write_lock = asyncio.Lock()
+        self._snd_lock = asyncio.Lock()
 
-        self.window_size = (
-            256  # Maximum number of unacknowledged packets allowed in flight
-        )
+        self._fin_sent = False  # IMPORTANT: ensure FIN is sent once
+
+        self.window_size = 256
         self.window_not_full = asyncio.Event()
         self.window_not_full.set()
+
+        try:
+            sock = writer.get_extra_info("socket")
+            if sock and sock.fileno() != -1:
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except (OSError, AttributeError, Exception):
+            pass
 
         try:
             loop = asyncio.get_running_loop()
             self.io_task = loop.create_task(self._io_loop())
         except RuntimeError:
-            # not in running loop yet; caller must start io loop later
             self.io_task = None
 
     async def _io_loop(self):
         try:
             while not self.closed:
-                await self.window_not_full.wait()
+                try:
+                    await asyncio.wait_for(self.window_not_full.wait(), timeout=0.2)
+                except asyncio.TimeoutError:
+                    await self.check_retransmits()
+                    continue
 
                 try:
                     raw_data = await self.reader.read(self.mtu)
-                except asyncio.CancelledError:
-                    break
-                except Exception as e:
-                    if self.logger:
-                        self.logger.error(
-                            f"<red>[ARQ-{self.stream_id}] Reader Error: {e}</red>"
-                        )
+                except Exception:
                     break
 
                 if not raw_data:
@@ -80,21 +86,13 @@ class ARQStream:
                         "retries": 0,
                     }
 
-                if len(self.snd_buf) >= self.window_size:
-                    self.window_not_full.clear()
+                    if len(self.snd_buf) >= self.window_size:
+                        self.window_not_full.clear()
 
                 await self.enqueue_tx(3, self.stream_id, sn, raw_data)
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            if self.logger:
-                self.logger.debug(f"ARQ IO Error: {e}")
         finally:
             if not self.closed:
-                try:
-                    asyncio.create_task(self.close(reason="IO Loop Exit"))
-                except Exception:
-                    pass
+                await self.close(reason="IO Loop Exit")
 
     async def receive_data(self, sn, data):
         if self.closed:
@@ -116,12 +114,11 @@ class ARQStream:
                 self.writer.write(ordered_data)
                 await self.writer.drain()
             except Exception as e:
-                self.logger.error(f"[ARQ-{self.stream_id}] Writer Error: {e}")
-                await self.close(reason="Writer Error")
-                break
-
+                await self.close(reason=f"Writer Error: {e}")
+                return
             self.rcv_nxt = (self.rcv_nxt + 1) % 65536
 
+        # ack last received sn
         await self.enqueue_tx(4, self.stream_id, sn, b"", is_ack=True)
 
     async def receive_ack(self, sn):
@@ -129,7 +126,7 @@ class ARQStream:
         async with self._snd_lock:
             if sn not in self.snd_buf:
                 return
-            _ = self.snd_buf.pop(sn)
+            self.snd_buf.pop(sn, None)
 
             if len(self.snd_buf) < self.window_size:
                 self.window_not_full.set()
@@ -147,12 +144,10 @@ class ARQStream:
         async with self._snd_lock:
             items = list(self.snd_buf.items())
 
-        if not items:
-            return
-
         for sn, info in items:
             if now - info["time"] < self.rto:
                 continue
+
             await self.enqueue_tx(3, self.stream_id, sn, info["data"], is_resend=True)
             async with self._snd_lock:
                 if sn in self.snd_buf:
@@ -166,6 +161,13 @@ class ARQStream:
         self.closed = True
         if self.logger:
             self.logger.info(f"Stream {self.stream_id} closing. Reason: {reason}")
+
+        if not self._fin_sent:
+            self._fin_sent = True
+            try:
+                await self.enqueue_tx(1, self.stream_id, 0, b"", is_fin=True)
+            except Exception:
+                pass
 
         if hasattr(self, "io_task") and self.io_task and not self.io_task.done():
             self.io_task.cancel()

@@ -288,7 +288,7 @@ class MasterDnsVPNClient:
                     break
 
                 ok = False
-                for _ in range(3):
+                for _ in range(1):
                     try:
                         ok = await test_callable(mid)
                         if ok:
@@ -594,12 +594,16 @@ class MasterDnsVPNClient:
 
         domain = selected_conn.get("domain")
         resolver = selected_conn.get("resolver")
+        init_token = (generate_random_hex_text(8) + str(int(time.time()))).encode()
+        encrypted_token = self.dns_packet_parser.codec_transform(
+            init_token, encrypt=True
+        )
 
         dns_queries = await self.dns_packet_parser.build_request_dns_query(
             domain=domain,
-            session_id=0,  # 0 signals a request for a new session ID
+            session_id=0,
             packet_type=Packet_Type.SESSION_INIT,
-            data=b"INIT",
+            data=encrypted_token,
             mtu_chars=self.synced_upload_mtu_chars,
             encode_data=True,
             qType=DNS_Record_Type.TXT,
@@ -627,17 +631,27 @@ class MasterDnsVPNClient:
                 parsed_header, returned_data = await self._process_received_packet(
                     response
                 )
-                packet_type = parsed_header["packet_type"] if parsed_header else None
 
-                if packet_type == Packet_Type.SESSION_ACCEPT and returned_data:
+                if (
+                    parsed_header
+                    and parsed_header["packet_type"] == Packet_Type.SESSION_ACCEPT
+                ):
                     try:
-                        self.session_id = int(returned_data.decode("utf-8"))
-                        self.logger.debug(
-                            f"<green>[SESSION]</green> New session ID: {self.session_id}"
-                        )
-                        return True
-                    except ValueError:
-                        self.logger.error("Failed to parse Session ID from server.")
+                        decoded_str = returned_data.decode("utf-8")
+                        if ":" in decoded_str:
+                            received_token, received_sid = decoded_str.split(":", 1)
+                            if received_token == init_token.decode():
+                                self.session_id = int(received_sid)
+                                self.logger.success(
+                                    f"<g>Validated Session ID: {self.session_id}</g>"
+                                )
+                                return True
+                            else:
+                                self.logger.warning(
+                                    "Token mismatch! Ignoring old session response."
+                                )
+                    except Exception as e:
+                        self.logger.error(f"Session parse error: {e}")
 
             if attempt < max_retries - 1:
                 # delay = min(base_delay * (1.5**attempt), 8.0)
@@ -892,6 +906,25 @@ class MasterDnsVPNClient:
             "stream": None,
         }
 
+    async def _clear_stream_from_queue(self, stream_id: int):
+        """Removes all packets of a specific stream from the outbound queue except FIN."""
+        if self.outbound_queue.empty():
+            return
+
+        items = []
+        while not self.outbound_queue.empty():
+            try:
+                item = self.outbound_queue.get_nowait()
+                if item[3] != stream_id or item[2] == Packet_Type.STREAM_FIN:
+                    items.append(item)
+            except asyncio.QueueEmpty:
+                break
+
+        for item in items:
+            await self.outbound_queue.put(item)
+
+        self.logger.debug(f"Queue cleared for Stream {stream_id}")
+
     async def _client_enqueue_tx(
         self, priority, stream_id, sn, data, is_ack=False, is_fin=False, is_resend=False
     ):
@@ -900,11 +933,12 @@ class MasterDnsVPNClient:
 
         if is_ack:
             ptype = Packet_Type.STREAM_DATA_ACK
+            effective_priority = 0
+        elif is_fin:
+            ptype = Packet_Type.STREAM_FIN
             effective_priority = 1
-        elif is_fin or priority == 2:
-            effective_priority = 2
-        elif is_resend:
-            ptype = Packet_Type.STREAM_RESEND
+        elif is_resend or priority <= 2:
+            ptype = Packet_Type.STREAM_RESEND if is_resend else ptype
             effective_priority = 2
 
         await self.outbound_queue.put(
@@ -912,24 +946,16 @@ class MasterDnsVPNClient:
         )
 
     async def _tx_worker(self):
-        self.logger.debug(
-            "<magenta>[TX]</magenta> TX Worker started with parallel sending."
-        )
+        self.logger.debug("<magenta>[TX]</magenta> TX Worker started.")
         while not self.should_stop.is_set():
-            tasks = []
-            for _ in range(10):
-                if self.outbound_queue.empty():
-                    break
-                try:
-                    item = self.outbound_queue.get_nowait()
-                    tasks.append(self._send_single_packet(item))
-                except asyncio.QueueEmpty:
-                    break
-
-            if tasks:
-                await asyncio.gather(*tasks)
-            else:
-                await asyncio.sleep(0.01)
+            try:
+                item = await asyncio.wait_for(self.outbound_queue.get(), timeout=0.2)
+                await self._send_single_packet(item)
+                self.outbound_queue.task_done()
+            except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                self.logger.error(f"TX Error: {e}")
 
     async def _send_single_packet(self, item):
         self.ping_manager.active_connections = len(self.active_streams)
@@ -1008,6 +1034,13 @@ class MasterDnsVPNClient:
                 )
                 return
 
+            writer = self.active_streams[stream_id].get("writer")
+            if not writer or writer.is_closing():
+                self.logger.debug(
+                    f"Stream {stream_id} local connection closed before SYN_ACK. Cleaning up."
+                )
+                self.active_streams.pop(stream_id, None)
+
             self.active_streams[stream_id]["stream_creating"] = True
 
             try:
@@ -1021,7 +1054,9 @@ class MasterDnsVPNClient:
                 elif self.encryption_method in (3, 4, 5):
                     crypto_overhead = 28
 
-                safe_uplink_mtu = (self.synced_upload_mtu_chars // 2) - crypto_overhead
+                safe_uplink_mtu = max(
+                    64, self.synced_upload_mtu - crypto_overhead - 8 - 16
+                )
 
                 stream = ARQStream(
                     stream_id=stream_id,
@@ -1047,9 +1082,10 @@ class MasterDnsVPNClient:
                 await stream_obj.receive_data(sn, data)
             else:
                 self.logger.debug(f"Got data for SID {stream_id} but stream not ready.")
-            max_pings = max(15, len(self.active_streams) * 4)
-            if self.outbound_queue.qsize() < max_pings:
-                pull_count = 8
+
+            current_q_size = self.outbound_queue.qsize()
+            if current_q_size < 10:
+                pull_count = 2
                 for _ in range(pull_count):
                     await self.outbound_queue.put(
                         (1, self.loop.time(), Packet_Type.PING, 0, 0, b"PULL")
@@ -1062,9 +1098,9 @@ class MasterDnsVPNClient:
             else:
                 self.logger.debug(f"Got ACK for SID {stream_id} but stream not ready.")
 
-            max_pings = max(15, len(self.active_streams) * 4)
-            if self.outbound_queue.qsize() < max_pings:
-                pull_count = 8
+            current_q_size = self.outbound_queue.qsize()
+            if current_q_size < 10:
+                pull_count = 2
                 for _ in range(pull_count):
                     await self.outbound_queue.put(
                         (1, self.loop.time(), Packet_Type.PING, 0, 0, b"PULL")
@@ -1116,13 +1152,17 @@ class MasterDnsVPNClient:
 
             for sid in dead_streams:
                 s = self.active_streams.get(sid, {})
-                if s.get("status") == "PENDING":
+                if (
+                    s.get("status") == "PENDING"
+                    and self.loop.time() - s.get("create_time", 0) > 30.0
+                ):
                     self.logger.warning(f"Stream {sid} handshake timeout. Closing.")
                 else:
                     self.logger.info(f"Stream {sid} closed locally. Notifying server.")
 
                 try:
                     stream_data = self.active_streams.pop(sid, None)
+                    await self._clear_stream_from_queue(sid)
                     if stream_data:
                         writer = stream_data.get("writer")
                         await self._close_writer_safely(writer)

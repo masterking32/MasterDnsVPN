@@ -116,6 +116,11 @@ class MasterDnsVPNServer:
     ) -> Optional[bytes]:
         """Handle NEW_SESSION VPN packet."""
 
+        client_token = self.dns_parser.extract_vpn_data_from_labels(labels)
+        token_str = (
+            client_token.decode("utf-8", errors="ignore") if client_token else "unknown"
+        )
+
         new_session_id = await self.new_session()
         if new_session_id is None:
             self.logger.error(
@@ -123,8 +128,10 @@ class MasterDnsVPNServer:
             )
             return None
 
-        txt_str = str(new_session_id)
-        data_bytes = self.dns_parser.codec_transform(txt_str.encode(), encrypt=True)
+        response_str = f"{token_str}:{new_session_id}"
+        data_bytes = self.dns_parser.codec_transform(
+            response_str.encode(), encrypt=True
+        )
 
         response_packet = await self.dns_parser.generate_vpn_response_packet(
             domain=request_domain,
@@ -186,16 +193,11 @@ class MasterDnsVPNServer:
         extracted_header: dict = None,
     ) -> Optional[bytes]:
 
-        # 1. Update session Last Packet Time
         if session_id in self.sessions:
             self.sessions[session_id]["last_packet_time"] = (
                 asyncio.get_event_loop().time()
             )
 
-        # 2. Extract Data Payload (Decrypts it too)
-        extracted_data = self.dns_parser.extract_vpn_data_from_labels(labels)
-
-        # 3. Route specific incoming Packets
         if packet_type == Packet_Type.MTU_UP_REQ:
             return await self._handle_mtu_up(
                 request_domain=request_domain, session_id=session_id, data=data
@@ -209,7 +211,9 @@ class MasterDnsVPNServer:
             )
         elif packet_type == Packet_Type.SESSION_INIT:
             return await self._handle_session_init(
-                request_domain=request_domain, data=data
+                request_domain=request_domain,
+                data=data,
+                labels=labels,
             )
         elif packet_type == Packet_Type.SET_MTU_REQ:
             return await self._handle_set_mtu(
@@ -232,81 +236,50 @@ class MasterDnsVPNServer:
             )
             return response_packet
 
-        # --- Routing (Streams) ---
         stream_id = extracted_header.get("stream_id", 0)
         sn = extracted_header.get("sequence_num", 0)
+        session = self.sessions[session_id]
+        streams = session.setdefault("streams", {})
 
         if packet_type == Packet_Type.STREAM_SYN:
             await self._handle_stream_syn(session_id, stream_id)
-        elif packet_type in (Packet_Type.STREAM_DATA, Packet_Type.STREAM_RESEND):
-            if session_id in self.sessions and stream_id in self.sessions[
-                session_id
-            ].get("streams", {}):
-                stream = self.sessions[session_id]["streams"][stream_id]
-                if stream != "PENDING":
-                    if sn < stream.rcv_nxt and (stream.rcv_nxt - sn) < 32768:
-                        await self._server_enqueue_tx(
-                            session_id, 4, stream_id, sn, b"", is_ack=True
-                        )
 
+        elif packet_type in (Packet_Type.STREAM_DATA, Packet_Type.STREAM_RESEND):
+            stream = streams.get(stream_id)
+            if stream and stream != "PENDING":
+                diff = (sn - stream.rcv_nxt) % 65536
+                if diff >= 32768:
+                    await self._server_enqueue_tx(
+                        session_id, 1, stream_id, sn, b"", is_ack=True
+                    )
+                else:
+                    extracted_data = self.dns_parser.extract_vpn_data_from_labels(
+                        labels
+                    )
                     if extracted_data:
                         await stream.receive_data(sn, extracted_data)
-                    else:
-                        self.logger.warning(
-                            f"<red>Decryption Failed! Dropping SN:{sn}</red>"
-                        )
 
         elif packet_type == Packet_Type.STREAM_DATA_ACK:
-            if session_id in self.sessions and stream_id in self.sessions[
-                session_id
-            ].get("streams", {}):
-                stream = self.sessions[session_id]["streams"][stream_id]
-                if stream != "PENDING":
-                    await stream.receive_ack(sn)
+            stream = streams.get(stream_id)
+            if stream and stream != "PENDING":
+                await stream.receive_ack(sn)
 
         elif packet_type == Packet_Type.STREAM_FIN:
-            if session_id in self.sessions and stream_id in self.sessions[
-                session_id
-            ].get("streams", {}):
-                stream = self.sessions[session_id]["streams"][stream_id]
-                if stream != "PENDING":
-                    await stream.close()
+            stream = streams.get(stream_id)
+            if stream and stream != "PENDING":
+                await stream.close()
 
-        # 4. Dequeue outward packet (Piggybacking) from PriorityQueue
-        session = self.sessions.setdefault(session_id, {})
         out_queue = session.get("outbound_queue")
-
         stream_states = session.setdefault("stream_states", {})
-        incoming_stream_id = extracted_header.get("stream_id", 0)
-        incoming_sn = extracted_header.get("sequence_num", 0)
+        state = stream_states.setdefault(stream_id, {})
 
-        state = stream_states.setdefault(incoming_stream_id, {})
-        is_duplicate = False
+        is_duplicate = (
+            state.get("last_sn") == sn and state.get("last_ptype") == packet_type
+        )
 
-        if incoming_stream_id != 0 and packet_type not in (
-            Packet_Type.PING,
-            Packet_Type.PONG,
-        ):
-            if (
-                state.get("last_ptype") == packet_type
-                and state.get("last_sn") == incoming_sn
-            ):
-                is_duplicate = True
-
-        if is_duplicate:
-            res_ptype, res_stream_id, res_sn, res_data = state.get(
-                "last_response", (Packet_Type.PONG, 0, 0, b"PONG")
-            )
-            if res_ptype == Packet_Type.PONG and out_queue and not out_queue.empty():
-                _, _, res_ptype, res_stream_id, res_sn, res_data = (
-                    out_queue.get_nowait()
-                )
-                state["last_response"] = (res_ptype, res_stream_id, res_sn, res_data)
+        if is_duplicate and state.get("last_response"):
+            res_ptype, res_stream_id, res_sn, res_data = state["last_response"]
         else:
-            if incoming_stream_id != 0:
-                state["last_ptype"] = packet_type
-                state["last_sn"] = incoming_sn
-
             if out_queue and not out_queue.empty():
                 _, _, res_ptype, res_stream_id, res_sn, res_data = (
                     out_queue.get_nowait()
@@ -319,23 +292,24 @@ class MasterDnsVPNServer:
                     b"PONG",
                 )
 
-            if incoming_stream_id != 0:
+            if stream_id != 0:
+                state["last_sn"] = sn
+                state["last_ptype"] = packet_type
                 state["last_response"] = (res_ptype, res_stream_id, res_sn, res_data)
 
-        data_bytes = (
+        res_encrypted_data = (
             self.dns_parser.codec_transform(res_data, encrypt=True) if res_data else b""
         )
 
-        response_packet = await self.dns_parser.generate_vpn_response_packet(
+        return await self.dns_parser.generate_vpn_response_packet(
             domain=request_domain,
             session_id=session_id,
             packet_type=res_ptype,
-            data=data_bytes,
-            question_packet=data,  # data here is the raw question UDP bytes
+            data=res_encrypted_data,
+            question_packet=data,
             stream_id=res_stream_id,
             sequence_num=res_sn,
         )
-        return response_packet
 
     async def _handle_unknown(
         self,
@@ -704,8 +678,11 @@ class MasterDnsVPNServer:
             elif enc_method in (3, 4, 5):
                 crypto_overhead = 28
 
-            safe_mtu = (
-                self.sessions[session_id].get("download_mtu", 512) - crypto_overhead
+            safe_downlink_mtu = max(
+                64,
+                self.sessions[session_id].get("download_mtu", 512)
+                - crypto_overhead
+                - 8,
             )
 
             stream = ARQStream(
@@ -716,7 +693,7 @@ class MasterDnsVPNServer:
                 ),
                 reader=reader,
                 writer=writer,
-                mtu=safe_mtu,
+                mtu=safe_downlink_mtu,
                 logger=self.logger,
             )
 
