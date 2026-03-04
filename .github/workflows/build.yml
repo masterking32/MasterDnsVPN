@@ -1,0 +1,69 @@
+name: Build Executables
+
+on:
+  push:
+    branches:
+      - "**"
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+            ext: .exe
+          - os: ubuntu-latest
+            platform: linux
+            ext: ""
+          - os: macos-latest
+            platform: macos
+            ext: ""
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install pyinstaller
+          pip install -r requirements.txt
+
+      - name: Prepare config files
+        shell: bash
+        run: |
+          test -f client_config.py.simple || (echo "client_config.py.simple not found" && exit 1)
+          test -f server_config.py.simple || (echo "server_config.py.simple not found" && exit 1)
+          cp client_config.py.simple client_config.py
+          cp server_config.py.simple server_config.py
+
+      - name: Build client
+        run: |
+          pyinstaller --onefile --name "client_${{ matrix.platform }}" client.py
+
+      - name: Build server
+        run: |
+          pyinstaller --onefile --name "server_${{ matrix.platform }}" server.py
+
+      - name: Upload client artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: client_${{ matrix.platform }}
+          path: dist/client_${{ matrix.platform }}${{ matrix.ext }}
+
+      - name: Upload server artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: server_${{ matrix.platform }}
+          path: dist/server_${{ matrix.platform }}${{ matrix.ext }}
