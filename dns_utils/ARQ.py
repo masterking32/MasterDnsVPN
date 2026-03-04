@@ -1,35 +1,61 @@
+# MasterDnsVPN Server
+# Author: MasterkinG32
+# Github: https://github.com/masterking32
+# Year: 2026
+
 import asyncio
 import time
 
 
 class ARQStream:
     def __init__(
-        self, stream_id, session_id, enqueue_tx_cb, reader, writer, mtu, logger=None
+        self,
+        stream_id,
+        session_id,
+        enqueue_tx_cb,
+        reader,
+        writer,
+        mtu,
+        logger=None,
     ):
-        self.stream_id = stream_id
-        self.session_id = session_id
-        self.enqueue_tx = enqueue_tx_cb
-        self.reader = reader
-        self.writer = writer
-        self.mtu = max(mtu - 16, 32)
+        self.stream_id = stream_id  # Unique stream identifier (0-65535)
+        self.session_id = session_id  # Parent session identifier
+        self.enqueue_tx = enqueue_tx_cb  # Callback to enqueue outgoing packets
+        self.reader = reader  # asyncio StreamReader for incoming data
+        self.writer = writer  # asyncio StreamWriter for outgoing data
+        self.mtu = mtu  # Maximum Transmission Unit for this stream
 
-        self.snd_nxt = 0
-        self.rcv_nxt = 0
-        self.snd_buf = {}
-        self.rcv_buf = {}
+        self.snd_nxt = 0  # Next SN to send
+        self.rcv_nxt = 0  # Next SN expected to receive
+        self.snd_buf = {}  # SN -> {"data": bytes, "time": timestamp, "retries": int}
+        self.rcv_buf = {}  # SN -> bytes (out-of-order received data)
 
-        self.last_activity = time.time()
-        self.rto = 3.0
-        self.closed = False
-        self.logger = logger
-        self.io_task = asyncio.create_task(self._io_loop())
+        self.last_activity = time.time()  # Timestamp of last send/receive activity
+        self.rto = 1.5  # Retransmission Timeout (initially 1 second)
+        self.closed = False  # Stream closed flag
+        self.logger = logger  # Optional logger for debug/info messages
+        self._write_lock = asyncio.Lock()  # Ensure ordered writes to the TCP stream
+        self._snd_lock = asyncio.Lock()  # Lock for snd_buf access
+
+        try:
+            loop = asyncio.get_running_loop()
+            self.io_task = loop.create_task(self._io_loop())
+        except RuntimeError:
+            # not in running loop yet; caller must start io loop later
+            self.io_task = None
 
     async def _io_loop(self):
         try:
             while not self.closed:
                 try:
                     raw_data = await self.reader.read(self.mtu)
-                except (asyncio.CancelledError, Exception):
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    if self.logger:
+                        self.logger.error(
+                            f"<red>[ARQ-{self.stream_id}] Reader Error: {e}</red>"
+                        )
                     break
 
                 if not raw_data:
@@ -39,11 +65,13 @@ class ARQStream:
                 sn = self.snd_nxt
                 self.snd_nxt = (self.snd_nxt + 1) % 65536
 
-                self.snd_buf[sn] = {
-                    "data": raw_data,
-                    "time": time.time(),
-                    "retries": 0,
-                }
+                async with self._snd_lock:
+                    self.snd_buf[sn] = {
+                        "data": raw_data,
+                        "time": time.time(),
+                        "retries": 0,
+                    }
+
                 await self.enqueue_tx(3, self.stream_id, sn, raw_data)
         except asyncio.CancelledError:
             pass
@@ -52,68 +80,92 @@ class ARQStream:
                 self.logger.debug(f"ARQ IO Error: {e}")
         finally:
             if not self.closed:
-                asyncio.create_task(self.close(reason="IO Loop Exit"))
+                try:
+                    asyncio.create_task(self.close(reason="IO Loop Exit"))
+                except Exception:
+                    pass
 
     async def receive_data(self, sn, data):
         if self.closed:
             return
+
         self.last_activity = time.time()
 
-        diff = (sn - self.rcv_nxt + 32768) % 65536 - 32768
-
-        if diff < 0:
-            await self.enqueue_tx(4, self.stream_id, sn, b"", is_ack=True)
-            return
+        diff = (sn - self.rcv_nxt) % 65536
+        if diff > 32768:
+            return  # Old packet, already processed
 
         if sn in self.rcv_buf:
-            return
+            return  # Duplicate packet, already buffered
 
         self.rcv_buf[sn] = data
 
-        while self.rcv_nxt in self.rcv_buf:
-            chunk = self.rcv_buf.pop(self.rcv_nxt)
-            current_sn = self.rcv_nxt
+        async with self._write_lock:
+            while self.rcv_nxt in self.rcv_buf:
+                chunk = self.rcv_buf.pop(self.rcv_nxt)
+                current_sn = self.rcv_nxt
 
-            self.rcv_nxt = (self.rcv_nxt + 1) % 65536
+                self.rcv_nxt = (self.rcv_nxt + 1) % 65536
 
-            try:
-                self.writer.write(chunk)
-                await self.writer.drain()
-                await self.enqueue_tx(4, self.stream_id, current_sn, b"", is_ack=True)
-            except Exception:
-                await self.close(reason="Local TCP Write Error")
-                break
+                try:
+                    if self.writer:
+                        self.writer.write(chunk)
+                        await self.writer.drain()
+                        await self.enqueue_tx(
+                            4, self.stream_id, current_sn, b"", is_ack=True
+                        )
+                    else:
+                        if self.logger:
+                            self.logger.debug(
+                                f"ARQ-{self.stream_id}: no writer to write data"
+                            )
+                        await self.close(reason="No writer")
+                        break
+                except Exception as e:
+                    if self.logger:
+                        self.logger.error(
+                            f"<red>[ARQ-{self.stream_id}] TCP Write Error: {e}</red>"
+                        )
+                    await self.close(reason="Local TCP Write Error")
+                    break
 
     async def receive_ack(self, sn):
         self.last_activity = time.time()
-        keys = list(self.snd_buf.keys())
-        for k in keys:
-            diff = (sn - k + 32768) % 65536 - 32768
-            if diff >= 0:
-                self.snd_buf.pop(k, None)
+        async with self._snd_lock:
+            if sn not in self.snd_buf:
+                return
+            _ = self.snd_buf.pop(sn)
 
     async def check_retransmits(self):
         if self.closed or not self.snd_buf:
             return
+
         now = time.time()
 
-        if now - self.last_activity > 300:
+        if now - self.last_activity > 120:
             await self.close(reason="Inactivity Timeout")
             return
 
-        for sn, pkt in list(self.snd_buf.items()):
-            if now - pkt["time"] > self.rto:
-                pkt["time"] = now
-                pkt["retries"] += 1
-                await self.enqueue_tx(
-                    1, self.stream_id, sn, pkt["data"], is_resend=True
-                )
+        async with self._snd_lock:
+            items = list(self.snd_buf.items())
+
+        if not items:
+            return
+
+        for sn, info in items:
+            if now - info["time"] < self.rto:
+                continue
+            await self.enqueue_tx(3, self.stream_id, sn, info["data"], is_resend=True)
+            async with self._snd_lock:
+                if sn in self.snd_buf:
+                    self.snd_buf[sn]["time"] = now
+                    self.snd_buf[sn]["retries"] += 1
 
     async def close(self, reason="Unknown"):
         if self.closed:
             return
-        self.closed = True
 
+        self.closed = True
         if self.logger:
             self.logger.info(f"Stream {self.stream_id} closing. Reason: {reason}")
 
@@ -125,8 +177,15 @@ class ARQStream:
                 pass
 
         try:
-            if not self.writer.is_closing():
+            if (
+                self.writer
+                and hasattr(self.writer, "is_closing")
+                and not self.writer.is_closing()
+            ):
                 self.writer.close()
-                await self.writer.wait_closed()
+                try:
+                    await asyncio.wait_for(self.writer.wait_closed(), timeout=3.0)
+                except Exception:
+                    pass
         except Exception:
             pass

@@ -3,29 +3,31 @@
 # Github: https://github.com/masterking32
 # Year: 2026
 
-import time
-import random
-import functools
-import sys
-import os
-import socket
+
 import asyncio
-from typing import Optional, Tuple
-import signal
 import ctypes
+import functools
+import os
+import random
+import signal
+import socket
+import sys
+import time
 from ctypes import wintypes
+from typing import Optional, Tuple
 
 from client_config import master_dns_vpn_config
+from dns_utils.ARQ import ARQStream
+from dns_utils.DNS_ENUMS import DNS_Record_Type, Packet_Type
+from dns_utils.DNSBalancer import DNSBalancer
+from dns_utils.DnsPacketParser import DnsPacketParser
+from dns_utils.PingManager import PingManager
 from dns_utils.utils import (
-    getLogger,
-    generate_random_hex_text,
     async_recvfrom,
     async_sendto,
+    generate_random_hex_text,
+    getLogger,
 )
-from dns_utils.DnsPacketParser import DnsPacketParser
-from dns_utils.DNS_ENUMS import Packet_Type, DNS_Record_Type
-from dns_utils.PingManager import PingManager
-from dns_utils.DNSBalancer import DNSBalancer
 
 # Ensure UTF-8 output for consistent logging
 try:
@@ -47,15 +49,13 @@ class MasterDnsVPNClient:
         self.logger = getLogger(log_level=self.config.get("LOG_LEVEL", "INFO"))
         self.resolvers: list = self.config.get("RESOLVER_DNS_SERVERS", [])
         self.domains: list = self.config.get("DOMAINS", [])
-        self.timeout: float = self.config.get("DNS_QUERY_TIMEOUT", 10.0)
+        self.timeout: float = self.config.get("DNS_QUERY_TIMEOUT", 5.0)
         self.max_upload_mtu: int = self.config.get("MAX_UPLOAD_MTU", 512)
         self.max_download_mtu: int = self.config.get("MAX_DOWNLOAD_MTU", 4096)
         self.min_upload_mtu: int = self.config.get("MIN_UPLOAD_MTU", 0)
         self.min_download_mtu: int = self.config.get("MIN_DOWNLOAD_MTU", 0)
         self.encryption_method: int = self.config.get("DATA_ENCRYPTION_METHOD", 1)
-        self.skip_resolver_with_packet_loss: int = self.config.get(
-            "SKIP_RESOLVER_WITH_PACKET_LOSS", 100
-        )
+
         self.resolver_balancing_strategy: int = self.config.get(
             "RESOLVER_BALANCING_STRATEGY", 0
         )
@@ -78,9 +78,7 @@ class MasterDnsVPNClient:
         self.synced_upload_mtu_chars = 0
         self.synced_download_mtu = 0
         self.buffer_size = 65507  # Max UDP payload size
-        self._background_tasks = set()
-        self.last_stat_update = 0
-        self.cached_valid_connections = []
+        self.last_stream_id = 0
         self.packet_duplication = self.config.get("PACKET_DUPLICATION_COUNT", 1)
         self.balancer = DNSBalancer(
             resolvers=self.connections_map, strategy=self.resolver_balancing_strategy
@@ -158,9 +156,6 @@ class MasterDnsVPNClient:
     async def _send_ping_packet(self, server, is_ping=True):
         if not is_ping or not server:
             return
-
-        import time
-
         dynamic_data = f"P{int(time.time() % 60)}R{random.randint(100, 999)}".encode()
 
         try:
@@ -258,6 +253,7 @@ class MasterDnsVPNClient:
         decoded_data = self.dns_packet_parser.decode_and_decrypt_data(
             assembled_data_str, lowerCaseOnly=False
         )
+
         self.logger.debug(
             f"<yellow>[PARSER]</yellow> Packet Type: {detected_packet_type}, Data Len: {len(decoded_data)}"
         )
@@ -503,9 +499,19 @@ class MasterDnsVPNClient:
 
         return True
 
-    async def _sync_mtu_with_server(self, domain: str, resolver: str) -> bool:
+    async def _sync_mtu_with_server(self) -> bool:
         """Send the synced MTU values to the server for this session."""
         self.logger.info(f"Syncing MTU with server for session {self.session_id}...")
+
+        if self.should_stop.is_set():
+            return False
+
+        selected_conn = self.balancer.get_best_server()
+        if not selected_conn:
+            return False
+
+        domain = selected_conn.get("domain")
+        resolver = selected_conn.get("resolver")
 
         # Pack MTUs into 8 bytes (4 bytes UP, 4 bytes DOWN)
         data_bytes = self.synced_upload_mtu.to_bytes(
@@ -517,24 +523,25 @@ class MasterDnsVPNClient:
             data_bytes, encrypt=True
         )
 
-        mtu_char_len, _ = self.dns_packet_parser.calculate_upload_mtu(
-            domain=domain, mtu=64
-        )
         dns_queries = await self.dns_packet_parser.build_request_dns_query(
             domain=domain,
             session_id=self.session_id,
             packet_type=Packet_Type.SET_MTU_REQ,
             data=encrypted_data,
-            mtu_chars=mtu_char_len,
+            mtu_chars=self.synced_upload_mtu_chars,
             encode_data=True,
             qType=DNS_Record_Type.TXT,
         )
 
         if not dns_queries:
+            self.logger.error(
+                f"Failed to sync MTU with server via {resolver} for {domain}, Retrying..."
+            )
+            await self._sleep(0.2)
             return False
 
-        max_retries = 10
-        base_delay = 1.0
+        max_retries = 3
+        # base_delay = 1.0
 
         for attempt in range(max_retries):
             if self.should_stop.is_set():
@@ -557,40 +564,56 @@ class MasterDnsVPNClient:
                     return True
 
             if attempt < max_retries - 1:
-                delay = min(base_delay * (1.5**attempt), 8.0)
+                # delay = min(base_delay * (1.5**attempt), 8.0)
+                delay = 0.5
                 self.logger.warning(
-                    f"MTU sync failed. Retrying in {delay:.1f}s (Attempt {attempt + 1}/{max_retries})..."
+                    f"MTU sync failed via {resolver} for {domain}. Retrying in {delay:.1f}s (Attempt {attempt + 1}/{max_retries})..."
                 )
                 await asyncio.sleep(delay)
 
-        self.logger.error("Failed to sync MTU with the server after multiple attempts.")
-        return False
+        self.logger.error(
+            f"Failed to build MTU sync via {resolver} for {domain}, Retrying..."
+        )
+
+        await self._sleep(0.2)
+        return await self._sync_mtu_with_server()
 
     # ---------------------------------------------------------
     # Core Loop & Session Setup
     # ---------------------------------------------------------
-    async def _init_session(self, domain: str, resolver: str) -> bool:
+    async def _init_session(self) -> bool:
         """Initialize a new session with the server."""
-        self.logger.info(f"Initializing session via {resolver} for {domain}...")
+        self.logger.info("Initializing session ...")
 
-        mtu_char_len, _ = self.dns_packet_parser.calculate_upload_mtu(
-            domain=domain, mtu=64
-        )
+        if self.should_stop.is_set():
+            return False
+
+        selected_conn = self.balancer.get_best_server()
+        if not selected_conn:
+            return False
+
+        domain = selected_conn.get("domain")
+        resolver = selected_conn.get("resolver")
+
         dns_queries = await self.dns_packet_parser.build_request_dns_query(
             domain=domain,
             session_id=0,  # 0 signals a request for a new session ID
             packet_type=Packet_Type.SESSION_INIT,
             data=b"INIT",
-            mtu_chars=mtu_char_len,
+            mtu_chars=self.synced_upload_mtu_chars,
             encode_data=True,
             qType=DNS_Record_Type.TXT,
         )
 
         if not dns_queries:
+            self.logger.error(
+                f"Failed to build session init DNS query via {resolver} for {domain}, Retrying..."
+            )
+            await self._sleep(0.2)
             return False
 
-        max_retries = 10
-        base_delay = 1.0
+        max_retries = 3
+        # base_delay = 1.0
 
         for attempt in range(max_retries):
             if self.should_stop.is_set():
@@ -617,74 +640,79 @@ class MasterDnsVPNClient:
                         self.logger.error("Failed to parse Session ID from server.")
 
             if attempt < max_retries - 1:
-                delay = min(base_delay * (1.5**attempt), 8.0)
+                # delay = min(base_delay * (1.5**attempt), 8.0)
+                delay = 0.5
                 self.logger.warning(
-                    f"Session init failed. Retrying in {delay:.1f}s (Attempt {attempt + 1}/{max_retries})..."
+                    f"Session init failed via {resolver} for {domain}. Retrying in {delay:.1f}s (Attempt {attempt + 1}/{max_retries})..."
                 )
                 await asyncio.sleep(delay)
 
-        self.logger.error("Failed to initialize session after multiple attempts.")
-        return False
+        self.logger.error(
+            f"Failed to build session init DNS query via {resolver} for {domain}, Retrying..."
+        )
 
-    async def run_client(self) -> None:
+        await self._sleep(0.2)
+        return await self._init_session()
+
+    async def run_client(self, MTU_TEST=False) -> None:
         """Run the MasterDnsVPN Client main logic."""
         self.logger.info("Setting up connections...")
         try:
-            await self.create_connection_map()
+            if MTU_TEST or len(self.connections_map) <= 0:
+                await self.create_connection_map()
 
-            if not await self.test_mtu_sizes():
-                self.logger.error("No valid servers found to connect.")
-                return
+                if not await self.test_mtu_sizes():
+                    self.logger.error("No valid servers found to connect.")
+                    return
 
-            valid_conns = [c for c in self.connections_map if c.get("is_valid")]
+                valid_conns = [c for c in self.connections_map if c.get("is_valid")]
 
-            self.balancer.resolvers = valid_conns
+                self.balancer.set_balancers(valid_conns)
 
-            self.synced_upload_mtu = min(c["upload_mtu_bytes"] for c in valid_conns)
-            self.synced_upload_mtu_chars = min(
-                c["upload_mtu_chars"] for c in valid_conns
-            )
-            self.synced_download_mtu = min(c["download_mtu_bytes"] for c in valid_conns)
+                self.synced_upload_mtu = min(c["upload_mtu_bytes"] for c in valid_conns)
+                self.synced_upload_mtu_chars = min(
+                    c["upload_mtu_chars"] for c in valid_conns
+                )
+                self.synced_download_mtu = min(
+                    c["download_mtu_bytes"] for c in valid_conns
+                )
 
-            self.logger.info(
-                f"<green>Synced Global MTU -> UP: {self.synced_upload_mtu}B, DOWN: {self.synced_download_mtu}B</green>"
-            )
+                self.logger.info(
+                    f"<green>Synced Global MTU -> UP: {self.synced_upload_mtu}B, DOWN: {self.synced_download_mtu}B</green>"
+                )
 
             selected_conn = self.balancer.get_best_server()
             if not selected_conn:
                 return
 
-            if await self._init_session(
-                selected_conn["domain"], selected_conn["resolver"]
-            ):
-                self.logger.success(
-                    f"<g>Session Established! Session ID: {self.session_id}</g>"
-                )
+            if not await self._init_session():
+                self.logger.error("Failed to initialize session with the server.")
+                return
 
-                if await self._sync_mtu_with_server(
-                    selected_conn["domain"], selected_conn["resolver"]
-                ):
-                    await self._main_tunnel_loop()
-                else:
-                    self.logger.error("Stopping due to MTU sync failure.")
-            else:
-                self.logger.error("Session initialization failed.")
+            self.logger.success(
+                f"<g>Session Established! Session ID: {self.session_id}</g>"
+            )
 
+            if not await self._sync_mtu_with_server():
+                self.logger.error("Failed to sync MTU with the server.")
+                return
+
+            await self._main_tunnel_loop()
         except Exception as e:
             self.logger.error(f"Error setting up connections: {e}")
             return
 
     # ---------------------------------------------------------
-    # TCP Multiplexing Logic & KCP Handlers
+    # TCP Multiplexing Logic & Handlers
     # ---------------------------------------------------------
     async def _main_tunnel_loop(self):
         """Start local TCP server and main worker tasks."""
         self.logger.info("Entering VPN Tunnel Main Loop...")
         self.session_restart_event = asyncio.Event()
-        self.outbound_queue = asyncio.PriorityQueue()
+        self.outbound_queue = asyncio.PriorityQueue(
+            maxsize=self.config.get("OUTBOUND_QUEUE_MAX", 5000)
+        )
         self.active_streams = {}
-        self.pending_streams = {}
-        self.last_activity_time = self.loop.time()
 
         self.tunnel_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
@@ -705,6 +733,7 @@ class MasterDnsVPNClient:
                 self.tunnel_sock.ioctl(SIO_UDP_CONNRESET, False)
             except Exception as e:
                 self.logger.debug(f"Failed to set SIO_UDP_CONNRESET: {e}")
+
         self.tunnel_sock.setblocking(False)
 
         listen_ip = self.config.get("LISTEN_IP", "127.0.0.1")
@@ -712,13 +741,21 @@ class MasterDnsVPNClient:
 
         server = None
         try:
-            server = await asyncio.start_server(
-                self._handle_local_tcp_connection,
-                listen_ip,
-                listen_port,
-                reuse_address=True,
-                reuse_port=True,
-            )
+            if sys.platform == "win32":
+                server = await asyncio.start_server(
+                    self._handle_local_tcp_connection,
+                    listen_ip,
+                    listen_port,
+                    reuse_address=True,
+                )
+            else:
+                server = await asyncio.start_server(
+                    self._handle_local_tcp_connection,
+                    listen_ip,
+                    listen_port,
+                    reuse_address=True,
+                    reuse_port=True,
+                )
 
             self.logger.success(
                 f"<g>Ready! Local Proxy listening on {listen_ip}:{listen_port}</g>"
@@ -756,9 +793,12 @@ class MasterDnsVPNClient:
             for w in getattr(self, "workers", []):
                 w.cancel()
 
-            for stream in list(getattr(self, "active_streams", {}).values()):
+            for _id, active_stream in list(self.active_streams.items()):
                 try:
-                    await stream.close()
+                    writer = active_stream.get("writer")
+                    await asyncio.wait_for(
+                        self._close_writer_safely(writer), timeout=3.0
+                    )
                 except Exception:
                     pass
 
@@ -774,15 +814,7 @@ class MasterDnsVPNClient:
         self.logger.info("Cleaning up old connections before reconnecting...")
 
         await asyncio.gather(*self.workers, return_exceptions=True)
-
-        for sid, (reader, writer) in self.pending_streams.items():
-            try:
-                writer.close()
-            except Exception:
-                pass
-
         self.active_streams.clear()
-        self.pending_streams.clear()
 
     async def _rx_worker(self):
         """Continuously listen for incoming VPN packets on the tunnel socket."""
@@ -808,22 +840,57 @@ class MasterDnsVPNClient:
         if parsed_header:
             await self._handle_server_response(parsed_header, returned_data)
 
-    async def _handle_local_tcp_connection(self, reader, writer):
-        stream_id = 1
-        while stream_id in self.active_streams or stream_id in self.pending_streams:
-            stream_id += 1
-            if stream_id > 65535:
-                self.logger.error("No available Stream IDs! Too many connections.")
+    async def _close_writer_safely(self, writer):
+        """Safely close the writer connection"""
+        try:
+            if writer and not writer.is_closing():
                 writer.close()
-                return
+                await asyncio.wait_for(writer.wait_closed(), timeout=3.0)
+        except Exception as e:
+            self.logger.debug(f"Error closing writer: {e}")
+
+    def _new_get_stream_id(self):
+        start = (self.last_stream_id + 1) or 1
+        stream_id = start
+        wrapped = False
+
+        while not self.should_stop.is_set():
+            if stream_id > 65535:
+                if wrapped:
+                    return False, 0
+                stream_id = 1
+                wrapped = True
+
+            if stream_id not in self.active_streams:
+                self.last_stream_id = stream_id
+                return True, stream_id
+
+            stream_id += 1
+
+        return False, 0
+
+    async def _handle_local_tcp_connection(self, reader, writer):
+        stream_id_status, stream_id = self._new_get_stream_id()
+        if not stream_id_status:
+            self.logger.error("No available Stream IDs! Too many connections.")
+            await self._close_writer_safely(writer)
+            return
 
         self.logger.info(f"New local connection, assigning Stream ID: {stream_id}")
 
-        # Priority 2 (Control)
+        now = self.loop.time()
         await self.outbound_queue.put(
-            (2, self.loop.time(), Packet_Type.STREAM_SYN, stream_id, 0, b"")
+            (2, now, Packet_Type.STREAM_SYN, stream_id, 0, b"")
         )
-        self.pending_streams[stream_id] = (reader, writer, self.loop.time())
+
+        self.active_streams[stream_id] = {
+            "reader": reader,
+            "writer": writer,
+            "create_time": now,
+            "last_activity_time": now,
+            "status": "PENDING",
+            "stream": None,
+        }
 
     async def _client_enqueue_tx(
         self, priority, stream_id, sn, data, is_ack=False, is_fin=False, is_resend=False
@@ -836,9 +903,6 @@ class MasterDnsVPNClient:
         elif is_resend:
             ptype = Packet_Type.STREAM_RESEND
 
-        self.logger.debug(
-            f"<blue>[QUEUE]</blue> Enqueueing {ptype} for SID: {stream_id} SN: {sn} Priority: {priority}"
-        )
         await self.outbound_queue.put(
             (priority, self.loop.time(), ptype, stream_id, sn, data)
         )
@@ -846,9 +910,7 @@ class MasterDnsVPNClient:
     async def _tx_worker(self):
         self.logger.debug("<magenta>[TX]</magenta> TX Worker started.")
         while not self.should_stop.is_set():
-            self.ping_manager.active_connections = len(self.active_streams) + len(
-                self.pending_streams
-            )
+            self.ping_manager.active_connections = len(self.active_streams)
 
             try:
                 priority, _, pkt_type, stream_id, sn, data = await asyncio.wait_for(
@@ -856,8 +918,11 @@ class MasterDnsVPNClient:
                 )
 
                 self.ping_manager.update_activity()
-                self.last_activity_time = self.loop.time()
+                if stream_id not in self.active_streams:
+                    continue
 
+                now = self.loop.time()
+                self.active_streams[stream_id]["last_activity_time"] = now
             except asyncio.TimeoutError:
                 continue
 
@@ -897,11 +962,6 @@ class MasterDnsVPNClient:
                             query_packet,
                             (conn["resolver"], 53),
                         )
-
-                    conn["total_packets"] = conn.get("total_packets", 0) + 1
-                    if pkt_type == Packet_Type.STREAM_RESEND:
-                        conn["lost_packets"] = conn.get("lost_packets", 0) + 1
-
             except Exception as e:
                 self.logger.debug(
                     f"TX Worker error during packet building/sending: {e}"
@@ -915,10 +975,41 @@ class MasterDnsVPNClient:
             f"<yellow>[RESP]</yellow> Server sent {ptype} for SID {stream_id} SN {sn}"
         )
 
-        if ptype == Packet_Type.STREAM_SYN_ACK:
-            if stream_id in self.pending_streams:
-                reader, writer, ptime = self.pending_streams.pop(stream_id)
-                from dns_utils.ARQ import ARQStream
+        stream_id_exists = False
+        if stream_id > 0 and stream_id in self.active_streams:
+            stream_id_exists = True
+            self.active_streams[stream_id]["last_activity_time"] = self.loop.time()
+
+        if ptype == Packet_Type.STREAM_SYN_ACK and stream_id_exists:
+            if (
+                self.active_streams[stream_id].get("stream")
+                or self.active_streams[stream_id].get("status") == "ACTIVE"
+            ):
+                self.logger.debug(
+                    f"Stream {stream_id} already has an ARQ stream; ignoring duplicate SYN_ACK."
+                )
+                return
+
+            if self.active_streams[stream_id].get("stream_creating"):
+                self.logger.debug(
+                    f"Stream {stream_id} creation in progress; ignoring duplicate SYN_ACK."
+                )
+                return
+
+            self.active_streams[stream_id]["stream_creating"] = True
+
+            try:
+                self.active_streams[stream_id]["status"] = "ACTIVE"
+                reader = self.active_streams[stream_id]["reader"]
+                writer = self.active_streams[stream_id]["writer"]
+
+                crypto_overhead = 0
+                if self.encryption_method == 2:
+                    crypto_overhead = 16
+                elif self.encryption_method in (3, 4, 5):
+                    crypto_overhead = 28
+
+                safe_uplink_mtu = (self.synced_upload_mtu_chars // 2) - crypto_overhead
 
                 stream = ARQStream(
                     stream_id=stream_id,
@@ -926,30 +1017,56 @@ class MasterDnsVPNClient:
                     enqueue_tx_cb=self._client_enqueue_tx,
                     reader=reader,
                     writer=writer,
-                    mtu=self.synced_upload_mtu,
+                    mtu=safe_uplink_mtu,
                     logger=self.logger,
                 )
-                self.active_streams[stream_id] = stream
+
+                self.active_streams[stream_id]["stream"] = stream
                 self.logger.info(f"Stream {stream_id} Established with server.")
-
-        elif ptype in (Packet_Type.STREAM_DATA, Packet_Type.STREAM_RESEND):
-            if stream_id in self.active_streams:
-                await self.active_streams[stream_id].receive_data(sn, data)
+            finally:
+                self.active_streams[stream_id].pop("stream_creating", None)
+        elif (
+            ptype in (Packet_Type.STREAM_DATA, Packet_Type.STREAM_RESEND)
+            and stream_id_exists
+            and data
+        ):
+            stream_obj = self.active_streams[stream_id].get("stream")
+            if stream_obj:
+                await stream_obj.receive_data(sn, data)
             else:
-                self.logger.debug(
-                    f"<yellow>[RESP]</yellow> Data for unknown SID {stream_id}, dropped (Out of order)."
-                )
+                self.logger.debug(f"Got data for SID {stream_id} but stream not ready.")
+            if self.outbound_queue.qsize() < 15:
+                for _ in range(2):
+                    await self.outbound_queue.put(
+                        (2, self.loop.time(), Packet_Type.PING, 0, 0, b"PULL")
+                    )
 
-        elif ptype == Packet_Type.STREAM_DATA_ACK:
-            if stream_id in self.active_streams:
-                await self.active_streams[stream_id].receive_ack(sn)
+        elif ptype == Packet_Type.STREAM_DATA_ACK and stream_id_exists:
+            stream_obj = self.active_streams[stream_id].get("stream")
+            if stream_obj:
+                await stream_obj.receive_ack(sn)
+            else:
+                self.logger.debug(f"Got ACK for SID {stream_id} but stream not ready.")
 
-        elif ptype == Packet_Type.STREAM_FIN:
-            if stream_id in self.active_streams:
-                self.logger.info(f"<y>Stream {stream_id} Closed by server.</y>")
-                stream = self.active_streams.pop(stream_id, None)
-                if stream:
-                    await stream.close()
+            if self.outbound_queue.qsize() < 15:
+                for _ in range(2):
+                    await self.outbound_queue.put(
+                        (2, self.loop.time(), Packet_Type.PING, 0, 0, b"PULL")
+                    )
+
+        elif ptype == Packet_Type.STREAM_FIN and stream_id_exists:
+            self.logger.info(f"<y>Stream {stream_id} Closed by server.</y>")
+            stream = self.active_streams.pop(stream_id, None)
+            if stream:
+                stream_obj = stream.get("stream")
+                if stream_obj:
+                    await stream_obj.close()
+
+                try:
+                    writer = stream.get("writer")
+                    await self._close_writer_safely(writer)
+                except Exception:
+                    pass
 
         elif ptype == Packet_Type.ERROR_DROP:
             self.logger.error(
@@ -961,45 +1078,46 @@ class MasterDnsVPNClient:
 
     async def _retransmit_worker(self):
         self.logger.debug("<magenta>[RETRANS]</magenta> Retransmit Worker started.")
-        SYN_RETRY_INTERVAL = 20.0
-        syn_last_sent = {}
-
         while not self.should_stop.is_set():
             await asyncio.sleep(0.1)
 
-            dead_streams = [sid for sid, s in self.active_streams.items() if s.closed]
-            for sid in dead_streams:
-                self.active_streams.pop(sid, None)
-
-            dead_pending = []
-            now = self.loop.time()
-
-            for sid, stream_data in list(self.pending_streams.items()):
-                reader, writer, syn_time = stream_data
-
-                if reader.at_eof() or writer.is_closing():
-                    dead_pending.append(sid)
-                    continue
-
-                if now - syn_time > 90.0:  # Timeout
-                    dead_pending.append(sid)
-                    continue
-
-                if now - syn_last_sent.get(sid, 0) > SYN_RETRY_INTERVAL:
-                    syn_last_sent[sid] = now
-                    await self.outbound_queue.put(
-                        (2, self.loop.time(), Packet_Type.STREAM_SYN, sid, 0, b"")
+            dead_streams = [
+                sid
+                for sid, s in self.active_streams.items()
+                if "stream" in s
+                and (
+                    (
+                        s["stream"] is not None
+                        and getattr(s["stream"], "closed", False)
+                        and s.get("status") == "ACTIVE"
                     )
+                    or (
+                        s.get("status") == "PENDING"
+                        and self.loop.time() - s.get("create_time", 0) > 90.0
+                    )
+                )
+            ]
 
-            for sid in dead_pending:
-                self.logger.info(f"Pending Stream {sid} aborted.")
-                data = self.pending_streams.pop(sid, None)
-                if data:
-                    data[1].close()
-                await self._client_enqueue_tx(2, sid, 0, b"", is_fin=True)
+            for sid in dead_streams:
+                self.logger.info(
+                    f"Stream {sid} is unresponsive. Closing and notifying server."
+                )
+                try:
+                    stream_data = self.active_streams.pop(sid, None)
+                    if stream_data:
+                        writer = stream_data.get("writer")
+                        await self._close_writer_safely(writer)
+                    await self._client_enqueue_tx(2, sid, 0, b"", is_fin=True)
+                except Exception as e:
+                    self.logger.debug(f"Error handling dead stream {sid}: {e}")
 
-            for stream in list(self.active_streams.values()):
-                await stream.check_retransmits()
+            for s in list(self.active_streams.values()):
+                arq = s.get("stream")
+                if arq and hasattr(arq, "check_retransmits"):
+                    try:
+                        await arq.check_retransmits()
+                    except Exception as e:
+                        self.logger.debug(f"Error in check_retransmits: {e}")
 
     # ---------------------------------------------------------
     # App Lifecycle
@@ -1013,12 +1131,14 @@ class MasterDnsVPNClient:
                 self.logger.error("Domains or Resolvers are missing in config.")
                 return
 
+            first_run = True
             while not self.should_stop.is_set():
                 self.logger.info("=" * 80)
                 self.logger.info("<green>Running MasterDnsVPN Client...</green>")
                 self.packets_queue.clear()
 
-                await self.run_client()
+                await self.run_client(first_run)
+                first_run = False
 
                 if not self.should_stop.is_set():
                     self.logger.info(

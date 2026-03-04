@@ -4,20 +4,22 @@
 # Year: 2026
 
 
-import sys
-import os
-import socket
 import asyncio
-import signal
-import random
-from typing import Optional, Any
 import ctypes
+import os
+import random
+import signal
+import socket
+import sys
+import time
 from ctypes import wintypes
+from typing import Any, Optional
 
-from server_config import master_dns_vpn_config
-from dns_utils.utils import getLogger, get_encrypt_key, async_recvfrom, async_sendto
+from dns_utils.ARQ import ARQStream
+from dns_utils.DNS_ENUMS import DNS_Record_Type, Packet_Type
 from dns_utils.DnsPacketParser import DnsPacketParser
-from dns_utils.DNS_ENUMS import Packet_Type, DNS_Record_Type
+from dns_utils.utils import async_recvfrom, async_sendto, get_encrypt_key, getLogger
+from server_config import master_dns_vpn_config
 
 # Ensure UTF-8 output for consistent logging
 try:
@@ -40,18 +42,19 @@ class MasterDnsVPNServer:
         self.config = master_dns_vpn_config.__dict__
         self.logger = getLogger(log_level=self.config.get("LOG_LEVEL", "INFO"))
         self.allowed_domains = self.config.get("DOMAIN", [])
+        self.encryption_method: int = self.config.get("DATA_ENCRYPTION_METHOD", 1)
 
         self.recv_data_cache = {}
         self.send_data_cache = {}
 
         self.sessions = {}
 
-        self.encrypt_key = get_encrypt_key(self.config.get("DATA_ENCRYPTION_METHOD", 1))
+        self.encrypt_key = get_encrypt_key(self.encryption_method)
         self.logger.warning(f"Using encryption key: <green>{self.encrypt_key}</green>")
 
         self.dns_parser = DnsPacketParser(
             logger=self.logger,
-            encryption_method=self.config.get("DATA_ENCRYPTION_METHOD", 1),
+            encryption_method=self.encryption_method,
             encryption_key=self.encrypt_key,
         )
 
@@ -95,7 +98,8 @@ class MasterDnsVPNServer:
             if session:
                 streams = session.get("streams", {})
                 for stream in list(streams.values()):
-                    await stream.close(reason="Session Cleanup")
+                    if stream != "PENDING":
+                        await stream.close(reason="Session Cleanup")
 
             del self.sessions[session_id]
             self.logger.info(f"Closed inactive session with ID: {session_id}")
@@ -240,9 +244,12 @@ class MasterDnsVPNServer:
             ].get("streams", {}):
                 stream = self.sessions[session_id]["streams"][stream_id]
                 if stream != "PENDING":
-                    await stream.receive_data(sn, extracted_data)
-            else:
-                pass
+                    if extracted_data:
+                        await stream.receive_data(sn, extracted_data)
+                    else:
+                        self.logger.warning(
+                            f"<red>Decryption Failed! Dropping SN:{sn}</red>"
+                        )
 
         elif packet_type == Packet_Type.STREAM_DATA_ACK:
             if session_id in self.sessions and stream_id in self.sessions[
@@ -261,11 +268,54 @@ class MasterDnsVPNServer:
                     await stream.close()
 
         # 4. Dequeue outward packet (Piggybacking) from PriorityQueue
-        out_queue = self.sessions.get(session_id, {}).get("outbound_queue")
-        res_ptype, res_stream_id, res_sn, res_data = Packet_Type.PONG, 0, 0, b"PONG"
+        session = self.sessions.setdefault(session_id, {})
+        out_queue = session.get("outbound_queue")
 
-        if out_queue and not out_queue.empty():
-            _, _, res_ptype, res_stream_id, res_sn, res_data = out_queue.get_nowait()
+        stream_states = session.setdefault("stream_states", {})
+        incoming_stream_id = extracted_header.get("stream_id", 0)
+        incoming_sn = extracted_header.get("sequence_num", 0)
+
+        state = stream_states.setdefault(incoming_stream_id, {})
+        is_duplicate = False
+
+        if incoming_stream_id != 0 and packet_type not in (
+            Packet_Type.PING,
+            Packet_Type.PONG,
+        ):
+            if (
+                state.get("last_ptype") == packet_type
+                and state.get("last_sn") == incoming_sn
+            ):
+                is_duplicate = True
+
+        if is_duplicate:
+            res_ptype, res_stream_id, res_sn, res_data = state.get(
+                "last_response", (Packet_Type.PONG, 0, 0, b"PONG")
+            )
+            if res_ptype == Packet_Type.PONG and out_queue and not out_queue.empty():
+                _, _, res_ptype, res_stream_id, res_sn, res_data = (
+                    out_queue.get_nowait()
+                )
+                state["last_response"] = (res_ptype, res_stream_id, res_sn, res_data)
+        else:
+            if incoming_stream_id != 0:
+                state["last_ptype"] = packet_type
+                state["last_sn"] = incoming_sn
+
+            if out_queue and not out_queue.empty():
+                _, _, res_ptype, res_stream_id, res_sn, res_data = (
+                    out_queue.get_nowait()
+                )
+            else:
+                res_ptype, res_stream_id, res_sn, res_data = (
+                    Packet_Type.PONG,
+                    0,
+                    0,
+                    b"PONG",
+                )
+
+            if incoming_stream_id != 0:
+                state["last_response"] = (res_ptype, res_stream_id, res_sn, res_data)
 
         data_bytes = (
             self.dns_parser.codec_transform(res_data, encrypt=True) if res_data else b""
@@ -624,14 +674,16 @@ class MasterDnsVPNServer:
         elif is_resend:
             ptype = Packet_Type.STREAM_RESEND
 
-        import time
-
         await out_queue.put((priority, time.time(), ptype, stream_id, sn, data))
 
     async def _handle_stream_syn(self, session_id, stream_id):
         self.sessions[session_id].setdefault("streams", {})
+
         if stream_id in self.sessions[session_id]["streams"]:
-            return  # Already handled
+            await self._server_enqueue_tx(
+                session_id, 2, stream_id, 0, b"", is_syn_ack=True
+            )
+            return
 
         self.sessions[session_id]["streams"][stream_id] = "PENDING"
 
@@ -639,7 +691,17 @@ class MasterDnsVPNServer:
             reader, writer = await asyncio.open_connection(
                 self.config["FORWARD_IP"], int(self.config["FORWARD_PORT"])
             )
-            from dns_utils.ARQ import ARQStream
+
+            crypto_overhead = 0
+            enc_method = self.encryption_method
+            if enc_method == 2:
+                crypto_overhead = 16
+            elif enc_method in (3, 4, 5):
+                crypto_overhead = 28
+
+            safe_mtu = (
+                self.sessions[session_id].get("download_mtu", 512) - crypto_overhead
+            )
 
             stream = ARQStream(
                 stream_id=stream_id,
@@ -649,7 +711,7 @@ class MasterDnsVPNServer:
                 ),
                 reader=reader,
                 writer=writer,
-                mtu=self.sessions[session_id].get("download_mtu", 512),
+                mtu=safe_mtu,
                 logger=self.logger,
             )
 
@@ -675,17 +737,20 @@ class MasterDnsVPNServer:
             for session_id, session in list(self.sessions.items()):
                 streams = session.get("streams", {})
 
-                closed_ids = [sid for sid, s in streams.items() if s.closed]
+                closed_ids = [
+                    sid for sid, s in streams.items() if s != "PENDING" and s.closed
+                ]
                 for sid in closed_ids:
                     streams.pop(sid, None)
 
                 for stream in list(streams.values()):
-                    try:
-                        await stream.check_retransmits()
-                    except Exception as e:
-                        self.logger.error(
-                            f"Error in retransmit sid {stream.stream_id}: {e}"
-                        )
+                    if stream != "PENDING":
+                        try:
+                            await stream.check_retransmits()
+                        except Exception as e:
+                            self.logger.error(
+                                f"Error in retransmit sid {stream.stream_id}: {e}"
+                            )
 
     # ---------------------------------------------------------
     # App Lifecycle

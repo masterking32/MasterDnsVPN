@@ -3,12 +3,12 @@
 # Github: https://github.com/masterking32
 # Year: 2026
 
-from typing import Any
-import random
-import math
-from dns_utils.DNS_ENUMS import Packet_Type, DNS_Record_Type, DNS_QClass
-from typing import Optional
 import hashlib
+import math
+import random
+from typing import Any, Optional
+
+from dns_utils.DNS_ENUMS import DNS_QClass, DNS_Record_Type, Packet_Type
 
 
 class DnsPacketParser:
@@ -515,9 +515,10 @@ class DnsPacketParser:
             elif method == 1:
                 return self.xor_data(data, key)
             elif method == 2:
-                from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
-                from cryptography.hazmat.backends import default_backend
                 import os
+
+                from cryptography.hazmat.backends import default_backend
+                from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
 
                 nonce = os.urandom(16)
                 algorithm = algorithms.ChaCha20(key, nonce)
@@ -526,14 +527,15 @@ class DnsPacketParser:
                 encrypted_data = encryptor.update(data)
                 return nonce + encrypted_data
             elif method in (3, 4, 5):
+                import os
+
+                from cryptography.hazmat.backends import default_backend
                 from cryptography.hazmat.primitives.ciphers import (
                     Cipher,
                     algorithms,
                     modes,
                 )
-                from cryptography.hazmat.backends import default_backend
                 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-                import os
 
                 nonce = os.urandom(12)  # GCM استاندارد 12 بایت nonce می‌خواهد
                 aesgcm = AESGCM(key)
@@ -563,8 +565,8 @@ class DnsPacketParser:
             elif method == 1:
                 return self.xor_data(data, key)
             elif method == 2:
-                from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
                 from cryptography.hazmat.backends import default_backend
+                from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
 
                 nonce = data[:16]
                 encrypted_data = data[16:]
@@ -574,12 +576,12 @@ class DnsPacketParser:
                 decrypted_data = decryptor.update(encrypted_data)
                 return decrypted_data
             elif method in (3, 4, 5):
+                from cryptography.hazmat.backends import default_backend
                 from cryptography.hazmat.primitives.ciphers import (
                     Cipher,
                     algorithms,
                     modes,
                 )
-                from cryptography.hazmat.backends import default_backend
                 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
                 nonce = data[:12]

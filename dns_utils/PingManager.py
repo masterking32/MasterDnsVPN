@@ -1,5 +1,10 @@
-import time
+# MasterDnsVPN Server
+# Author: MasterkinG32
+# Github: https://github.com/masterking32
+# Year: 2026
+
 import asyncio
+import time
 
 
 class PingManager:
@@ -22,10 +27,12 @@ class PingManager:
 
             idle_time = time.time() - self.last_data_activity
 
-            ping_interval = 2.0 if idle_time >= 5.0 else 0.2
+            ping_interval = 2.0 if idle_time >= 5.0 else 0.1
 
-            if time.time() - self.last_ping_time >= ping_interval:
-                best_server = self.balancer.get_best_server()
-                if best_server:
-                    await self.send_func(best_server, is_ping=True)
-                self.last_ping_time = time.time()
+            if time.time() - self.last_ping_time < ping_interval:
+                continue
+
+            best_server = self.balancer.get_best_server()
+            if best_server:
+                await self.send_func(best_server, is_ping=True)
+            self.last_ping_time = time.time()
