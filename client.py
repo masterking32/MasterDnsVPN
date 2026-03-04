@@ -16,7 +16,6 @@ import time
 from ctypes import wintypes
 from typing import Optional, Tuple
 
-from client_config import master_dns_vpn_config
 from dns_utils.ARQ import ARQStream
 from dns_utils.DNS_ENUMS import DNS_Record_Type, Packet_Type
 from dns_utils.DNSBalancer import DNSBalancer
@@ -28,6 +27,7 @@ from dns_utils.utils import (
     generate_random_hex_text,
     getLogger,
 )
+from dns_utils.config_loader import load_config, get_config_path
 
 # Ensure UTF-8 output for consistent logging
 try:
@@ -45,7 +45,13 @@ class MasterDnsVPNClient:
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.should_stop: asyncio.Event = asyncio.Event()
         self.session_restart_event = None
-        self.config: dict = master_dns_vpn_config.__dict__
+        self.config: dict = load_config("client_config.toml")
+        if not os.path.isfile(get_config_path("client_config.toml")):
+            print(
+                "[MasterDnsVPN] Config file 'client_config.toml' not found. "
+                "Please place it in the same directory as the executable and restart."
+            )
+            sys.exit(1)
         self.logger = getLogger(log_level=self.config.get("LOG_LEVEL", "INFO"))
         self.resolvers: list = self.config.get("RESOLVER_DNS_SERVERS", [])
         self.domains: list = self.config.get("DOMAINS", [])
@@ -62,7 +68,10 @@ class MasterDnsVPNClient:
         self.encryption_key: str = self.config.get("ENCRYPTION_KEY", None)
 
         if not self.encryption_key:
-            self.logger.error("No encryption key provided in configuration.")
+            self.logger.error(
+                "No encryption key provided. "
+                "Please set <yellow>ENCRYPTION_KEY</yellow> in <yellow>client_config.toml</yellow>."
+            )
             sys.exit(1)
 
         self.dns_packet_parser = DnsPacketParser(

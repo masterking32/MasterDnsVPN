@@ -47,7 +47,42 @@ Para que el túnel sea funcional, debe ser propietario de un dominio y configura
 
 ## 🚀 Instalación y uso
 
-### 1. Instalar dependencias
+### Opción A: Descargar el ejecutable precompilado (Recomendado)
+
+Puede descargar el binario precompilado más reciente para su plataforma, sin necesidad de instalar Python.
+
+**Descargas del cliente:**
+
+| Plataforma | Descarga |
+|------------|----------|
+| 🪟 Windows (AMD64) | [MasterDnsVPN_Client_Windows_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Windows_AMD64.zip) |
+| 🐧 Linux (AMD64) | [MasterDnsVPN_Client_Linux_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Linux_AMD64.zip) |
+| 🍎 macOS (ARM64) | [MasterDnsVPN_Client_MacOS_ARM64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_MacOS_ARM64.zip) |
+
+**Descargas del servidor:**
+
+| Plataforma | Descarga |
+|------------|----------|
+| 🪟 Windows (AMD64) | [MasterDnsVPN_Server_Windows_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Windows_AMD64.zip) |
+| 🐧 Linux (AMD64) | [MasterDnsVPN_Server_Linux_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Linux_AMD64.zip) |
+| 🍎 macOS (ARM64) | [MasterDnsVPN_Server_MacOS_ARM64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_MacOS_ARM64.zip) |
+
+Cada archivo ZIP del cliente contiene el ejecutable y una plantilla de configuración `client_config.toml`. Cada archivo ZIP del servidor contiene el ejecutable y una plantilla de configuración `server_config.toml`.
+
+**Pasos:**
+
+1. Extraiga el archivo ZIP.
+2. Abra `client_config.toml` en cualquier editor de texto y configure los valores:
+   - `ENCRYPTION_KEY` — cópielo del registro del servidor en la primera ejecución.
+   - `DOMAINS` — su subdominio de túnel (p. ej., `v.example.com`).
+   - `RESOLVER_DNS_SERVERS` — resolvers DNS públicos (p. ej., `8.8.8.8`).
+3. Coloque `client_config.toml` en la **misma carpeta** que el ejecutable y ejecútelo.
+
+---
+
+### Opción B: Ejecutar desde el código fuente
+
+#### 1. Instalar dependencias
 
 Clonar el repositorio e instalar las bibliotecas de Python necesarias:
 ```bash
@@ -56,66 +91,20 @@ cd MasterDnsVPN
 pip install -r requirements.txt
 ```
 
-#### 🔌 Instalación sin conexión (Servidor sin acceso a Internet)
-
-Si su **servidor no tiene acceso a Internet** y no puede ejecutar `pip install` directamente, siga estos pasos desde una máquina que **sí tenga** acceso a Internet:
-
-**Paso 1 — Descargar el instalador de Python (si Python no está instalado en el servidor):**
-```bash
-# En la máquina con conexión a Internet, descargue el instalador de Python para Linux
-wget https://www.python.org/ftp/python/3.11.9/Python-3.11.9.tgz
-# Transfiéralo al servidor sin conexión mediante scp, USB u otro método disponible
-scp Python-3.11.9.tgz user@your-server:/tmp/
-```
-
-**Paso 2 — Instalar Python desde el código fuente en el servidor sin conexión:**
-```bash
-# En el servidor sin conexión
-cd /tmp
-tar xzf Python-3.11.9.tgz
-cd Python-3.11.9
-./configure --enable-optimizations
-make -j$(nproc)
-sudo make altinstall
-# Verificar
-python3.11 --version
-```
-
-**Paso 3 — Descargar los paquetes pip en la máquina con conexión a Internet:**
-```bash
-# En la máquina con conexión a Internet
-mkdir pip_packages
-pip download -r requirements.txt -d ./pip_packages
-# Transfiera la carpeta completa al servidor sin conexión
-scp -r pip_packages user@your-server:/tmp/
-```
-
-**Paso 4 — Instalar los paquetes desde la carpeta descargada en el servidor sin conexión:**
-```bash
-# En el servidor sin conexión
-pip install --no-index --find-links=/tmp/pip_packages -r requirements.txt
-```
-
-> 💡 Asegúrese de que la versión de Python y la arquitectura del sistema operativo sean las mismas en ambas máquinas (p. ej., ambas Linux x86_64) para que los archivos wheel descargados sean compatibles.
-
----
-
-### 2. Configuración del servidor
+#### 2. Configuración del servidor
 
 Copie la configuración de ejemplo:
 
 ```bash
-cp server_config.py.simple server_config.py
+cp server_config.toml.simple server_config.toml
 ```
 
-Edite `server_config.py` para incluir su dominio y la IP/Puerto de reenvío de destino:
+Edite `server_config.toml` para incluir su dominio y la IP/Puerto de reenvío de destino.
 - Instale un servidor proxy (p. ej., SOCKS5, VLESS, VMESS, SSH, MTProto, OpenVPN TCP, etc.) en el servidor para reenviar el tráfico a internet.
-- Configure `FORWARD_IP` y `FORWARD_PORT` en `server_config.py` para que apunten a su servidor proxy.
-- Configure `DOMAIN` para que coincida con el subdominio que configuró en sus registros DNS (p. ej., `v.example.com`). Puede agregar múltiples dominios para redundancia.
-- Establezca `UDP_HOST` en `"0.0.0.0"` para escuchar en todas las interfaces (necesario para un servidor público).
-- Después de la primera ejecución, anote los valores óptimos de MTU para descarga y carga, y luego configure `MAX_UPLOAD_MTU` y `MAX_DOWNLOAD_MTU` según corresponda. Esto acelerará significativamente las ejecuciones posteriores.
+- Configure `FORWARD_IP` y `FORWARD_PORT` en `server_config.toml` para que apunten a su servidor proxy.
+- Configure `DOMAIN` para que coincida con el subdominio que configuró en sus registros DNS (p. ej., `v.example.com`).
 
-### 3. Ejecutar el servidor
+#### 3. Ejecutar el servidor
 
 ```bash
 python server.py
@@ -123,22 +112,23 @@ python server.py
 
 En la primera ejecución, el servidor generará una clave de cifrado. **Guarde esta clave**; la necesitará para configurar el cliente.
 
-### 4. Configurar el cliente
+#### 4. Configurar el cliente
 
 Copie la configuración de ejemplo del cliente:
 
 ```bash
-cp client_config.py.simple client_config.py
+cp client_config.toml.simple client_config.toml
 ```
 
-Edite `client_config.py`:
+Edite `client_config.toml`:
 
-- **`DOMAINS`**: Su(s) subdominio(s) de túnel (p. ej., `v.example.com`). Agregue varios para redundancia.
-- **`ENCRYPTION_KEY`**: La clave que imprime su servidor en la primera ejecución.
-- **`RESOLVER_DNS_SERVERS`**: Lista de resolutores DNS públicos a usar (p. ej., `8.8.8.8`, `1.1.1.1`, `9.9.9.9`). Cuantos más agregue, mejor.
-- **`PACKET_DUPLICATION_COUNT`**: Cuántas rutas resolver+dominio usar por paquete (vea el consejo de emergencia a continuación).
+- `DOMAINS`: Su subdominio de túnel (p. ej., `v.example.com`).
 
-### 5. Ejecutar el cliente
+- `ENCRYPTION_KEY`: La clave que aparece en el registro del servidor.
+
+- `RESOLVER_DNS_SERVERS`: Lista de resolvers DNS públicos (p. ej., `8.8.8.8`, `1.1.1.1`).
+
+#### 5. Ejecutar el cliente
 
 ```bash
 python client.py
@@ -152,9 +142,9 @@ El cliente inicia un proxy SOCKS5 local en `127.0.0.1:1080` (configurable median
 
 > **Cuando la red está casi completamente caída y solo las consultas DNS están llegando (pérdida de paquetes y disrupciones extremas):**
 
-1. **Recopile tantas IPs de resolvedores DNS como sea posible.** Agréguelas todas a `RESOLVER_DNS_SERVERS` en `client_config.py`. Puede usar resolvedores públicos de Google (`8.8.8.8`, `8.8.4.4`), Cloudflare (`1.1.1.1`, `1.0.0.1`), Quad9 (`9.9.9.9`), OpenDNS (`208.67.222.222`, `208.67.220.220`) y otros.
+1. **Recopile tantas IPs de resolvedores DNS como sea posible.** Agréguelas todas a `RESOLVER_DNS_SERVERS` en `client_config.toml`. Puede usar resolvedores públicos de Google (`8.8.8.8`, `8.8.4.4`), Cloudflare (`1.1.1.1`, `1.0.0.1`), Quad9 (`9.9.9.9`), OpenDNS (`208.67.222.222`, `208.67.220.220`) y otros.
 
-2. **Aumente `PACKET_DUPLICATION_COUNT`** en `client_config.py`. Este parámetro controla cuántas rutas resolver+dominio diferentes usa cada paquete **simultáneamente**.
+2. **Aumente `PACKET_DUPLICATION_COUNT`** en `client_config.toml`. Este parámetro controla cuántas rutas resolver+dominio diferentes usa cada paquete **simultáneamente**.
 
    - Con 6 resolvedores y 2 dominios, tendrá **12 rutas potenciales**.
    - Configurar `PACKET_DUPLICATION_COUNT = 6` significa que cada paquete se envía por 6 rutas diferentes a la vez.
@@ -163,6 +153,46 @@ El cliente inicia un proxy SOCKS5 local en `127.0.0.1:1080` (configurable median
    > ⚠️ **Compensación:** Una duplicación mayor aumenta proporcionalmente el uso de ancho de banda y CPU. Un valor de `3`–`6` es un buen equilibrio durante las interrupciones. La capa ARQ del servidor desduplicará automáticamente las copias recibidas para que su aplicación vea cada paquete solo una vez.
 
 3. **Agregue múltiples dominios de túnel** (lista `DOMAINS`) para multiplicar aún más el número de rutas disponibles.
+
+---
+
+## ⚙️ Referencia de configuración
+
+### 🖥️ Servidor — `server_config.toml`
+
+> 🔑 La clave de cifrado se **genera automáticamente** en el primer arranque y se guarda en `encrypt_key.txt` junto al ejecutable del servidor. También se imprime en el log del servidor. Cópiela en el campo `ENCRYPTION_KEY` del cliente. Para rotar la clave, elimine `encrypt_key.txt` y reinicie el servidor.
+
+| Parámetro | Valor predeterminado | Descripción |
+|-----------|---------------------|-------------|
+| `LOG_LEVEL` | `"INFO"` | Nivel de registro: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` |
+| `UDP_HOST` | `"0.0.0.0"` | IP a la que el servidor DNS/UDP se enlaza. `"0.0.0.0"` = todas las interfaces. |
+| `UDP_PORT` | `53` | Puerto UDP del servidor DNS. El puerto `53` (DNS estándar) requiere privilegios de root/admin. |
+| `DOMAIN` | `["t.example.com"]` | Dominio(s) del túnel que acepta este servidor. Debe coincidir con la lista `DOMAINS` del cliente. |
+| `DATA_ENCRYPTION_METHOD` | `1` | Algoritmo de cifrado. **Debe coincidir con el cliente.** `0`=Ninguno, `1`=XOR, `2`=ChaCha20, `3`=AES-128-CTR, `4`=AES-192-CTR, `5`=AES-256-CTR |
+| `SESSION_TIMEOUT` | `300` | Tiempo de inactividad (segundos) antes de que expire una sesión de cliente. |
+| `SESSION_CLEANUP_INTERVAL` | `60` | Intervalo (segundos) para eliminar sesiones expiradas. |
+| `FORWARD_IP` | `"127.0.0.1"` | IP del proxy/servicio local al que se reenvía el tráfico descifrado. |
+| `FORWARD_PORT` | `8080` | Puerto del proxy/servicio local (p. ej. `1080` para SOCKS5, `443` para VLESS). |
+
+### 💻 Cliente — `client_config.toml`
+
+| Parámetro | Valor predeterminado | Descripción |
+|-----------|---------------------|-------------|
+| `LOG_LEVEL` | `"INFO"` | Nivel de registro: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` |
+| `RESOLVER_DNS_SERVERS` | `["8.8.8.8"]` | Resolvedores DNS públicos a los que se reenvían las consultas del túnel. Agregue múltiples para redundancia y balanceo. |
+| `MIN_UPLOAD_MTU` | `40` | MTU mínimo de subida (bytes) que un resolvedor debe alcanzar para ser utilizado. Ponga `0` para deshabilitar. |
+| `MIN_DOWNLOAD_MTU` | `40` | MTU mínimo de bajada (bytes) que un resolvedor debe alcanzar para ser utilizado. Ponga `0` para deshabilitar. |
+| `MAX_UPLOAD_MTU` | `160` | Límite superior (bytes) para el sondeo automático de MTU de subida. |
+| `MAX_DOWNLOAD_MTU` | `200` | Límite superior (bytes) para el sondeo automático de MTU de bajada. |
+| `RESOLVER_BALANCING_STRATEGY` | `1` | Estrategia de balanceo de carga: `1`=Aleatorio, `2`=Round-Robin, `3`=Menor pérdida |
+| `DOMAINS` | `["t.example.com"]` | Dominio(s) del túnel que apuntan al servidor vía registros NS. Agregue múltiples para redundancia multi-ruta. |
+| `DATA_ENCRYPTION_METHOD` | `1` | Algoritmo de cifrado. **Debe coincidir con el servidor.** `0`=Ninguno, `1`=XOR, `2`=ChaCha20, `3`=AES-128-CTR, `4`=AES-192-CTR, `5`=AES-256-CTR |
+| `ENCRYPTION_KEY` | `""` | Clave del `encrypt_key.txt` del servidor o del log del primer arranque. Debe coincidir con el servidor. |
+| `DNS_QUERY_TIMEOUT` | `5` | Segundos de espera para una respuesta DNS antes de considerar la consulta fallida. |
+| `LISTEN_IP` | `"127.0.0.1"` | IP local en la que escucha el proxy SOCKS5. |
+| `LISTEN_PORT` | `1080` | Puerto local del proxy SOCKS5. Configure su aplicación para usar esta dirección. |
+| `NUM_DNS_WORKERS` | `4` | Número de tareas async DNS concurrentes. Aumente para mayor tráfico. |
+| `PACKET_DUPLICATION_COUNT` | `3` | Rutas resolver+dominio por las que se envía cada paquete simultáneamente. Mayor = más fiable pero más ancho de banda. |
 
 ---
 
@@ -234,7 +264,7 @@ sequenceDiagram
     DNS1->>Server: Reenviar (NS autoritativo para dominio A)
     DNS2->>Server: Reenviar (NS autoritativo para dominio B)
 
-    Note over Server: ARQ desduplicates copias de seq#5
+    Note over Server: ARQ deduplica las copias de seq#5
     Note over Server: Reordenar paquetes fuera de secuencia
     Note over Server: Descifrar y reensamblar flujo
 

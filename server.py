@@ -19,7 +19,7 @@ from dns_utils.ARQ import ARQStream
 from dns_utils.DNS_ENUMS import DNS_Record_Type, Packet_Type
 from dns_utils.DnsPacketParser import DnsPacketParser
 from dns_utils.utils import async_recvfrom, async_sendto, get_encrypt_key, getLogger
-from server_config import master_dns_vpn_config
+from dns_utils.config_loader import load_config, get_config_path
 
 # Ensure UTF-8 output for consistent logging
 try:
@@ -39,7 +39,13 @@ class MasterDnsVPNServer:
         self.should_stop = asyncio.Event()
         self.max_concurrent_requests = asyncio.Semaphore(5000)
 
-        self.config = master_dns_vpn_config.__dict__
+        self.config = load_config("server_config.toml")
+        if not os.path.isfile(get_config_path("server_config.toml")):
+            print(
+                "[MasterDnsVPN] Config file 'server_config.toml' not found. "
+                "Please place it in the same directory as the executable and restart."
+            )
+            sys.exit(1)
         self.logger = getLogger(log_level=self.config.get("LOG_LEVEL", "INFO"))
         self.allowed_domains = self.config.get("DOMAIN", [])
         self.encryption_method: int = self.config.get("DATA_ENCRYPTION_METHOD", 1)

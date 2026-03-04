@@ -1,0 +1,94 @@
+name: Build Executables
+
+on:
+  push:
+    branches:
+      - "**"
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            platform: Windows
+            arch: AMD64
+            ext: .exe
+          - os: ubuntu-latest
+            platform: Linux
+            arch: AMD64
+            ext: ""
+          - os: macos-latest
+            platform: MacOS
+            arch: ARM64
+            ext: ""
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install pyinstaller
+          pip install -r requirements.txt
+
+      - name: Build client
+        run: |
+          pyinstaller --onefile --name "MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}" client.py
+
+      - name: Build server
+        run: |
+          pyinstaller --onefile --name "MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}" server.py
+
+      - name: Bundle config templates with executables
+        shell: bash
+        run: |
+          cp client_config.toml.simple dist/client_config.toml
+          cp server_config.toml.simple dist/server_config.toml
+
+      - name: Create client ZIP
+        shell: bash
+        run: |
+          cd dist
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            powershell Compress-Archive -Path "MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }}", "client_config.toml" -DestinationPath "MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}.zip"
+          else
+            zip "MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}.zip" \
+              "MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }}" \
+              "client_config.toml"
+          fi
+
+      - name: Create server ZIP
+        shell: bash
+        run: |
+          cd dist
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            powershell Compress-Archive -Path "MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }}", "server_config.toml" -DestinationPath "MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}.zip"
+          else
+            zip "MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}.zip" \
+              "MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }}" \
+              "server_config.toml"
+          fi
+
+      - name: Upload client artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}
+          path: dist/MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}.zip
+
+      - name: Upload server artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}
+          path: dist/MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}.zip
