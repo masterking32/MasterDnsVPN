@@ -1,6 +1,8 @@
 __pycache__
 server_config.py
 client_config.py
+server_config.toml
+client_config.toml
 encrypt_key.txt
 *.key
 *.pem

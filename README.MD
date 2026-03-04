@@ -47,7 +47,42 @@ To make the tunnel functional, you must own a domain and configure the following
 
 ## 🚀 Installation & Usage
 
-### 1. Install Dependencies
+### Option A: Download Pre-built Executable (Recommended)
+
+You can download the latest pre-built binary for your platform — no Python installation required.
+
+**Client Downloads:**
+
+| Platform | Download |
+|----------|----------|
+| 🪟 Windows (AMD64) | [MasterDnsVPN_Client_Windows_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Windows_AMD64.zip) |
+| 🐧 Linux (AMD64) | [MasterDnsVPN_Client_Linux_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Linux_AMD64.zip) |
+| 🍎 macOS (ARM64) | [MasterDnsVPN_Client_MacOS_ARM64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_MacOS_ARM64.zip) |
+
+**Server Downloads:**
+
+| Platform | Download |
+|----------|----------|
+| 🪟 Windows (AMD64) | [MasterDnsVPN_Server_Windows_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Windows_AMD64.zip) |
+| 🐧 Linux (AMD64) | [MasterDnsVPN_Server_Linux_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Linux_AMD64.zip) |
+| 🍎 macOS (ARM64) | [MasterDnsVPN_Server_MacOS_ARM64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_MacOS_ARM64.zip) |
+
+Each client ZIP contains the executable and a `client_config.toml` template file. Each server ZIP contains the executable and a `server_config.toml` template file.
+
+**Steps:**
+
+1. Extract the ZIP archive.
+2. Open `client_config.toml` in any text editor and set your values:
+   - `ENCRYPTION_KEY` — copy from your server log on first run.
+   - `DOMAINS` — your tunnel subdomain (e.g. `v.example.com`).
+   - `RESOLVER_DNS_SERVERS` — public DNS resolvers (e.g. `8.8.8.8`).
+3. Place `client_config.toml` in the **same folder** as the executable and run it.
+
+---
+
+### Option B: Run from Source
+
+#### 1. Install Dependencies
 
 Clone the repository and install the required Python libraries:
 ```bash
@@ -56,66 +91,20 @@ cd MasterDnsVPN
 pip install -r requirements.txt
 ```
 
-#### 🔌 Offline Installation (Server Without Internet Access)
-
-If your **server has no internet access** and you cannot run `pip install` directly, follow these steps from a machine that **does** have internet access:
-
-**Step 1 — Download Python installer (if Python is not installed on the server):**
-```bash
-# On the internet-connected machine, download the Python installer for Linux
-wget https://www.python.org/ftp/python/3.11.9/Python-3.11.9.tgz
-# Transfer it to your offline server using scp, USB, or any available method
-scp Python-3.11.9.tgz user@your-server:/tmp/
-```
-
-**Step 2 — Install Python from source on the offline server:**
-```bash
-# On the offline server
-cd /tmp
-tar xzf Python-3.11.9.tgz
-cd Python-3.11.9
-./configure --enable-optimizations
-make -j$(nproc)
-sudo make altinstall
-# Verify
-python3.11 --version
-```
-
-**Step 3 — Download pip packages on the internet-connected machine:**
-```bash
-# On the internet-connected machine
-mkdir pip_packages
-pip download -r requirements.txt -d ./pip_packages
-# Transfer the entire folder to your offline server
-scp -r pip_packages user@your-server:/tmp/
-```
-
-**Step 4 — Install packages from the downloaded folder on the offline server:**
-```bash
-# On the offline server
-pip install --no-index --find-links=/tmp/pip_packages -r requirements.txt
-```
-
-> 💡 Make sure the Python version and OS architecture on both machines match (e.g., both Linux x86_64) so the downloaded wheel files are compatible.
-
----
-
-### 2. Server Configuration
+#### 2. Server Configuration
 
 Copy the sample configuration:
 
 ```bash
-cp server_config.py.simple server_config.py
+cp server_config.toml.simple server_config.toml
 ```
 
-Edit `server_config.py` to include your domain and target forwarding IP/Port:
-- Install a proxy server (e.g., SOCKS5, VLESS, VMESS, SSH, MTProto, OpenVPN TCP, etc.) on the server machine to forward traffic to the internet.
-- Configure `FORWARD_IP` and `FORWARD_PORT` in `server_config.py` to point to your proxy server.
-- Configure `DOMAIN` to match the subdomain you set up in your DNS records (e.g., `v.example.com`). You can add multiple domains for redundancy.
-- Set `UDP_HOST` to `"0.0.0.0"` to listen on all interfaces (required for a public server).
-- After the first run, note the optimal MTU values for download and upload, then set `MAX_UPLOAD_MTU` and `MAX_DOWNLOAD_MTU` accordingly. This will significantly speed up subsequent runs.
+Edit `server_config.toml` to include your domain and target forwarding IP/Port.
+- Install a proxy server (e.g., SOCKS5, VLESS, VMESS, SSH, MTProto, OpenVPN TCP and etc) on the server machine to forward traffic to the internet.
+- Configure `FORWARD_IP` and `FORWARD_PORT` in `server_config.toml` to point to your proxy server.
+- Configure `DOMAIN` to match the subdomain you set up in your DNS records (e.g., `v.example.com`).
 
-### 3. Run the Server
+#### 3. Run the Server
 
 ```bash
 python server.py
@@ -123,22 +112,23 @@ python server.py
 
 On the first run, the server will generate an encryption key. **Save this key**; you will need it to configure the client.
 
-### 4. Configure the Client
+#### 4. Configure the Client
 
 Copy the sample client configuration:
 
 ```bash
-cp client_config.py.simple client_config.py
+cp client_config.toml.simple client_config.toml
 ```
 
-Edit `client_config.py`:
+Edit `client_config.toml`:
 
-- **`DOMAINS`**: Your tunnel subdomain(s) (e.g., `v.example.com`). Add multiple for redundancy.
-- **`ENCRYPTION_KEY`**: The key printed by your server on first run.
-- **`RESOLVER_DNS_SERVERS`**: List of public DNS resolvers to use (e.g., `8.8.8.8`, `1.1.1.1`, `9.9.9.9`). Add as many as possible for better reliability.
-- **`PACKET_DUPLICATION_COUNT`**: How many resolver+domain paths to use per packet (see emergency tip below).
+ - `DOMAINS`: Your tunnel subdomain (e.g., `v.example.com`).
 
-### 5. Run the Client
+ - `ENCRYPTION_KEY`: The key displayed in the server log.
+
+ - `RESOLVER_DNS_SERVERS`: List of public DNS resolvers (e.g., `8.8.8.8`, `1.1.1.1`).
+
+#### 5. Run the Client
 
 ```bash
 python client.py
@@ -152,9 +142,9 @@ The client starts a local SOCKS5 proxy on `127.0.0.1:1080` (configurable via `LI
 
 > **When the network is almost completely down and only DNS queries are getting through (extremely high packet loss and disruption):**
 
-1. **Collect as many DNS resolver IP addresses as possible.** Add them all to `RESOLVER_DNS_SERVERS` in `client_config.py`. You can use public resolvers from Google (`8.8.8.8`, `8.8.4.4`), Cloudflare (`1.1.1.1`, `1.0.0.1`), Quad9 (`9.9.9.9`), OpenDNS (`208.67.222.222`, `208.67.220.220`), and others.
+1. **Collect as many DNS resolver IP addresses as possible.** Add them all to `RESOLVER_DNS_SERVERS` in `client_config.toml`. You can use public resolvers from Google (`8.8.8.8`, `8.8.4.4`), Cloudflare (`1.1.1.1`, `1.0.0.1`), Quad9 (`9.9.9.9`), OpenDNS (`208.67.222.222`, `208.67.220.220`), and others.
 
-2. **Increase `PACKET_DUPLICATION_COUNT`** in `client_config.py`. This parameter controls how many different resolver+domain paths each packet is sent through **simultaneously**.
+2. **Increase `PACKET_DUPLICATION_COUNT`** in `client_config.toml`. This parameter controls how many different resolver+domain paths each packet is sent through **simultaneously**.
 
    - With 6 resolvers and 2 domains, you have **12 potential paths**.
    - Setting `PACKET_DUPLICATION_COUNT = 6` means every packet is sent across 6 different paths at once.
@@ -163,6 +153,46 @@ The client starts a local SOCKS5 proxy on `127.0.0.1:1080` (configurable via `LI
    > ⚠️ **Trade-off:** Higher duplication increases bandwidth usage and CPU load proportionally. A value of `3`–`6` is a good balance during disruptions. The ARQ layer on the server automatically deduplicates received copies so your application only sees each packet once.
 
 3. **Add multiple tunnel domains** (`DOMAINS` list) to further multiply the number of available paths.
+
+---
+
+## ⚙️ Configuration Reference
+
+### 🖥️ Server — `server_config.toml`
+
+> 🔑 The encryption key is **auto-generated** on first run and saved to `encrypt_key.txt` next to the server executable. It is also printed in the server log. Copy it to the client's `ENCRYPTION_KEY` field. Delete `encrypt_key.txt` and restart to rotate the key.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `LOG_LEVEL` | `"INFO"` | Logging verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` |
+| `UDP_HOST` | `"0.0.0.0"` | IP address the DNS/UDP server binds to. `"0.0.0.0"` = all interfaces. |
+| `UDP_PORT` | `53` | UDP port for the DNS server. Port `53` (standard DNS) requires root/admin privileges. |
+| `DOMAIN` | `["t.example.com"]` | Tunnel domain(s) this server accepts. Must match the client's `DOMAINS` list. |
+| `DATA_ENCRYPTION_METHOD` | `1` | Encryption algorithm. **Must match the client.** `0`=None, `1`=XOR, `2`=ChaCha20, `3`=AES-128-CTR, `4`=AES-192-CTR, `5`=AES-256-CTR |
+| `SESSION_TIMEOUT` | `300` | Inactivity time (seconds) before a client session expires. |
+| `SESSION_CLEANUP_INTERVAL` | `60` | Interval (seconds) at which expired sessions are removed. |
+| `FORWARD_IP` | `"127.0.0.1"` | IP of the local proxy/service that decrypted traffic is forwarded to. |
+| `FORWARD_PORT` | `8080` | Port of the local proxy/service (e.g. `1080` for SOCKS5, `443` for VLESS). |
+
+### 💻 Client — `client_config.toml`
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `LOG_LEVEL` | `"INFO"` | Logging verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` |
+| `RESOLVER_DNS_SERVERS` | `["8.8.8.8"]` | Public DNS resolvers that tunnel queries are forwarded through. Add multiple for redundancy and load balancing. |
+| `MIN_UPLOAD_MTU` | `40` | Minimum upload MTU (bytes) a resolver must achieve to be used. Set to `0` to disable. |
+| `MIN_DOWNLOAD_MTU` | `40` | Minimum download MTU (bytes) a resolver must achieve to be used. Set to `0` to disable. |
+| `MAX_UPLOAD_MTU` | `160` | Upper bound (bytes) for upload MTU auto-probing. |
+| `MAX_DOWNLOAD_MTU` | `200` | Upper bound (bytes) for download MTU auto-probing. |
+| `RESOLVER_BALANCING_STRATEGY` | `1` | Load-balancing strategy across resolvers: `1`=Random, `2`=Round-Robin, `3`=Least-Loss |
+| `DOMAINS` | `["t.example.com"]` | Tunnel domain(s) pointing to your server via NS records. Add multiple for multi-path redundancy. |
+| `DATA_ENCRYPTION_METHOD` | `1` | Encryption algorithm. **Must match the server.** `0`=None, `1`=XOR, `2`=ChaCha20, `3`=AES-128-CTR, `4`=AES-192-CTR, `5`=AES-256-CTR |
+| `ENCRYPTION_KEY` | `""` | Key from the server's `encrypt_key.txt` or first-run log. Must match the server. |
+| `DNS_QUERY_TIMEOUT` | `5` | Seconds to wait for a DNS response before considering a query failed. |
+| `LISTEN_IP` | `"127.0.0.1"` | Local IP the SOCKS5 proxy listens on. |
+| `LISTEN_PORT` | `1080` | Local port for the SOCKS5 proxy. Point your application to this address. |
+| `NUM_DNS_WORKERS` | `4` | Number of concurrent async DNS worker tasks. Increase for higher traffic. |
+| `PACKET_DUPLICATION_COUNT` | `3` | How many resolver+domain paths each packet is sent through simultaneously. Higher = more reliable but more bandwidth. |
 
 ---
 

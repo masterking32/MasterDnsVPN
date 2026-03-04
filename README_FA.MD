@@ -46,7 +46,42 @@
 
 ## 🚀 نصب و اجرا
 
-### 1. نصب وابستگی‌ها
+### گزینه الف: دانلود فایل اجرایی آماده (پیشنهادی)
+
+بدون نیاز به نصب پایتون، می‌توانید آخرین نسخهٔ باینری آماده را برای سیستم‌عامل خود دانلود کنید:
+
+**دانلود کلاینت:**
+
+| سیستم‌عامل | دانلود |
+|------------|--------|
+| 🪟 ویندوز (AMD64) | [MasterDnsVPN_Client_Windows_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Windows_AMD64.zip) |
+| 🐧 لینوکس (AMD64) | [MasterDnsVPN_Client_Linux_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Linux_AMD64.zip) |
+| 🍎 مک‌اواس (ARM64) | [MasterDnsVPN_Client_MacOS_ARM64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_MacOS_ARM64.zip) |
+
+**دانلود سرور:**
+
+| سیستم‌عامل | دانلود |
+|------------|--------|
+| 🪟 ویندوز (AMD64) | [MasterDnsVPN_Server_Windows_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Windows_AMD64.zip) |
+| 🐧 لینوکس (AMD64) | [MasterDnsVPN_Server_Linux_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Linux_AMD64.zip) |
+| 🍎 مک‌اواس (ARM64) | [MasterDnsVPN_Server_MacOS_ARM64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_MacOS_ARM64.zip) |
+
+هر فایل ZIP کلاینت شامل فایل اجرایی و یک فایل قالب `client_config.toml` است. هر فایل ZIP سرور شامل فایل اجرایی و یک فایل قالب `server_config.toml` است.
+
+**مراحل:**
+
+1. فایل ZIP را استخراج کنید.
+2. فایل `client_config.toml` را در یک ویرایشگر متنی باز کرده و مقادیر زیر را تنظیم کنید:
+   - `ENCRYPTION_KEY` — از لاگ سرور در اولین اجرا کپی کنید.
+   - `DOMAINS` — زیردامنهٔ تونل شما (مثلاً `v.example.com`).
+   - `RESOLVER_DNS_SERVERS` — رزولورهای عمومی DNS (مثلاً `8.8.8.8`).
+3. فایل `client_config.toml` را در **همان پوشه** فایل اجرایی قرار داده و برنامه را اجرا کنید.
+
+---
+
+### گزینه ب: اجرا از سورس
+
+#### 1. نصب وابستگی‌ها
 
 ریپازیتوری را کلون کرده و بسته‌های موردنیاز را نصب کنید:
 
@@ -56,66 +91,20 @@ cd MasterDnsVPN
 pip install -r requirements.txt
 ```
 
-#### 🔌 نصب آفلاین (سرور بدون دسترسی به اینترنت)
-
-اگر **سرور شما به اینترنت دسترسی ندارد** و نمی‌توانید مستقیماً `pip install` اجرا کنید، مراحل زیر را روی یک دستگاه که **به اینترنت وصل است** انجام دهید:
-
-**مرحله ۱ — دانلود نصب‌کننده پایتون (در صورتی که پایتون روی سرور نصب نیست):**
-```bash
-# روی دستگاه متصل به اینترنت، نصب‌کننده لینوکس پایتون را دانلود کنید
-wget https://www.python.org/ftp/python/3.11.9/Python-3.11.9.tgz
-# فایل را از طریق scp، USB یا هر روش دیگری به سرور آفلاین منتقل کنید
-scp Python-3.11.9.tgz user@your-server:/tmp/
-```
-
-**مرحله ۲ — نصب پایتون از سورس روی سرور آفلاین:**
-```bash
-# روی سرور آفلاین
-cd /tmp
-tar xzf Python-3.11.9.tgz
-cd Python-3.11.9
-./configure --enable-optimizations
-make -j$(nproc)
-sudo make altinstall
-# تأیید نصب
-python3.11 --version
-```
-
-**مرحله ۳ — دانلود پکیج‌های pip روی دستگاه متصل به اینترنت:**
-```bash
-# روی دستگاه متصل به اینترنت
-mkdir pip_packages
-pip download -r requirements.txt -d ./pip_packages
-# پوشه را به سرور آفلاین منتقل کنید
-scp -r pip_packages user@your-server:/tmp/
-```
-
-**مرحله ۴ — نصب پکیج‌ها از پوشه دانلود‌شده روی سرور آفلاین:**
-```bash
-# روی سرور آفلاین
-pip install --no-index --find-links=/tmp/pip_packages -r requirements.txt
-```
-
-> 💡 مطمئن شوید که نسخه پایتون و معماری سیستم‌عامل هر دو دستگاه یکسان است (مثلاً هر دو Linux x86_64) تا فایل‌های wheel دانلود‌شده سازگار باشند.
-
----
-
-### 2. پیکربندی سرور
+#### 2. پیکربندی سرور
 
 نمونهٔ پیکربندی را کپی کنید:
 
 ```bash
-cp server_config.py.simple server_config.py
+cp server_config.toml.simple server_config.toml
 ```
 
-فایل `server_config.py` را ویرایش کنید:
-- یک پروکسی محلی (مثلاً SOCKS5، VLESS، VMESS، SSH، MTProto، OpenVPN TCP و غیره) روی سرور نصب کنید تا ترافیک را به اینترنت هدایت کند.
-- مقدار `FORWARD_IP` و `FORWARD_PORT` را در `server_config.py` به آدرس پروکسی تنظیم کنید.
-- مقدار `DOMAIN` را هم‌راستا با زیردامنه‌ای که در رکوردهای DNS تعریف کردید تنظیم کنید (مثلاً `v.example.com`). می‌توانید چندین دامنه برای redundancy اضافه کنید.
-- مقدار `UDP_HOST` را برای دریافت روی همه رابط‌ها `"0.0.0.0"` تنظیم کنید.
-- بعد از اولین اجرا، مقادیر MTU بهینه برای دانلود و آپلود را یادداشت کنید و سپس `MAX_UPLOAD_MTU` و `MAX_DOWNLOAD_MTU` را تنظیم کنید. این کار سرعت اجرای‌های بعدی را به‌طور قابل‌توجهی افزایش می‌دهد.
+فایل `server_config.toml` را ویرایش کنید تا دامنه و آدرس/پورت فوروارد محلی را تنظیم نمایید.
+- یک پروکسی محلی (مثلاً SOCKS5، VLESS، VMESS, SSH, MTProto, OpenVPN TCP و غیره) روی سرور نصب کنید تا ترافیک را به اینترنت هدایت کند.
+- مقدار `FORWARD_IP` و `FORWARD_PORT` را در `server_config.toml` به آدرس پروکسی تنظیم کنید.
+- مقدار `DOMAIN` را هم‌راستا با زیردامنه‌ای که در رکوردهای DNS تعریف کردید تنظیم کنید (مثلاً `v.example.com`).
 
-### 3. اجرای سرور
+#### 3. اجرای سرور
 
 ```bash
 python server.py
@@ -123,22 +112,21 @@ python server.py
 
 در اجرای اول، سرور یک کلید رمزنگاری تولید خواهد کرد؛ این کلید را **ذخیره کنید** زیرا برای پیکربندی کلاینت لازم است.
 
-### 4. پیکربندی کلاینت
+#### 4. پیکربندی کلاینت
 
 نمونهٔ پیکربندی کلاینت را کپی کنید:
 
 ```bash
-cp client_config.py.simple client_config.py
+cp client_config.toml.simple client_config.toml
 ```
 
-فایل `client_config.py` را تنظیم کنید:
+فایل `client_config.toml` را تنظیم کنید:
 
-- **`DOMAINS`**: زیردامنهٔ تونل شما (مثلاً `v.example.com`). برای redundancy چندین دامنه اضافه کنید.
-- **`ENCRYPTION_KEY`**: کلیدی که سرور در اولین اجرا نمایش داده است.
-- **`RESOLVER_DNS_SERVERS`**: لیست رزولورهای عمومی DNS (مثلاً `8.8.8.8`, `1.1.1.1`, `9.9.9.9`). هرچه بیشتر باشد بهتر است.
-- **`PACKET_DUPLICATION_COUNT`**: تعداد مسیرهای resolver+domain که هر پکت به‌طور همزمان از آن‌ها ارسال می‌شود (به نکته اضطراری زیر توجه کنید).
+- مقدار `DOMAINS`: زیردامنهٔ تونل شما (مثلاً `v.example.com`).
+- مقدار `ENCRYPTION_KEY`: کلیدی که سرور در لاگ نمایش داده است.
+- مقدار `RESOLVER_DNS_SERVERS`: لیست رزولورهای عمومی DNS (مثلاً `8.8.8.8`, `1.1.1.1`).
 
-### 5. اجرای کلاینت
+#### 5. اجرای کلاینت
 
 ```bash
 python client.py
@@ -152,7 +140,7 @@ python client.py
 
 > **وقتی شبکه به طور کامل قطع است و فقط DNS کار می‌کند (اختلال و packet loss بسیار زیاد):**
 
-1. **تا جایی که می‌توانید DNS resolver پیدا کنید** و همه را به `RESOLVER_DNS_SERVERS` در `client_config.py` اضافه کنید. از رزولورهای عمومی Google (`8.8.8.8`، `8.8.4.4`)، Cloudflare (`1.1.1.1`، `1.0.0.1`)، Quad9 (`9.9.9.9`)، OpenDNS (`208.67.222.222`، `208.67.220.220`) و دیگران استفاده کنید.
+1. **تا جایی که می‌توانید DNS resolver پیدا کنید** و همه را به `RESOLVER_DNS_SERVERS` در `client_config.toml` اضافه کنید. از رزولورهای عمومی Google (`8.8.8.8`، `8.8.4.4`)، Cloudflare (`1.1.1.1`، `1.0.0.1`)، Quad9 (`9.9.9.9`)، OpenDNS (`208.67.222.222`، `208.67.220.220`) و دیگران استفاده کنید.
 
 2. **مقدار `PACKET_DUPLICATION_COUNT` را افزایش دهید.** این پارامتر تعداد مسیرهای resolver+domain مختلفی را که هر پکت **به‌طور همزمان** از آن‌ها ارسال می‌شود کنترل می‌کند.
 
@@ -163,6 +151,46 @@ python client.py
    > ⚠️ **هزینه:** duplication بیشتر به‌نسبت مصرف پهنای باند و CPU را افزایش می‌دهد. مقدار `3` تا `6` در زمان قطعی تعادل خوبی ایجاد می‌کند. لایه ARQ روی سرور نسخه‌های تکراری دریافت‌شده را به‌طور خودکار حذف می‌کند تا برنامه شما هر پکت را فقط یک‌بار ببیند.
 
 3. **چندین دامنه تونل اضافه کنید** (لیست `DOMAINS`) تا تعداد مسیرهای موجود بیشتر شود.
+
+---
+
+## ⚙️ مرجع پیکربندی
+
+### 🖥️ سرور — `server_config.toml`
+
+> 🔑 کلید رمزنگاری در **اولین اجرا به‌صورت خودکار** تولید شده و در فایل `encrypt_key.txt` در کنار فایل اجرایی سرور ذخیره می‌شود. این کلید در لاگ سرور نیز نمایش داده می‌شود. آن را در فیلد `ENCRYPTION_KEY` کلاینت قرار دهید. برای چرخش کلید، فایل `encrypt_key.txt` را حذف کرده و سرور را مجدداً راه‌اندازی کنید.
+
+| پارامتر | مقدار پیش‌فرض | توضیح |
+|---------|--------------|-------|
+| `LOG_LEVEL` | `"INFO"` | سطح لاگ‌گیری: `DEBUG`، `INFO`، `WARNING`، `ERROR`، `CRITICAL` |
+| `UDP_HOST` | `"0.0.0.0"` | آدرس IP که سرور DNS/UDP روی آن گوش می‌دهد. `"0.0.0.0"` = همه رابط‌ها. |
+| `UDP_PORT` | `53` | پورت UDP سرور DNS. پورت `53` (DNS استاندارد) نیاز به دسترسی root/admin دارد. |
+| `DOMAIN` | `["t.example.com"]` | دامنه(های) تونل که سرور می‌پذیرد. باید با لیست `DOMAINS` کلاینت مطابقت داشته باشد. |
+| `DATA_ENCRYPTION_METHOD` | `1` | الگوریتم رمزنگاری. **باید با کلاینت یکسان باشد.** `0`=بدون رمزنگاری، `1`=XOR، `2`=ChaCha20، `3`=AES-128-CTR، `4`=AES-192-CTR، `5`=AES-256-CTR |
+| `SESSION_TIMEOUT` | `300` | مدت زمان بی‌فعالیت (ثانیه) قبل از انقضای نشست کلاینت. |
+| `SESSION_CLEANUP_INTERVAL` | `60` | بازه زمانی (ثانیه) برای پاکسازی نشست‌های منقضی‌شده. |
+| `FORWARD_IP` | `"127.0.0.1"` | آدرس IP پروکسی/سرویس محلی که ترافیک رمزگشایی‌شده به آن ارسال می‌شود. |
+| `FORWARD_PORT` | `8080` | پورت پروکسی/سرویس محلی (مثلاً `1080` برای SOCKS5، `443` برای VLESS). |
+
+### 💻 کلاینت — `client_config.toml`
+
+| پارامتر | مقدار پیش‌فرض | توضیح |
+|---------|--------------|-------|
+| `LOG_LEVEL` | `"INFO"` | سطح لاگ‌گیری: `DEBUG`، `INFO`، `WARNING`، `ERROR`، `CRITICAL` |
+| `RESOLVER_DNS_SERVERS` | `["8.8.8.8"]` | رزولورهای عمومی DNS که کوئری‌های تونل به آن‌ها ارسال می‌شوند. برای افزایش پشتیبانی، چندین رزولور اضافه کنید. |
+| `MIN_UPLOAD_MTU` | `40` | حداقل MTU آپلود (بایت) که یک رزولور باید داشته باشد. برای غیرفعال کردن `0` قرار دهید. |
+| `MIN_DOWNLOAD_MTU` | `40` | حداقل MTU دانلود (بایت) که یک رزولور باید داشته باشد. برای غیرفعال کردن `0` قرار دهید. |
+| `MAX_UPLOAD_MTU` | `160` | حد بالای (بایت) کاوش خودکار MTU آپلود. |
+| `MAX_DOWNLOAD_MTU` | `200` | حد بالای (بایت) کاوش خودکار MTU دانلود. |
+| `RESOLVER_BALANCING_STRATEGY` | `1` | استراتژی توزیع بار: `1`=تصادفی، `2`=Round-Robin، `3`=کمترین‌تلفات |
+| `DOMAINS` | `["t.example.com"]` | دامنه(های) تونل که از طریق رکورد NS به سرور اشاره دارند. برای افزایش مسیرها چندین دامنه اضافه کنید. |
+| `DATA_ENCRYPTION_METHOD` | `1` | الگوریتم رمزنگاری. **باید با سرور یکسان باشد.** `0`=بدون رمزنگاری، `1`=XOR، `2`=ChaCha20، `3`=AES-128-CTR، `4`=AES-192-CTR، `5`=AES-256-CTR |
+| `ENCRYPTION_KEY` | `""` | کلیدی که از فایل `encrypt_key.txt` سرور یا لاگ اولین اجرا کپی می‌شود. باید با سرور یکسان باشد. |
+| `DNS_QUERY_TIMEOUT` | `5` | ثانیه‌های انتظار برای دریافت پاسخ DNS قبل از در نظر گرفتن کوئری به‌عنوان ناموفق. |
+| `LISTEN_IP` | `"127.0.0.1"` | آدرس IP محلی که پروکسی SOCKS5 روی آن گوش می‌دهد. |
+| `LISTEN_PORT` | `1080` | پورت محلی پروکسی SOCKS5. برنامه خود را به این آدرس هدایت کنید. |
+| `NUM_DNS_WORKERS` | `4` | تعداد وظایف async DNS موازی. برای ترافیک بالاتر افزایش دهید. |
+| `PACKET_DUPLICATION_COUNT` | `3` | تعداد مسیرهای resolver+domain که هر پکت به‌طور همزمان از آن‌ها ارسال می‌شود. بیشتر = قابل‌اطمینان‌تر اما پهنای باند بیشتر. |
 
 ---
 
