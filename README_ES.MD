@@ -51,13 +51,23 @@ Para que el túnel sea funcional, debe ser propietario de un dominio y configura
 
 Puede descargar el binario precompilado más reciente para su plataforma, sin necesidad de instalar Python.
 
+**Descargas del cliente:**
+
 | Plataforma | Descarga |
 |------------|----------|
 | 🪟 Windows (AMD64) | [MasterDnsVPN_Client_Windows_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Windows_AMD64.zip) |
 | 🐧 Linux (AMD64) | [MasterDnsVPN_Client_Linux_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Linux_AMD64.zip) |
 | 🍎 macOS (ARM64) | [MasterDnsVPN_Client_MacOS_ARM64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_MacOS_ARM64.zip) |
 
-Cada archivo ZIP contiene el ejecutable y una plantilla de configuración `client_config.toml`.
+**Descargas del servidor:**
+
+| Plataforma | Descarga |
+|------------|----------|
+| 🪟 Windows (AMD64) | [MasterDnsVPN_Server_Windows_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Windows_AMD64.zip) |
+| 🐧 Linux (AMD64) | [MasterDnsVPN_Server_Linux_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Linux_AMD64.zip) |
+| 🍎 macOS (ARM64) | [MasterDnsVPN_Server_MacOS_ARM64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_MacOS_ARM64.zip) |
+
+Cada archivo ZIP del cliente contiene el ejecutable y una plantilla de configuración `client_config.toml`. Cada archivo ZIP del servidor contiene el ejecutable y una plantilla de configuración `server_config.toml`.
 
 **Pasos:**
 
@@ -132,9 +142,9 @@ El cliente inicia un proxy SOCKS5 local en `127.0.0.1:1080` (configurable median
 
 > **Cuando la red está casi completamente caída y solo las consultas DNS están llegando (pérdida de paquetes y disrupciones extremas):**
 
-1. **Recopile tantas IPs de resolvedores DNS como sea posible.** Agréguelas todas a `RESOLVER_DNS_SERVERS` en `client_config.py`. Puede usar resolvedores públicos de Google (`8.8.8.8`, `8.8.4.4`), Cloudflare (`1.1.1.1`, `1.0.0.1`), Quad9 (`9.9.9.9`), OpenDNS (`208.67.222.222`, `208.67.220.220`) y otros.
+1. **Recopile tantas IPs de resolvedores DNS como sea posible.** Agréguelas todas a `RESOLVER_DNS_SERVERS` en `client_config.toml`. Puede usar resolvedores públicos de Google (`8.8.8.8`, `8.8.4.4`), Cloudflare (`1.1.1.1`, `1.0.0.1`), Quad9 (`9.9.9.9`), OpenDNS (`208.67.222.222`, `208.67.220.220`) y otros.
 
-2. **Aumente `PACKET_DUPLICATION_COUNT`** en `client_config.py`. Este parámetro controla cuántas rutas resolver+dominio diferentes usa cada paquete **simultáneamente**.
+2. **Aumente `PACKET_DUPLICATION_COUNT`** en `client_config.toml`. Este parámetro controla cuántas rutas resolver+dominio diferentes usa cada paquete **simultáneamente**.
 
    - Con 6 resolvedores y 2 dominios, tendrá **12 rutas potenciales**.
    - Configurar `PACKET_DUPLICATION_COUNT = 6` significa que cada paquete se envía por 6 rutas diferentes a la vez.
@@ -214,7 +224,7 @@ sequenceDiagram
     DNS1->>Server: Reenviar (NS autoritativo para dominio A)
     DNS2->>Server: Reenviar (NS autoritativo para dominio B)
 
-    Note over Server: ARQ desduplicates copias de seq#5
+    Note over Server: ARQ deduplica las copias de seq#5
     Note over Server: Reordenar paquetes fuera de secuencia
     Note over Server: Descifrar y reensamblar flujo
 

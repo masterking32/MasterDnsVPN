@@ -51,13 +51,23 @@ To make the tunnel functional, you must own a domain and configure the following
 
 You can download the latest pre-built binary for your platform — no Python installation required.
 
+**Client Downloads:**
+
 | Platform | Download |
 |----------|----------|
 | 🪟 Windows (AMD64) | [MasterDnsVPN_Client_Windows_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Windows_AMD64.zip) |
 | 🐧 Linux (AMD64) | [MasterDnsVPN_Client_Linux_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Linux_AMD64.zip) |
 | 🍎 macOS (ARM64) | [MasterDnsVPN_Client_MacOS_ARM64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_MacOS_ARM64.zip) |
 
-Each ZIP archive contains the executable and a `client_config.toml` template file.
+**Server Downloads:**
+
+| Platform | Download |
+|----------|----------|
+| 🪟 Windows (AMD64) | [MasterDnsVPN_Server_Windows_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Windows_AMD64.zip) |
+| 🐧 Linux (AMD64) | [MasterDnsVPN_Server_Linux_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Linux_AMD64.zip) |
+| 🍎 macOS (ARM64) | [MasterDnsVPN_Server_MacOS_ARM64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_MacOS_ARM64.zip) |
+
+Each client ZIP contains the executable and a `client_config.toml` template file. Each server ZIP contains the executable and a `server_config.toml` template file.
 
 **Steps:**
 
@@ -132,9 +142,9 @@ The client starts a local SOCKS5 proxy on `127.0.0.1:1080` (configurable via `LI
 
 > **When the network is almost completely down and only DNS queries are getting through (extremely high packet loss and disruption):**
 
-1. **Collect as many DNS resolver IP addresses as possible.** Add them all to `RESOLVER_DNS_SERVERS` in `client_config.py`. You can use public resolvers from Google (`8.8.8.8`, `8.8.4.4`), Cloudflare (`1.1.1.1`, `1.0.0.1`), Quad9 (`9.9.9.9`), OpenDNS (`208.67.222.222`, `208.67.220.220`), and others.
+1. **Collect as many DNS resolver IP addresses as possible.** Add them all to `RESOLVER_DNS_SERVERS` in `client_config.toml`. You can use public resolvers from Google (`8.8.8.8`, `8.8.4.4`), Cloudflare (`1.1.1.1`, `1.0.0.1`), Quad9 (`9.9.9.9`), OpenDNS (`208.67.222.222`, `208.67.220.220`), and others.
 
-2. **Increase `PACKET_DUPLICATION_COUNT`** in `client_config.py`. This parameter controls how many different resolver+domain paths each packet is sent through **simultaneously**.
+2. **Increase `PACKET_DUPLICATION_COUNT`** in `client_config.toml`. This parameter controls how many different resolver+domain paths each packet is sent through **simultaneously**.
 
    - With 6 resolvers and 2 domains, you have **12 potential paths**.
    - Setting `PACKET_DUPLICATION_COUNT = 6` means every packet is sent across 6 different paths at once.
