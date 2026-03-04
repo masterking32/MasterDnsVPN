@@ -31,11 +31,17 @@ class ARQStream:
         self.rcv_buf = {}  # SN -> bytes (out-of-order received data)
 
         self.last_activity = time.time()  # Timestamp of last send/receive activity
-        self.rto = 1.5  # Retransmission Timeout (initially 1 second)
+        self.rto = 2.0  # Retransmission Timeout (initially 1 second)
         self.closed = False  # Stream closed flag
         self.logger = logger  # Optional logger for debug/info messages
         self._write_lock = asyncio.Lock()  # Ensure ordered writes to the TCP stream
         self._snd_lock = asyncio.Lock()  # Lock for snd_buf access
+
+        self.window_size = (
+            256  # Maximum number of unacknowledged packets allowed in flight
+        )
+        self.window_not_full = asyncio.Event()
+        self.window_not_full.set()
 
         try:
             loop = asyncio.get_running_loop()
@@ -47,6 +53,8 @@ class ARQStream:
     async def _io_loop(self):
         try:
             while not self.closed:
+                await self.window_not_full.wait()
+
                 try:
                     raw_data = await self.reader.read(self.mtu)
                 except asyncio.CancelledError:
@@ -72,6 +80,9 @@ class ARQStream:
                         "retries": 0,
                     }
 
+                if len(self.snd_buf) >= self.window_size:
+                    self.window_not_full.clear()
+
                 await self.enqueue_tx(3, self.stream_id, sn, raw_data)
         except asyncio.CancelledError:
             pass
@@ -91,43 +102,27 @@ class ARQStream:
 
         self.last_activity = time.time()
 
-        diff = (sn - self.rcv_nxt) % 65536
-        if diff > 32768:
-            return  # Old packet, already processed
+        diff = (self.rcv_nxt - sn) % 65536
+        if diff < 32768 and sn != self.rcv_nxt:
+            await self.enqueue_tx(4, self.stream_id, sn, b"", is_ack=True)
+            return
 
-        if sn in self.rcv_buf:
-            return  # Duplicate packet, already buffered
+        if sn not in self.rcv_buf:
+            self.rcv_buf[sn] = data
 
-        self.rcv_buf[sn] = data
+        while self.rcv_nxt in self.rcv_buf:
+            ordered_data = self.rcv_buf.pop(self.rcv_nxt)
+            try:
+                self.writer.write(ordered_data)
+                await self.writer.drain()
+            except Exception as e:
+                self.logger.error(f"[ARQ-{self.stream_id}] Writer Error: {e}")
+                await self.close(reason="Writer Error")
+                break
 
-        async with self._write_lock:
-            while self.rcv_nxt in self.rcv_buf:
-                chunk = self.rcv_buf.pop(self.rcv_nxt)
-                current_sn = self.rcv_nxt
+            self.rcv_nxt = (self.rcv_nxt + 1) % 65536
 
-                self.rcv_nxt = (self.rcv_nxt + 1) % 65536
-
-                try:
-                    if self.writer:
-                        self.writer.write(chunk)
-                        await self.writer.drain()
-                        await self.enqueue_tx(
-                            4, self.stream_id, current_sn, b"", is_ack=True
-                        )
-                    else:
-                        if self.logger:
-                            self.logger.debug(
-                                f"ARQ-{self.stream_id}: no writer to write data"
-                            )
-                        await self.close(reason="No writer")
-                        break
-                except Exception as e:
-                    if self.logger:
-                        self.logger.error(
-                            f"<red>[ARQ-{self.stream_id}] TCP Write Error: {e}</red>"
-                        )
-                    await self.close(reason="Local TCP Write Error")
-                    break
+        await self.enqueue_tx(4, self.stream_id, sn, b"", is_ack=True)
 
     async def receive_ack(self, sn):
         self.last_activity = time.time()
@@ -135,6 +130,9 @@ class ARQStream:
             if sn not in self.snd_buf:
                 return
             _ = self.snd_buf.pop(sn)
+
+            if len(self.snd_buf) < self.window_size:
+                self.window_not_full.set()
 
     async def check_retransmits(self):
         if self.closed or not self.snd_buf:

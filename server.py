@@ -244,6 +244,11 @@ class MasterDnsVPNServer:
             ].get("streams", {}):
                 stream = self.sessions[session_id]["streams"][stream_id]
                 if stream != "PENDING":
+                    if sn < stream.rcv_nxt and (stream.rcv_nxt - sn) < 32768:
+                        await self._server_enqueue_tx(
+                            session_id, 4, stream_id, sn, b"", is_ack=True
+                        )
+
                     if extracted_data:
                         await stream.receive_data(sn, extracted_data)
                     else:

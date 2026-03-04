@@ -908,64 +908,72 @@ class MasterDnsVPNClient:
         )
 
     async def _tx_worker(self):
-        self.logger.debug("<magenta>[TX]</magenta> TX Worker started.")
+        self.logger.debug(
+            "<magenta>[TX]</magenta> TX Worker started with parallel sending."
+        )
         while not self.should_stop.is_set():
-            self.ping_manager.active_connections = len(self.active_streams)
+            tasks = []
+            for _ in range(10):
+                if self.outbound_queue.empty():
+                    break
+                try:
+                    item = self.outbound_queue.get_nowait()
+                    tasks.append(self._send_single_packet(item))
+                except asyncio.QueueEmpty:
+                    break
 
-            try:
-                priority, _, pkt_type, stream_id, sn, data = await asyncio.wait_for(
-                    self.outbound_queue.get(), timeout=1.0
+            if tasks:
+                await asyncio.gather(*tasks)
+            else:
+                await asyncio.sleep(0.01)
+
+    async def _send_single_packet(self, item):
+        self.ping_manager.active_connections = len(self.active_streams)
+
+        priority, _, pkt_type, stream_id, sn, data = item
+
+        self.ping_manager.update_activity()
+        if stream_id not in self.active_streams:
+            return
+
+        now = self.loop.time()
+        self.active_streams[stream_id]["last_activity_time"] = now
+        try:
+            data_encrypted = (
+                self.dns_packet_parser.codec_transform(data, encrypt=True)
+                if data
+                else b""
+            )
+
+            target_conns = self.balancer.get_unique_servers(self.packet_duplication)
+            if not target_conns:
+                return
+
+            for conn in target_conns:
+                query_packets = await self.dns_packet_parser.build_request_dns_query(
+                    domain=conn["domain"],
+                    session_id=self.session_id,
+                    packet_type=pkt_type,
+                    data=data_encrypted,
+                    mtu_chars=self.synced_upload_mtu_chars,
+                    encode_data=True,
+                    qType=DNS_Record_Type.TXT,
+                    stream_id=stream_id,
+                    sequence_num=sn,
                 )
 
-                self.ping_manager.update_activity()
-                if stream_id not in self.active_streams:
-                    continue
+                if not query_packets:
+                    return
 
-                now = self.loop.time()
-                self.active_streams[stream_id]["last_activity_time"] = now
-            except asyncio.TimeoutError:
-                continue
-
-            try:
-                data_encrypted = (
-                    self.dns_packet_parser.codec_transform(data, encrypt=True)
-                    if data
-                    else b""
-                )
-
-                target_conns = self.balancer.get_unique_servers(self.packet_duplication)
-                if not target_conns:
-                    continue
-
-                for conn in target_conns:
-                    query_packets = (
-                        await self.dns_packet_parser.build_request_dns_query(
-                            domain=conn["domain"],
-                            session_id=self.session_id,
-                            packet_type=pkt_type,
-                            data=data_encrypted,
-                            mtu_chars=self.synced_upload_mtu_chars,
-                            encode_data=True,
-                            qType=DNS_Record_Type.TXT,
-                            stream_id=stream_id,
-                            sequence_num=sn,
-                        )
+                for query_packet in query_packets:
+                    await async_sendto(
+                        self.loop,
+                        self.tunnel_sock,
+                        query_packet,
+                        (conn["resolver"], 53),
                     )
-
-                    if not query_packets:
-                        continue
-
-                    for query_packet in query_packets:
-                        await async_sendto(
-                            self.loop,
-                            self.tunnel_sock,
-                            query_packet,
-                            (conn["resolver"], 53),
-                        )
-            except Exception as e:
-                self.logger.debug(
-                    f"TX Worker error during packet building/sending: {e}"
-                )
+        except Exception as e:
+            self.logger.debug(f"TX Worker error during packet building/sending: {e}")
 
     async def _handle_server_response(self, header, data):
         ptype = header["packet_type"]

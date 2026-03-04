@@ -115,4 +115,4 @@ class master_dns_vpn_config:
     # The number of times each packet will be duplicated and sent to the server.
     # This can help improve reliability in networks with high packet loss but may increase bandwidth usage.
     # Set to 1 for no duplication, or increase to 2 or more for better reliability at the cost of increased bandwidth.
-    PACKET_DUPLICATION_COUNT = 1
+    PACKET_DUPLICATION_COUNT = 3
