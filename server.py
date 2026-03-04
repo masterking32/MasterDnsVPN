@@ -88,9 +88,6 @@ class MasterDnsVPNServer:
         return session_id in self.sessions
 
     async def close_inactive_sessions(self, timeout: int = 300) -> None:
-        """
-        Close sessions that have been inactive for a specified timeout (seconds).
-        """
         current_time = asyncio.get_event_loop().time()
         inactive_sessions = [
             session_id
@@ -101,9 +98,26 @@ class MasterDnsVPNServer:
             session = self.sessions.get(session_id)
             if session:
                 streams = session.get("streams", {})
-                for stream in list(streams.values()):
-                    if stream != "PENDING":
-                        await stream.close(reason="Session Cleanup")
+                for sid, stream in list(streams.items()):
+                    if stream == "PENDING":
+                        streams.pop(sid, None)
+                        continue
+                    stream._fin_sent = True
+                    stream.closed = True
+                    if (
+                        hasattr(stream, "io_task")
+                        and stream.io_task
+                        and not stream.io_task.done()
+                    ):
+                        stream.io_task.cancel()
+                    try:
+                        if stream.writer and not stream.writer.is_closing():
+                            stream.writer.close()
+                            await asyncio.wait_for(
+                                stream.writer.wait_closed(), timeout=1.0
+                            )
+                    except Exception:
+                        pass
 
             del self.sessions[session_id]
             self.logger.info(f"Closed inactive session with ID: {session_id}")
@@ -272,10 +286,21 @@ class MasterDnsVPNServer:
             stream = streams.get(stream_id)
             if stream and stream != "PENDING":
                 await self._clear_session_stream_queue(session_id, stream_id)
+                stream._fin_sent = True
+                stream.closed = True
+                if (
+                    hasattr(stream, "io_task")
+                    and stream.io_task
+                    and not stream.io_task.done()
+                ):
+                    stream.io_task.cancel()
                 try:
-                    await stream.close()
-                except Exception as _:
+                    if stream.writer and not stream.writer.is_closing():
+                        stream.writer.close()
+                        await asyncio.wait_for(stream.writer.wait_closed(), timeout=3.0)
+                except Exception:
                     pass
+                streams.pop(stream_id, None)
 
         out_queue = session.get("outbound_queue")
         stream_states = session.setdefault("stream_states", {})
@@ -754,11 +779,15 @@ class MasterDnsVPNServer:
                     sid for sid, s in streams.items() if s != "PENDING" and s.closed
                 ]
                 for sid in closed_ids:
+                    stream_obj = streams.get(sid)
                     await self._clear_session_stream_queue(session_id, sid)
 
-                    asyncio.create_task(
-                        self._server_enqueue_tx(session_id, 2, sid, 0, b"", is_fin=True)
-                    )
+                    if stream_obj and not stream_obj._fin_sent:
+                        stream_obj._fin_sent = True
+                        await self._server_enqueue_tx(
+                            session_id, 2, sid, 0, b"", is_fin=True
+                        )
+
                     streams.pop(sid, None)
 
                 for stream in list(streams.values()):
@@ -831,6 +860,32 @@ class MasterDnsVPNServer:
 
     async def stop(self) -> None:
         """Signal the server to stop."""
+        for session_id, session in list(self.sessions.items()):
+            streams = session.get("streams", {})
+            for sid, stream in list(streams.items()):
+                if stream != "PENDING":
+                    stream._fin_sent = True
+                    stream.closed = True
+                    if (
+                        hasattr(stream, "io_task")
+                        and stream.io_task
+                        and not stream.io_task.done()
+                    ):
+                        stream.io_task.cancel()
+                    try:
+                        if stream.writer and not stream.writer.is_closing():
+                            stream.writer.close()
+                    except Exception:
+                        pass
+            streams.clear()
+        self.sessions.clear()
+
+        try:
+            if getattr(self, "_retransmit_task", None):
+                self._retransmit_task.cancel()
+        except Exception:
+            pass
+
         try:
             if getattr(self, "_dns_task", None):
                 self._dns_task.cancel()
@@ -850,6 +905,7 @@ class MasterDnsVPNServer:
                     for t in (
                         getattr(self, "_dns_task", None),
                         getattr(self, "_session_cleanup_task", None),
+                        getattr(self, "_retransmit_task", None),
                     )
                     if t
                 ),
@@ -858,45 +914,14 @@ class MasterDnsVPNServer:
         except Exception:
             pass
 
-        if self.loop:
-            try:
-                self.loop.call_soon_threadsafe(self.should_stop.set)
-            except Exception:
-                try:
-                    if not self.should_stop.is_set():
-                        self.should_stop.set()
-                except Exception:
-                    pass
-
-            try:
-                self.loop.call_soon_threadsafe(self._close_udp_socket)
-            except Exception:
-                pass
-
-            try:
-                self.loop.call_soon_threadsafe(self._cancel_background_tasks)
-            except Exception:
-                pass
-
-            try:
-                self.loop.call_soon_threadsafe(self.loop.stop)
-            except Exception:
-                pass
-        else:
-            if not self.should_stop.is_set():
-                try:
-                    self.should_stop.set()
-                except Exception:
-                    pass
-
         if self.udp_sock:
             try:
                 self.udp_sock.close()
             except Exception:
                 pass
 
-        os.exit(0)
         self.logger.info("MasterDnsVPN Server stopped.")
+        os._exit(0)
 
     def _cancel_background_tasks(self) -> None:
         """Cancel background tasks from the event loop thread."""

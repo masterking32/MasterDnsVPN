@@ -821,6 +821,20 @@ class MasterDnsVPNClient:
 
             for _id, active_stream in list(self.active_streams.items()):
                 try:
+                    stream_obj = active_stream.get("stream")
+                    if stream_obj and not stream_obj.closed:
+                        stream_obj._fin_sent = True
+                        stream_obj.closed = True
+                        if (
+                            hasattr(stream_obj, "io_task")
+                            and stream_obj.io_task
+                            and not stream_obj.io_task.done()
+                        ):
+                            stream_obj.io_task.cancel()
+                except Exception:
+                    pass
+
+                try:
                     writer = active_stream.get("writer")
                     await asyncio.wait_for(
                         self._close_writer_safely(writer), timeout=3.0
@@ -975,11 +989,15 @@ class MasterDnsVPNClient:
         priority, _, pkt_type, stream_id, sn, data = item
 
         self.ping_manager.update_activity()
-        if stream_id not in self.active_streams:
-            return
 
-        now = self.loop.time()
-        self.active_streams[stream_id]["last_activity_time"] = now
+        if stream_id != 0 and pkt_type != Packet_Type.STREAM_FIN:
+            if stream_id not in self.active_streams:
+                return
+
+        if stream_id in self.active_streams:
+            now = self.loop.time()
+            self.active_streams[stream_id]["last_activity_time"] = now
+
         try:
             data_encrypted = (
                 self.dns_packet_parser.codec_transform(data, encrypt=True)
@@ -1120,15 +1138,45 @@ class MasterDnsVPNClient:
 
         elif ptype == Packet_Type.STREAM_FIN and stream_id_exists:
             self.logger.info(f"<y>Stream {stream_id} Closed by server.</y>")
-            stream = self.active_streams.pop(stream_id, None)
+            stream = self.active_streams.get(stream_id)
             if stream:
                 stream_obj = stream.get("stream")
                 if stream_obj:
-                    await stream_obj.close()
+                    stream_obj._fin_sent = True
+                    stream_obj.closed = True
+                    await self._client_enqueue_tx(1, stream_id, 0, b"", is_fin=True)
+
+                self.active_streams.pop(stream_id, None)
+                await self._clear_stream_from_queue(stream_id)
+
+                if stream_obj:
+                    if (
+                        hasattr(stream_obj, "io_task")
+                        and stream_obj.io_task
+                        and not stream_obj.io_task.done()
+                    ):
+                        stream_obj.io_task.cancel()
+                        try:
+                            await asyncio.wait_for(stream_obj.io_task, timeout=0.1)
+                        except Exception:
+                            pass
+                    try:
+                        writer_tcp = stream_obj.writer
+                        if (
+                            writer_tcp
+                            and hasattr(writer_tcp, "is_closing")
+                            and not writer_tcp.is_closing()
+                        ):
+                            writer_tcp.close()
+                            await asyncio.wait_for(
+                                writer_tcp.wait_closed(), timeout=3.0
+                            )
+                    except Exception:
+                        pass
 
                 try:
-                    writer = stream.get("writer")
-                    await self._close_writer_safely(writer)
+                    local_writer = stream.get("writer")
+                    await self._close_writer_safely(local_writer)
                 except Exception:
                     pass
 
@@ -1173,12 +1221,44 @@ class MasterDnsVPNClient:
                     self.logger.info(f"Stream {sid} closed locally. Notifying server.")
 
                 try:
+                    stream_obj = s.get("stream")
+                    fin_already_sent = False
+                    if stream_obj and getattr(stream_obj, "_fin_sent", False):
+                        fin_already_sent = True
+
+                    if not fin_already_sent:
+                        self.ping_manager.update_activity()
+                        target_conns = self.balancer.get_unique_servers(
+                            self.packet_duplication
+                        )
+                        if target_conns:
+                            for conn in target_conns:
+                                query_packets = await self.dns_packet_parser.build_request_dns_query(
+                                    domain=conn["domain"],
+                                    session_id=self.session_id,
+                                    packet_type=Packet_Type.STREAM_FIN,
+                                    data=b"",
+                                    mtu_chars=self.synced_upload_mtu_chars,
+                                    encode_data=True,
+                                    qType=DNS_Record_Type.TXT,
+                                    stream_id=sid,
+                                    sequence_num=0,
+                                )
+                                if query_packets:
+                                    for qp in query_packets:
+                                        await async_sendto(
+                                            self.loop,
+                                            self.tunnel_sock,
+                                            qp,
+                                            (conn["resolver"], 53),
+                                        )
+
                     stream_data = self.active_streams.pop(sid, None)
                     await self._clear_stream_from_queue(sid)
                     if stream_data:
                         writer = stream_data.get("writer")
                         await self._close_writer_safely(writer)
-                    await self._client_enqueue_tx(2, sid, 0, b"", is_fin=True)
+
                 except Exception as e:
                     self.logger.debug(f"Error handling dead stream {sid}: {e}")
 

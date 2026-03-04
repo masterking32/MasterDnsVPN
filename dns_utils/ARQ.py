@@ -170,12 +170,14 @@ class ARQStream:
             except Exception:
                 pass
 
+        current_task = asyncio.current_task()
         if hasattr(self, "io_task") and self.io_task and not self.io_task.done():
-            self.io_task.cancel()
-            try:
-                await asyncio.wait_for(self.io_task, timeout=0.1)
-            except Exception:
-                pass
+            if self.io_task is not current_task:
+                self.io_task.cancel()
+                try:
+                    await asyncio.wait_for(self.io_task, timeout=0.5)
+                except Exception:
+                    pass
 
         try:
             if (
