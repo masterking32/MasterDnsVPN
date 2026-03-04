@@ -92,7 +92,7 @@ class MasterDnsVPNClient:
         self.balancer = DNSBalancer(
             resolvers=self.connections_map, strategy=self.resolver_balancing_strategy
         )
-        self.ping_manager = PingManager(self.balancer, self._send_ping_packet)
+        self.ping_manager = PingManager(self._send_ping_packet)
 
         self.logger.debug("<magenta>[INIT]</magenta> MasterDnsVPNClient initialized.")
 
@@ -162,33 +162,29 @@ class MasterDnsVPNClient:
             except Exception:
                 pass
 
-    async def _send_ping_packet(self, server, is_ping=True):
-        if not is_ping or not server:
+    async def _send_ping_packet(self, payload=None):
+        """Unified function to queue PING/PULL packets with lowest priority (4) and max limit (5)."""
+        if not hasattr(self, "outbound_queue") or self.outbound_queue is None:
             return
-        dynamic_data = f"P{int(time.time() % 60)}R{random.randint(100, 999)}".encode()
+
+        ping_count = sum(
+            1 for item in self.outbound_queue._queue if item[2] == Packet_Type.PING
+        )
+
+        if ping_count >= 5:
+            return
+
+        if payload is None:
+            payload = f"P{int(time.time() % 60)}R{random.randint(100, 999)}".encode()
 
         try:
-            self.balancer.report_send(f"{server['resolver']}:{server['domain']}")
-            query_packets = await self.dns_packet_parser.build_request_dns_query(
-                domain=server["domain"],
-                session_id=self.session_id,
-                packet_type=Packet_Type.PING,
-                data=dynamic_data,
-                mtu_chars=self.synced_upload_mtu_chars,
-                encode_data=True,
-                qType=DNS_Record_Type.TXT,
-                stream_id=0,
-                sequence_num=0,
+            self.outbound_queue.put_nowait(
+                (4, self.loop.time(), Packet_Type.PING, 0, 0, payload)
             )
-            if query_packets:
-                await async_sendto(
-                    self.loop,
-                    self.tunnel_sock,
-                    query_packets[0],
-                    (server["resolver"], 53),
-                )
+        except asyncio.QueueFull:
+            pass
         except Exception as e:
-            self.logger.debug(f"Failed to send PING: {e}")
+            self.logger.debug(f"Failed to enqueue PING: {e}")
 
     async def _process_received_packet(
         self, response_bytes: bytes, addr=None
@@ -715,12 +711,12 @@ class MasterDnsVPNClient:
         await self._sleep(0.2)
         return await self._init_session(max_attempts - 1)
 
-    async def run_client(self, MTU_TEST=False) -> None:
+    async def run_client(self) -> None:
         """Run the MasterDnsVPN Client main logic."""
         self.logger.info("Setting up connections...")
         try:
             self.session_restart_event = asyncio.Event()
-            if MTU_TEST or len(self.connections_map) <= 0:
+            if not self.success_mtu_checks or len(self.connections_map) <= 0:
                 await self.create_connection_map()
 
                 if not await self.test_mtu_sizes():
@@ -728,6 +724,16 @@ class MasterDnsVPNClient:
                     return
 
                 valid_conns = [c for c in self.connections_map if c.get("is_valid")]
+
+                if not valid_conns:
+                    self.logger.error("No valid connections found after MTU testing!")
+                    return
+
+                if len(valid_conns) <= 0:
+                    self.logger.error(
+                        "No valid connections available after MTU testing!"
+                    )
+                    return
 
                 self.balancer.set_balancers(valid_conns)
 
@@ -742,6 +748,8 @@ class MasterDnsVPNClient:
                 self.logger.info(
                     f"<green>Synced Global MTU -> UP: {self.synced_upload_mtu}B, DOWN: {self.synced_download_mtu}B</green>"
                 )
+
+                self.success_mtu_checks = True
 
             selected_conn = self.balancer.get_best_server()
             if not selected_conn:
@@ -849,6 +857,9 @@ class MasterDnsVPNClient:
                 if not w.done():
                     w.cancel()
 
+            if hasattr(self, "workers") and self.workers:
+                await asyncio.gather(*self.workers, return_exceptions=True)
+
             if server:
                 try:
                     server.close()
@@ -877,12 +888,12 @@ class MasterDnsVPNClient:
                 except Exception:
                     pass
 
-        stop_task.cancel()
-        restart_task.cancel()
+        if not stop_task.done():
+            stop_task.cancel()
+        if not restart_task.done():
+            restart_task.cancel()
 
         self.logger.info("Cleaning up old connections before reconnecting...")
-
-        await asyncio.gather(*self.workers, return_exceptions=True)
         self.active_streams.clear()
 
     async def _rx_worker(self):
@@ -955,8 +966,11 @@ class MasterDnsVPNClient:
 
         now = self.loop.time()
         try:
+            syn_data = (
+                f"PONG:{int(time.time()) % 10000}:{random.randint(1000, 9999)}".encode()
+            )
             self.outbound_queue.put_nowait(
-                (2, now, Packet_Type.STREAM_SYN, stream_id, 0, b"")
+                (0, now, Packet_Type.STREAM_SYN, stream_id, 0, syn_data)
             )
         except asyncio.QueueFull:
             self.logger.debug("Queue is full, dropping new connection.")
@@ -1010,10 +1024,10 @@ class MasterDnsVPNClient:
             effective_priority = 0
         elif is_fin:
             ptype = Packet_Type.STREAM_FIN
-            effective_priority = 1
+            effective_priority = 0
         elif is_resend or priority <= 2:
             ptype = Packet_Type.STREAM_RESEND if is_resend else ptype
-            effective_priority = 2
+            effective_priority = 1
 
         try:
             self.outbound_queue.put_nowait(
@@ -1165,13 +1179,9 @@ class MasterDnsVPNClient:
             else:
                 self.logger.debug(f"Got data for SID {stream_id} but stream not ready.")
 
-            current_q_size = self.outbound_queue.qsize()
-            if current_q_size < 10:
-                pull_count = 2
-                for _ in range(pull_count):
-                    await self.outbound_queue.put(
-                        (1, self.loop.time(), Packet_Type.PING, 0, 0, b"PULL")
-                    )
+            pull_count = 2
+            for _ in range(pull_count):
+                await self._send_ping_packet()
 
         elif ptype == Packet_Type.STREAM_DATA_ACK and stream_id_exists:
             stream_obj = self.active_streams[stream_id].get("stream")
@@ -1180,13 +1190,9 @@ class MasterDnsVPNClient:
             else:
                 self.logger.debug(f"Got ACK for SID {stream_id} but stream not ready.")
 
-            current_q_size = self.outbound_queue.qsize()
-            if current_q_size < 10:
-                pull_count = 2
-                for _ in range(pull_count):
-                    await self.outbound_queue.put(
-                        (1, self.loop.time(), Packet_Type.PING, 0, 0, b"PULL")
-                    )
+            pull_count = 2
+            for _ in range(pull_count):
+                await self._send_ping_packet()
 
         elif ptype == Packet_Type.STREAM_FIN and stream_id_exists:
             await self.close_stream(stream_id, reason="Server sent FIN")
@@ -1212,7 +1218,10 @@ class MasterDnsVPNClient:
         if stream_obj:
             await stream_obj.close(reason=reason)
         else:
-            await self._client_enqueue_tx(1, stream_id, 0, b"", is_fin=True)
+            fin_data = (
+                f"FIN:{int(time.time()) % 10000}:{random.randint(1000, 9999)}".encode()
+            )
+            await self._client_enqueue_tx(1, stream_id, 0, fin_data, is_fin=True)
 
         writer = stream_data.get("writer")
         await self._close_writer_safely(writer)
@@ -1271,14 +1280,13 @@ class MasterDnsVPNClient:
                 self.logger.error("Domains or Resolvers are missing in config.")
                 return
 
-            first_run = True
+            self.success_mtu_checks = False
             while not self.should_stop.is_set():
                 self.logger.info("=" * 80)
                 self.logger.info("<green>Running MasterDnsVPN Client...</green>")
                 self.packets_queue.clear()
 
-                await self.run_client(first_run)
-                first_run = False
+                await self.run_client()
 
                 if not self.should_stop.is_set():
                     self.logger.info(

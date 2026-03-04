@@ -8,8 +8,7 @@ import time
 
 
 class PingManager:
-    def __init__(self, balancer, send_func):
-        self.balancer = balancer
+    def __init__(self, send_func):
         self.send_func = send_func
         self.last_data_activity = time.time()
         self.last_ping_time = time.time()
@@ -20,16 +19,9 @@ class PingManager:
 
     async def ping_loop(self):
         while True:
-            await asyncio.sleep(0.1)
-
-            if (
-                self.active_connections == 0
-                and self.last_data_activity + 20 < time.time()
-            ):
-                continue
+            await asyncio.sleep(0.18)  # Sleep briefly to prevent tight loop
 
             idle_time = time.time() - self.last_data_activity
-
             if idle_time >= 10.0:
                 ping_interval = 3.0
             elif idle_time >= 5.0:
@@ -37,10 +29,14 @@ class PingManager:
             else:
                 ping_interval = 0.2
 
+            if (
+                self.active_connections == 0
+                and self.last_data_activity + 20 < time.time()
+            ):
+                ping_interval = 10.0
+
             if time.time() - self.last_ping_time < ping_interval:
                 continue
 
-            best_server = self.balancer.get_best_server()
-            if best_server:
-                await self.send_func(best_server, is_ping=True)
+            await self.send_func()
             self.last_ping_time = time.time()

@@ -303,16 +303,20 @@ class MasterDnsVPNServer:
                 await stream.receive_ack(sn)
 
         elif packet_type == Packet_Type.STREAM_FIN:
-            stream_states = session.get("stream_states", {})
             await self.close_stream(session_id, stream_id, reason="Client sent FIN")
 
         out_queue = session.get("outbound_queue")
         stream_states = session.setdefault("stream_states", {})
-        state = stream_states.setdefault(stream_id, {})
 
-        is_duplicate = (
-            state.get("last_sn") == sn and state.get("last_ptype") == packet_type
-        )
+        state = {}
+        is_duplicate = False
+        is_stream_active = stream_id != 0 and stream_id in session.get("streams", {})
+
+        if is_stream_active:
+            state = stream_states.setdefault(stream_id, {})
+            is_duplicate = (
+                state.get("last_sn") == sn and state.get("last_ptype") == packet_type
+            )
 
         if is_duplicate and state.get("last_response"):
             res_ptype, res_stream_id, res_sn, res_data = state["last_response"]
@@ -322,14 +326,15 @@ class MasterDnsVPNServer:
                     out_queue.get_nowait()
                 )
             else:
+                pong_data = f"PONG:{int(time.time()) % 10000}:{random.randint(1000, 9999)}".encode()
                 res_ptype, res_stream_id, res_sn, res_data = (
                     Packet_Type.PONG,
                     0,
                     0,
-                    b"PONG",
+                    pong_data,
                 )
 
-            if stream_id != 0:
+            if is_stream_active:
                 state["last_sn"] = sn
                 state["last_ptype"] = packet_type
                 state["last_response"] = (res_ptype, res_stream_id, res_sn, res_data)
@@ -664,7 +669,12 @@ class MasterDnsVPNServer:
         await self._clear_session_stream_queue(session_id, stream_id)
 
         if stream == "PENDING":
-            await self._server_enqueue_tx(session_id, 1, stream_id, 0, b"", is_fin=True)
+            fin_data = (
+                f"FIN:{int(time.time()) % 10000}:{random.randint(1000, 9999)}".encode()
+            )
+            await self._server_enqueue_tx(
+                session_id, 1, stream_id, 0, fin_data, is_fin=True
+            )
         else:
             await stream.close(reason=reason)
 
@@ -690,16 +700,24 @@ class MasterDnsVPNServer:
             "outbound_queue", asyncio.PriorityQueue()
         )
         ptype = Packet_Type.STREAM_DATA
+        effective_priority = priority
+
         if is_ack:
             ptype = Packet_Type.STREAM_DATA_ACK
+            effective_priority = 0
         elif is_fin:
             ptype = Packet_Type.STREAM_FIN
+            effective_priority = 0
         elif is_syn_ack:
             ptype = Packet_Type.STREAM_SYN_ACK
+            effective_priority = 0
         elif is_resend:
             ptype = Packet_Type.STREAM_RESEND
+            effective_priority = 1
 
-        await out_queue.put((priority, time.time(), ptype, stream_id, sn, data))
+        await out_queue.put(
+            (effective_priority, time.time(), ptype, stream_id, sn, data)
+        )
 
     async def _handle_stream_syn(self, session_id, stream_id):
         if stream_id in self.sessions[session_id]["streams"]:
@@ -745,8 +763,11 @@ class MasterDnsVPNServer:
             self.sessions[session_id]["streams"][stream_id] = stream
 
             # Send SYN_ACK
+            syn_data = (
+                f"SYA:{int(time.time()) % 10000}:{random.randint(1000, 9999)}".encode()
+            )
             await self._server_enqueue_tx(
-                session_id, 2, stream_id, 0, b"", is_syn_ack=True
+                session_id, 2, stream_id, 0, syn_data, is_syn_ack=True
             )
             self.logger.info(
                 f"Stream {stream_id} connected to Forward Target: {self.config['FORWARD_IP']}"

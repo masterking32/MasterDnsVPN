@@ -77,7 +77,7 @@ class ARQStream:
                 if not raw_data:
                     break
 
-                while len(self.snd_buf) > 2000:
+                while len(self.snd_buf) > 200:
                     await asyncio.sleep(0.1)
                     if self.closed:
                         return
@@ -135,7 +135,7 @@ class ARQStream:
             self.rcv_nxt = (self.rcv_nxt + 1) % 65536
 
         # ack last received sn
-        await self.enqueue_tx(4, self.stream_id, sn, b"", is_ack=True)
+        await self.enqueue_tx(0, self.stream_id, sn, b"", is_ack=True)
 
     async def receive_ack(self, sn):
         self.last_activity = time.time()
@@ -181,7 +181,7 @@ class ARQStream:
         if not self._fin_sent:
             self._fin_sent = True
             try:
-                await self.enqueue_tx(1, self.stream_id, 0, b"", is_fin=True)
+                await self.enqueue_tx(0, self.stream_id, 0, b"", is_fin=True)
             except Exception:
                 pass
 
