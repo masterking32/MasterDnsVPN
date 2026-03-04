@@ -23,9 +23,9 @@ jobs:
             platform: Linux
             arch: AMD64
             ext: ""
-          - os: macos-13
+          - os: macos-latest
             platform: MacOS
-            arch: AMD64
+            arch: ARM64
             ext: ""
 
     steps:
