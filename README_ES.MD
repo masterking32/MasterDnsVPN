@@ -156,6 +156,46 @@ El cliente inicia un proxy SOCKS5 local en `127.0.0.1:1080` (configurable median
 
 ---
 
+## ⚙️ Referencia de configuración
+
+### 🖥️ Servidor — `server_config.toml`
+
+> 🔑 La clave de cifrado se **genera automáticamente** en el primer arranque y se guarda en `encrypt_key.txt` junto al ejecutable del servidor. También se imprime en el log del servidor. Cópiela en el campo `ENCRYPTION_KEY` del cliente. Para rotar la clave, elimine `encrypt_key.txt` y reinicie el servidor.
+
+| Parámetro | Valor predeterminado | Descripción |
+|-----------|---------------------|-------------|
+| `LOG_LEVEL` | `"INFO"` | Nivel de registro: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` |
+| `UDP_HOST` | `"0.0.0.0"` | IP a la que el servidor DNS/UDP se enlaza. `"0.0.0.0"` = todas las interfaces. |
+| `UDP_PORT` | `53` | Puerto UDP del servidor DNS. El puerto `53` (DNS estándar) requiere privilegios de root/admin. |
+| `DOMAIN` | `["t.example.com"]` | Dominio(s) del túnel que acepta este servidor. Debe coincidir con la lista `DOMAINS` del cliente. |
+| `DATA_ENCRYPTION_METHOD` | `1` | Algoritmo de cifrado. **Debe coincidir con el cliente.** `0`=Ninguno, `1`=XOR, `2`=ChaCha20, `3`=AES-128-CTR, `4`=AES-192-CTR, `5`=AES-256-CTR |
+| `SESSION_TIMEOUT` | `300` | Tiempo de inactividad (segundos) antes de que expire una sesión de cliente. |
+| `SESSION_CLEANUP_INTERVAL` | `60` | Intervalo (segundos) para eliminar sesiones expiradas. |
+| `FORWARD_IP` | `"127.0.0.1"` | IP del proxy/servicio local al que se reenvía el tráfico descifrado. |
+| `FORWARD_PORT` | `8080` | Puerto del proxy/servicio local (p. ej. `1080` para SOCKS5, `443` para VLESS). |
+
+### 💻 Cliente — `client_config.toml`
+
+| Parámetro | Valor predeterminado | Descripción |
+|-----------|---------------------|-------------|
+| `LOG_LEVEL` | `"INFO"` | Nivel de registro: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` |
+| `RESOLVER_DNS_SERVERS` | `["8.8.8.8"]` | Resolvedores DNS públicos a los que se reenvían las consultas del túnel. Agregue múltiples para redundancia y balanceo. |
+| `MIN_UPLOAD_MTU` | `40` | MTU mínimo de subida (bytes) que un resolvedor debe alcanzar para ser utilizado. Ponga `0` para deshabilitar. |
+| `MIN_DOWNLOAD_MTU` | `40` | MTU mínimo de bajada (bytes) que un resolvedor debe alcanzar para ser utilizado. Ponga `0` para deshabilitar. |
+| `MAX_UPLOAD_MTU` | `160` | Límite superior (bytes) para el sondeo automático de MTU de subida. |
+| `MAX_DOWNLOAD_MTU` | `200` | Límite superior (bytes) para el sondeo automático de MTU de bajada. |
+| `RESOLVER_BALANCING_STRATEGY` | `1` | Estrategia de balanceo de carga: `1`=Aleatorio, `2`=Round-Robin, `3`=Menor pérdida |
+| `DOMAINS` | `["t.example.com"]` | Dominio(s) del túnel que apuntan al servidor vía registros NS. Agregue múltiples para redundancia multi-ruta. |
+| `DATA_ENCRYPTION_METHOD` | `1` | Algoritmo de cifrado. **Debe coincidir con el servidor.** `0`=Ninguno, `1`=XOR, `2`=ChaCha20, `3`=AES-128-CTR, `4`=AES-192-CTR, `5`=AES-256-CTR |
+| `ENCRYPTION_KEY` | `""` | Clave del `encrypt_key.txt` del servidor o del log del primer arranque. Debe coincidir con el servidor. |
+| `DNS_QUERY_TIMEOUT` | `5` | Segundos de espera para una respuesta DNS antes de considerar la consulta fallida. |
+| `LISTEN_IP` | `"127.0.0.1"` | IP local en la que escucha el proxy SOCKS5. |
+| `LISTEN_PORT` | `1080` | Puerto local del proxy SOCKS5. Configure su aplicación para usar esta dirección. |
+| `NUM_DNS_WORKERS` | `4` | Número de tareas async DNS concurrentes. Aumente para mayor tráfico. |
+| `PACKET_DUPLICATION_COUNT` | `3` | Rutas resolver+dominio por las que se envía cada paquete simultáneamente. Mayor = más fiable pero más ancho de banda. |
+
+---
+
 ## 🛠️ Cómo funciona
 
 ### Arquitectura del sistema

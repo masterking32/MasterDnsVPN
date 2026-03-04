@@ -30,12 +30,6 @@ UDP_HOST = "0.0.0.0"
 # Standard DNS port is 53. Change if running as non-root or for testing.
 UDP_PORT = 53
 
-# List of upstream DNS servers to which queries will be forwarded.
-DNS_SERVERS = [
-    "8.8.8.8",  # Google Public DNS
-    "1.1.1.1",  # Cloudflare DNS
-]
-
 # ---------------------------------------------------------------------------
 # Tunnel Domains
 # ---------------------------------------------------------------------------
@@ -60,6 +54,14 @@ DOMAIN = [
 #   4 - AES-192-CTR encryption (strong, slower, larger packets)
 #   5 - AES-256-CTR encryption (strongest, slowest, largest packets)
 DATA_ENCRYPTION_METHOD = 1
+
+# Encryption Key
+# The server auto-generates a random key on first run and saves it to
+# "encrypt_key.txt" in the same directory as the server executable.
+# The key is also printed in the server log at startup.
+# Copy this key into the client's ENCRYPTION_KEY setting.
+# To rotate the key, delete "encrypt_key.txt" and restart the server
+# (all clients must then be updated with the new key).
 
 # ---------------------------------------------------------------------------
 # Session Management

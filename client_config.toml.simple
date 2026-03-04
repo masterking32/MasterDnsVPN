@@ -53,6 +53,7 @@ MAX_DOWNLOAD_MTU = 200
 # Options:
 #   1 - Random: Randomly select a resolver for each query.
 #   2 - Round Robin: Cycle through resolvers in order.
+#   3 - Least Loss: Prefer resolvers with the lowest observed packet-loss rate.
 RESOLVER_BALANCING_STRATEGY = 1
 
 # ---------------------------------------------------------------------------

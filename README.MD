@@ -156,6 +156,46 @@ The client starts a local SOCKS5 proxy on `127.0.0.1:1080` (configurable via `LI
 
 ---
 
+## ⚙️ Configuration Reference
+
+### 🖥️ Server — `server_config.toml`
+
+> 🔑 The encryption key is **auto-generated** on first run and saved to `encrypt_key.txt` next to the server executable. It is also printed in the server log. Copy it to the client's `ENCRYPTION_KEY` field. Delete `encrypt_key.txt` and restart to rotate the key.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `LOG_LEVEL` | `"INFO"` | Logging verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` |
+| `UDP_HOST` | `"0.0.0.0"` | IP address the DNS/UDP server binds to. `"0.0.0.0"` = all interfaces. |
+| `UDP_PORT` | `53` | UDP port for the DNS server. Port `53` (standard DNS) requires root/admin privileges. |
+| `DOMAIN` | `["t.example.com"]` | Tunnel domain(s) this server accepts. Must match the client's `DOMAINS` list. |
+| `DATA_ENCRYPTION_METHOD` | `1` | Encryption algorithm. **Must match the client.** `0`=None, `1`=XOR, `2`=ChaCha20, `3`=AES-128-CTR, `4`=AES-192-CTR, `5`=AES-256-CTR |
+| `SESSION_TIMEOUT` | `300` | Inactivity time (seconds) before a client session expires. |
+| `SESSION_CLEANUP_INTERVAL` | `60` | Interval (seconds) at which expired sessions are removed. |
+| `FORWARD_IP` | `"127.0.0.1"` | IP of the local proxy/service that decrypted traffic is forwarded to. |
+| `FORWARD_PORT` | `8080` | Port of the local proxy/service (e.g. `1080` for SOCKS5, `443` for VLESS). |
+
+### 💻 Client — `client_config.toml`
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `LOG_LEVEL` | `"INFO"` | Logging verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` |
+| `RESOLVER_DNS_SERVERS` | `["8.8.8.8"]` | Public DNS resolvers that tunnel queries are forwarded through. Add multiple for redundancy and load balancing. |
+| `MIN_UPLOAD_MTU` | `40` | Minimum upload MTU (bytes) a resolver must achieve to be used. Set to `0` to disable. |
+| `MIN_DOWNLOAD_MTU` | `40` | Minimum download MTU (bytes) a resolver must achieve to be used. Set to `0` to disable. |
+| `MAX_UPLOAD_MTU` | `160` | Upper bound (bytes) for upload MTU auto-probing. |
+| `MAX_DOWNLOAD_MTU` | `200` | Upper bound (bytes) for download MTU auto-probing. |
+| `RESOLVER_BALANCING_STRATEGY` | `1` | Load-balancing strategy across resolvers: `1`=Random, `2`=Round-Robin, `3`=Least-Loss |
+| `DOMAINS` | `["t.example.com"]` | Tunnel domain(s) pointing to your server via NS records. Add multiple for multi-path redundancy. |
+| `DATA_ENCRYPTION_METHOD` | `1` | Encryption algorithm. **Must match the server.** `0`=None, `1`=XOR, `2`=ChaCha20, `3`=AES-128-CTR, `4`=AES-192-CTR, `5`=AES-256-CTR |
+| `ENCRYPTION_KEY` | `""` | Key from the server's `encrypt_key.txt` or first-run log. Must match the server. |
+| `DNS_QUERY_TIMEOUT` | `5` | Seconds to wait for a DNS response before considering a query failed. |
+| `LISTEN_IP` | `"127.0.0.1"` | Local IP the SOCKS5 proxy listens on. |
+| `LISTEN_PORT` | `1080` | Local port for the SOCKS5 proxy. Point your application to this address. |
+| `NUM_DNS_WORKERS` | `4` | Number of concurrent async DNS worker tasks. Increase for higher traffic. |
+| `PACKET_DUPLICATION_COUNT` | `3` | How many resolver+domain paths each packet is sent through simultaneously. Higher = more reliable but more bandwidth. |
+
+---
+
 ## 🛠️ How It Works
 
 ### System Architecture
