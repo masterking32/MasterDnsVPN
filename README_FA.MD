@@ -46,7 +46,32 @@
 
 ## 🚀 نصب و اجرا
 
-### 1. نصب وابستگی‌ها
+### گزینه الف: دانلود فایل اجرایی آماده (پیشنهادی)
+
+بدون نیاز به نصب پایتون، می‌توانید آخرین نسخهٔ باینری آماده را برای سیستم‌عامل خود دانلود کنید:
+
+| سیستم‌عامل | دانلود |
+|------------|--------|
+| 🪟 ویندوز (AMD64) | [MasterDnsVPN_Client_Windows_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Windows_AMD64.zip) |
+| 🐧 لینوکس (AMD64) | [MasterDnsVPN_Client_Linux_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Linux_AMD64.zip) |
+| 🍎 مک‌اواس (AMD64) | [MasterDnsVPN_Client_MacOS_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_MacOS_AMD64.zip) |
+
+هر فایل ZIP شامل فایل اجرایی و یک فایل قالب `client_config.toml` است.
+
+**مراحل:**
+
+1. فایل ZIP را استخراج کنید.
+2. فایل `client_config.toml` را در یک ویرایشگر متنی باز کرده و مقادیر زیر را تنظیم کنید:
+   - `ENCRYPTION_KEY` — از لاگ سرور در اولین اجرا کپی کنید.
+   - `DOMAINS` — زیردامنهٔ تونل شما (مثلاً `v.example.com`).
+   - `RESOLVER_DNS_SERVERS` — رزولورهای عمومی DNS (مثلاً `8.8.8.8`).
+3. فایل `client_config.toml` را در **همان پوشه** فایل اجرایی قرار داده و برنامه را اجرا کنید.
+
+---
+
+### گزینه ب: اجرا از سورس
+
+#### 1. نصب وابستگی‌ها
 
 ریپازیتوری را کلون کرده و بسته‌های موردنیاز را نصب کنید:
 
@@ -56,21 +81,20 @@ cd MasterDnsVPN
 pip install -r requirements.txt
 ```
 
-### 2. پیکربندی سرور
+#### 2. پیکربندی سرور
 
 نمونهٔ پیکربندی را کپی کنید:
 
 ```bash
-cp server_config.py.simple server_config.py
+cp server_config.toml.simple server_config.toml
 ```
 
-فایل `server_config.py` را ویرایش کنید تا دامنه و آدرس/پورت فوروارد محلی را تنظیم نمایید.
+فایل `server_config.toml` را ویرایش کنید تا دامنه و آدرس/پورت فوروارد محلی را تنظیم نمایید.
 - یک پروکسی محلی (مثلاً SOCKS5، VLESS، VMESS, SSH, MTProto, OpenVPN TCP و غیره) روی سرور نصب کنید تا ترافیک را به اینترنت هدایت کند.
-- مقدار `FORWARD_IP` و `FORWARD_PORT` را در `server_config.py` به آدرس پروکسی تنظیم کنید.
+- مقدار `FORWARD_IP` و `FORWARD_PORT` را در `server_config.toml` به آدرس پروکسی تنظیم کنید.
 - مقدار `DOMAIN` را هم‌راستا با زیردامنه‌ای که در رکوردهای DNS تعریف کردید تنظیم کنید (مثلاً `v.example.com`).
-- بعد از اولین اجرا، مقادیر MTU بهینه برای دانلود و آپلود را یادداشت کنید و سپس `MAX_UPLOAD_MTU` و `MAX_DOWNLOAD_MTU` را در `server_config.py`)` تنظیم کنید. این کار سرعت اجرای‌های بعدی را به‌طور قابل‌توجهی افزایش می‌دهد.
 
-### 3. اجرای سرور
+#### 3. اجرای سرور
 
 ```bash
 python server.py
@@ -78,21 +102,21 @@ python server.py
 
 در اجرای اول، سرور یک کلید رمزنگاری تولید خواهد کرد؛ این کلید را ذخیره کنید زیرا برای پیکربندی کلاینت لازم است.
 
-### 4. پیکربندی کلاینت
+#### 4. پیکربندی کلاینت
 
 نمونهٔ پیکربندی کلاینت را کپی کنید:
 
 ```bash
-cp client_config.py.simple client_config.py
+cp client_config.toml.simple client_config.toml
 ```
 
-فایل `client_config.py` را تنظیم کنید:
+فایل `client_config.toml` را تنظیم کنید:
 
 - مقدار `DOMAINS`: زیردامنهٔ تونل شما (مثلاً `v.example.com`).
-- مقدار `ENCRYPTION_KEY`: کلیدی که سرور تولید و ارائه کرده است.
+- مقدار `ENCRYPTION_KEY`: کلیدی که سرور در لاگ نمایش داده است.
 - مقدار `RESOLVER_DNS_SERVERS`: لیست رزولورهای عمومی DNS (مثلاً `8.8.8.8`, `1.1.1.1`).
 
-### 5. اجرای کلاینت
+#### 5. اجرای کلاینت
 
 ```bash
 python client.py

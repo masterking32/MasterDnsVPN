@@ -46,7 +46,32 @@ To make the tunnel functional, you must own a domain and configure the following
 
 ## 🚀 Instalación y uso
 
-### 1. Instalar dependencias
+### Opción A: Descargar el ejecutable precompilado (Recomendado)
+
+Puede descargar el binario precompilado más reciente para su plataforma, sin necesidad de instalar Python.
+
+| Plataforma | Descarga |
+|------------|----------|
+| 🪟 Windows (AMD64) | [MasterDnsVPN_Client_Windows_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Windows_AMD64.zip) |
+| 🐧 Linux (AMD64) | [MasterDnsVPN_Client_Linux_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Linux_AMD64.zip) |
+| 🍎 macOS (AMD64) | [MasterDnsVPN_Client_MacOS_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_MacOS_AMD64.zip) |
+
+Cada archivo ZIP contiene el ejecutable y una plantilla de configuración `client_config.toml`.
+
+**Pasos:**
+
+1. Extraiga el archivo ZIP.
+2. Abra `client_config.toml` en cualquier editor de texto y configure los valores:
+   - `ENCRYPTION_KEY` — cópielo del registro del servidor en la primera ejecución.
+   - `DOMAINS` — su subdominio de túnel (p. ej., `v.example.com`).
+   - `RESOLVER_DNS_SERVERS` — resolvers DNS públicos (p. ej., `8.8.8.8`).
+3. Coloque `client_config.toml` en la **misma carpeta** que el ejecutable y ejecútelo.
+
+---
+
+### Opción B: Ejecutar desde el código fuente
+
+#### 1. Instalar dependencias
 
 Clonar el repositorio e instalar las bibliotecas de Python necesarias:
 ```bash
@@ -55,21 +80,20 @@ cd MasterDnsVPN
 pip install -r requirements.txt
 ```
 
-### 2. Configuración del servidor
+#### 2. Configuración del servidor
 
 Copie la configuración de ejemplo:
 
 ```bash
-cp server_config.py.simple server_config.py
+cp server_config.toml.simple server_config.toml
 ```
 
-Edite `server_config.py` para incluir su dominio y la IP/Puerto de reenvío de destino.
+Edite `server_config.toml` para incluir su dominio y la IP/Puerto de reenvío de destino.
 - Instale un servidor proxy (p. ej., SOCKS5, VLESS, VMESS, SSH, MTProto, OpenVPN TCP, etc.) en el servidor para reenviar el tráfico a internet.
-- Configure `FORWARD_IP` y `FORWARD_PORT` en `server_config.py` para que apunten a su servidor proxy.
+- Configure `FORWARD_IP` y `FORWARD_PORT` en `server_config.toml` para que apunten a su servidor proxy.
 - Configure `DOMAIN` para que coincida con el subdominio que configuró en sus registros DNS (p. ej., `v.example.com`).
-- Después de la primera ejecución, anote los valores óptimos de MTU para descarga y carga, y luego configure `MAX_UPLOAD_MTU` y `MAX_DOWNLOAD_MTU` en `server_config.py` según corresponda. Esto acelerará significativamente las ejecuciones posteriores.
 
-### 3. Ejecutar el servidor
+#### 3. Ejecutar el servidor
 
 ```bash
 python server.py
@@ -77,23 +101,23 @@ python server.py
 
 En la primera ejecución, el servidor generará una clave de cifrado. Guarde esta clave; la necesitará para configurar el cliente.
 
-### 4. Configurar el cliente
+#### 4. Configurar el cliente
 
 Copie la configuración de ejemplo del cliente:
 
 ```bash
-cp client_config.py.simple client_config.py
+cp client_config.toml.simple client_config.toml
 ```
 
-Configure client_config.py:
+Edite `client_config.toml`:
 
-- DOMAINS: Su subdominio de túnel (p. ej., v.example.com).
+- `DOMAINS`: Su subdominio de túnel (p. ej., `v.example.com`).
 
-- ENCRYPTION_KEY: La clave proporcionada por su servidor.
+- `ENCRYPTION_KEY`: La clave que aparece en el registro del servidor.
 
-- RESOLVER_DNS_SERVERS: Lista de resolvers DNS públicos (p. ej., 8.8.8.8, 1.1.1.1).
+- `RESOLVER_DNS_SERVERS`: Lista de resolvers DNS públicos (p. ej., `8.8.8.8`, `1.1.1.1`).
 
-### 5. Ejecutar el cliente
+#### 5. Ejecutar el cliente
 
 ```bash
 python client.py

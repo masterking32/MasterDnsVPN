@@ -46,7 +46,32 @@ To make the tunnel functional, you must own a domain and configure the following
 
 ## 🚀 Installation & Usage
 
-### 1. Install Dependencies
+### Option A: Download Pre-built Executable (Recommended)
+
+You can download the latest pre-built binary for your platform — no Python installation required.
+
+| Platform | Download |
+|----------|----------|
+| 🪟 Windows (AMD64) | [MasterDnsVPN_Client_Windows_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Windows_AMD64.zip) |
+| 🐧 Linux (AMD64) | [MasterDnsVPN_Client_Linux_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Linux_AMD64.zip) |
+| 🍎 macOS (AMD64) | [MasterDnsVPN_Client_MacOS_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_MacOS_AMD64.zip) |
+
+Each ZIP archive contains the executable and a `client_config.toml` template file.
+
+**Steps:**
+
+1. Extract the ZIP archive.
+2. Open `client_config.toml` in any text editor and set your values:
+   - `ENCRYPTION_KEY` — copy from your server log on first run.
+   - `DOMAINS` — your tunnel subdomain (e.g. `v.example.com`).
+   - `RESOLVER_DNS_SERVERS` — public DNS resolvers (e.g. `8.8.8.8`).
+3. Place `client_config.toml` in the **same folder** as the executable and run it.
+
+---
+
+### Option B: Run from Source
+
+#### 1. Install Dependencies
 
 Clone the repository and install the required Python libraries:
 ```bash
@@ -55,21 +80,20 @@ cd MasterDnsVPN
 pip install -r requirements.txt
 ```
 
-### 2. Server Configuration
+#### 2. Server Configuration
 
 Copy the sample configuration:
 
 ```bash
-cp server_config.py.simple server_config.py
+cp server_config.toml.simple server_config.toml
 ```
 
-Edit `server_config.py` to include your domain and target forwarding IP/Port.
+Edit `server_config.toml` to include your domain and target forwarding IP/Port.
 - Install a proxy server (e.g., SOCKS5, VLESS, VMESS, SSH, MTProto, OpenVPN TCP and etc) on the server machine to forward traffic to the internet.
-- Configure `FORWARD_IP` and `FORWARD_PORT` in `server_config.py` to point to your proxy server.
+- Configure `FORWARD_IP` and `FORWARD_PORT` in `server_config.toml` to point to your proxy server.
 - Configure `DOMAIN` to match the subdomain you set up in your DNS records (e.g., `v.example.com`).
-- After the first run, note the optimal MTU values for download and upload, then set `MAX_UPLOAD_MTU` and `MAX_DOWNLOAD_MTU` in `server_config.py` accordingly. This will significantly speed up subsequent runs.
 
-### 3. Run the Server
+#### 3. Run the Server
 
 ```bash
 python server.py
@@ -77,23 +101,23 @@ python server.py
 
 On the first run, the server will generate an encryption key. Save this key; you will need it to configure the client.
 
-### 4. Configure the Client
+#### 4. Configure the Client
 
 Copy the sample client configuration:
 
 ```bash
-cp client_config.py.simple client_config.py
+cp client_config.toml.simple client_config.toml
 ```
 
-Configure client_config.py:
+Edit `client_config.toml`:
 
- - DOMAINS: Your tunnel subdomain (e.g., v.example.com).
+ - `DOMAINS`: Your tunnel subdomain (e.g., `v.example.com`).
 
- - ENCRYPTION_KEY: The key provided by your server.
+ - `ENCRYPTION_KEY`: The key displayed in the server log.
 
- - RESOLVER_DNS_SERVERS: List of public DNS resolvers (e.g., 8.8.8.8, 1.1.1.1).
+ - `RESOLVER_DNS_SERVERS`: List of public DNS resolvers (e.g., `8.8.8.8`, `1.1.1.1`).
 
-### 5. Run the Client
+#### 5. Run the Client
 
 ```bash
 python client.py
