@@ -50,9 +50,6 @@ class MasterDnsVPNServer:
         self.allowed_domains = self.config.get("DOMAIN", [])
         self.encryption_method: int = self.config.get("DATA_ENCRYPTION_METHOD", 1)
 
-        self.recv_data_cache = {}
-        self.send_data_cache = {}
-
         self.sessions = {}
 
         self.encrypt_key = get_encrypt_key(self.encryption_method)
@@ -89,11 +86,27 @@ class MasterDnsVPNServer:
         self.logger.error("All 255 session slots are full!")
         return None
 
-    async def is_session_valid(self, session_id: int) -> bool:
-        """
-        Check if a session ID is valid.
-        """
-        return session_id in self.sessions
+    async def _close_session(self, session_id: int) -> None:
+        session = self.sessions.get(session_id)
+        if not session:
+            return
+
+        self.logger.debug(f"Closing Session {session_id} and all its streams...")
+
+        stream_ids = list(session.get("streams", {}).keys())
+        for sid in stream_ids:
+            await self.close_stream(session_id, sid, reason="Session Closing")
+
+        out_queue = session.get("outbound_queue")
+        if out_queue:
+            while not out_queue.empty():
+                try:
+                    out_queue.get_nowait()
+                except Exception:
+                    break
+
+        del self.sessions[session_id]
+        self.logger.info(f"Closed session with ID: {session_id}")
 
     async def close_inactive_sessions(self, timeout: int = 300) -> None:
         current_time = asyncio.get_event_loop().time()
@@ -102,45 +115,17 @@ class MasterDnsVPNServer:
             for session_id, session_info in self.sessions.items()
             if current_time - session_info["last_packet_time"] > timeout
         ]
+
         for session_id in inactive_sessions:
-            session = self.sessions.get(session_id)
-            if session:
-                streams = session.get("streams", {})
-                stream_states = session.get("stream_states", {})
+            try:
+                session = self.sessions.get(session_id)
+                if not session:
+                    continue
 
-                for sid, stream in list(streams.items()):
-                    if stream == "PENDING":
-                        streams.pop(sid, None)
-                        stream_states.pop(sid, None)
-                        continue
-
-                    stream._fin_sent = True
-                    stream.closed = True
-                    if (
-                        hasattr(stream, "io_task")
-                        and stream.io_task
-                        and not stream.io_task.done()
-                    ):
-                        stream.io_task.cancel()
-                    try:
-                        if stream.writer and not stream.writer.is_closing():
-                            stream.writer.close()
-                            await asyncio.wait_for(
-                                stream.writer.wait_closed(), timeout=1.0
-                            )
-                    except Exception:
-                        pass
-
-                out_queue = session.get("outbound_queue")
-                if out_queue:
-                    while not out_queue.empty():
-                        try:
-                            out_queue.get_nowait()
-                        except Exception:
-                            break
-
-                session.get("streams", {}).clear()
-                session.get("stream_states", {}).clear()
+                await self._close_session(session_id)
+            except Exception as e:
+                self.logger.debug(f"Error closing session {session_id}: {e}")
+                continue
 
             del self.sessions[session_id]
             self.logger.info(f"Closed inactive session with ID: {session_id}")
@@ -161,6 +146,9 @@ class MasterDnsVPNServer:
         token_str = (
             client_token.decode("utf-8", errors="ignore") if client_token else "unknown"
         )
+
+        if not token_str:
+            return None
 
         new_session_id = await self.new_session()
         if new_session_id is None:
@@ -187,12 +175,12 @@ class MasterDnsVPNServer:
     async def _session_cleanup_loop(self) -> None:
         """Background task to periodically cleanup inactive sessions."""
         try:
+            session_cleanup_interval = self.config.get("SESSION_CLEANUP_INTERVAL", 30)
+            session_timeout = self.config.get("SESSION_TIMEOUT", 300)
             while not self.should_stop.is_set():
                 try:
-                    await asyncio.sleep(self.config.get("SESSION_CLEANUP_INTERVAL", 30))
-                    await self.close_inactive_sessions(
-                        self.config.get("SESSION_TIMEOUT", 300)
-                    )
+                    await asyncio.sleep(session_cleanup_interval)
+                    await self.close_inactive_sessions(session_timeout)
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
@@ -216,10 +204,9 @@ class MasterDnsVPNServer:
                 self.loop = asyncio.get_running_loop()
 
             await async_sendto(self.loop, self.udp_sock, response, addr)
-            self.logger.debug(f"Sent DNS response to {addr}")
             return True
         except Exception as e:
-            self.logger.error(f"Failed to send DNS response to {addr}: {e}")
+            self.logger.debug(f"Failed to send DNS response to {addr}: {e}")
             return False
 
     async def handle_vpn_packet(
@@ -306,26 +293,8 @@ class MasterDnsVPNServer:
                 await stream.receive_ack(sn)
 
         elif packet_type == Packet_Type.STREAM_FIN:
-            stream = streams.get(stream_id)
             stream_states = session.get("stream_states", {})
-            if stream and stream != "PENDING":
-                await self._clear_session_stream_queue(session_id, stream_id)
-                stream._fin_sent = True
-                stream.closed = True
-                if (
-                    hasattr(stream, "io_task")
-                    and stream.io_task
-                    and not stream.io_task.done()
-                ):
-                    stream.io_task.cancel()
-                try:
-                    if stream.writer and not stream.writer.is_closing():
-                        stream.writer.close()
-                        await asyncio.wait_for(stream.writer.wait_closed(), timeout=3.0)
-                except Exception:
-                    pass
-                streams.pop(stream_id, None)
-                stream_states.pop(stream_id, None)
+            await self.close_stream(session_id, stream_id, reason="Client sent FIN")
 
         out_queue = session.get("outbound_queue")
         stream_states = session.setdefault("stream_states", {})
@@ -369,22 +338,6 @@ class MasterDnsVPNServer:
             sequence_num=res_sn,
         )
 
-    async def _handle_unknown(
-        self,
-        data=None,
-        labels=None,
-        request_domain=None,
-        addr=None,
-        parsed_packet=None,
-        session_id=None,
-        extracted_header=None,
-    ) -> Optional[bytes]:
-        self.logger.info(
-            f"Received unknown packet type from {addr}. No handler available."
-        )
-
-        return None
-
     async def validate_vpn_packet(
         self, data: bytes, parsed_packet: dict, addr
     ) -> Optional[bytes]:
@@ -392,11 +345,9 @@ class MasterDnsVPNServer:
         Handle VPN packet logic and return (is_vpn_packet, response_bytes).
         """
         try:
-            self.logger.debug(f"Handling VPN packet from {addr}")
-
             questions = parsed_packet.get("questions")
             if not questions:
-                self.logger.error(f"No questions found in VPN packet from {addr}")
+                self.logger.info(f"No questions found in VPN packet from {addr}")
                 return None
 
             request_domain = questions[0]["qName"]
@@ -417,26 +368,22 @@ class MasterDnsVPNServer:
                 return None
 
             if not packet_main_domain:
-                self.logger.warning(
+                self.logger.info(
                     f"Domain {packet_domain} not allowed for VPN packets from {addr}"
                 )
                 return None
 
             if packet_domain.count(".") < 3:
-                self.logger.warning(
+                self.logger.info(
                     f"Invalid domain format for VPN packet from {addr}: {packet_domain}"
                 )
                 return None
 
             labels = packet_domain.replace("." + packet_main_domain, "")
 
-            self.logger.debug(
-                f"Extracted VPN data from domain {packet_main_domain}: {labels}"
-            )
-
             extracted_header = self.dns_parser.extract_vpn_header_from_labels(labels)
             if not extracted_header:
-                self.logger.warning(
+                self.logger.info(
                     f"Failed to extract VPN header from labels for packet from {addr}"
                 )
                 return None
@@ -447,8 +394,9 @@ class MasterDnsVPNServer:
             valid_packet_types = [
                 v for k, v in Packet_Type.__dict__.items() if not k.startswith("__")
             ]
+
             if packet_type not in valid_packet_types:
-                self.logger.warning(
+                self.logger.info(
                     f"Invalid VPN packet type from labels for packet from {addr}: {packet_type}"
                 )
                 return None
@@ -466,6 +414,7 @@ class MasterDnsVPNServer:
 
             if response:
                 return response
+
         except Exception as e:
             self.logger.error(f"Error handling VPN packet from {addr}: {e}")
 
@@ -476,9 +425,8 @@ class MasterDnsVPNServer:
         Handle a single DNS request in its own task.
         """
         if data is None or addr is None:
-            self.logger.error("Invalid data or address in DNS request.")
+            self.logger.debug("Invalid data or address in DNS request.")
             return
-        self.logger.debug(f"Received DNS request from {addr}")
 
         parsed_packet = await self.dns_parser.parse_dns_packet(data)
         self.logger.debug(f"Parsed DNS packet from {addr}: {parsed_packet}")
@@ -491,9 +439,6 @@ class MasterDnsVPNServer:
         else:
             response = await self.dns_parser.server_fail_response(data)
             if not response:
-                self.logger.error(
-                    f"Failed to generate Server Failure response for DNS request from {addr}"
-                )
                 return
 
         await self.send_udp_response(response, addr)
@@ -687,6 +632,35 @@ class MasterDnsVPNServer:
     # ---------------------------------------------------------
     # TCP Forwarding Logic & Server Retransmits
     # ---------------------------------------------------------
+    async def close_stream(
+        self, session_id: int, stream_id: int, reason: str = "Unknown"
+    ) -> None:
+        """Safely and fully close a specific stream within a session."""
+        session = self.sessions.get(session_id)
+        if not session:
+            return
+
+        streams = session.get("streams", {})
+        stream_states = session.get("stream_states", {})
+        stream = streams.get(stream_id)
+
+        if not stream:
+            return
+
+        self.logger.info(
+            f"Closing Stream {stream_id} in Session {session_id}. Reason: {reason}"
+        )
+
+        await self._clear_session_stream_queue(session_id, stream_id)
+
+        if stream == "PENDING":
+            await self._server_enqueue_tx(session_id, 1, stream_id, 0, b"", is_fin=True)
+        else:
+            await stream.close(reason=reason)
+
+        streams.pop(stream_id, None)
+        stream_states.pop(stream_id, None)
+
     async def _server_enqueue_tx(
         self,
         session_id,
@@ -701,6 +675,7 @@ class MasterDnsVPNServer:
     ):
         if session_id not in self.sessions:
             return
+
         out_queue = self.sessions[session_id].setdefault(
             "outbound_queue", asyncio.PriorityQueue()
         )
@@ -770,8 +745,10 @@ class MasterDnsVPNServer:
             self.logger.error(
                 f"Failed to connect to forward target for stream {stream_id}: {e}"
             )
-            self.sessions[session_id]["streams"].pop(stream_id, None)
-            await self._server_enqueue_tx(session_id, 2, stream_id, 0, b"", is_fin=True)
+
+            await self.close_stream(
+                session_id, stream_id, reason=f"Connection Error: {e}"
+            )
 
     async def _clear_session_stream_queue(self, session_id: int, stream_id: int):
         session = self.sessions.get(session_id)
@@ -804,24 +781,14 @@ class MasterDnsVPNServer:
                 if not streams:
                     continue
 
-                stream_states = session.get("stream_states", {})
-
                 closed_ids = [
                     sid for sid, s in streams.items() if s != "PENDING" and s.closed
                 ]
 
                 for sid in closed_ids:
-                    stream_obj = streams.get(sid)
-                    await self._clear_session_stream_queue(session_id, sid)
-
-                    if stream_obj and not stream_obj._fin_sent:
-                        stream_obj._fin_sent = True
-                        await self._server_enqueue_tx(
-                            session_id, 2, sid, 0, b"", is_fin=True
-                        )
-
-                    streams.pop(sid, None)
-                    stream_states.pop(sid, None)
+                    await self.close_stream(
+                        session_id, sid, reason="Marked Closed by ARQStream"
+                    )
 
                 for stream in list(streams.values()):
                     if stream != "PENDING":
@@ -893,25 +860,9 @@ class MasterDnsVPNServer:
 
     async def stop(self) -> None:
         """Signal the server to stop."""
-        for session_id, session in list(self.sessions.items()):
-            streams = session.get("streams", {})
-            for sid, stream in list(streams.items()):
-                if stream != "PENDING":
-                    stream._fin_sent = True
-                    stream.closed = True
-                    if (
-                        hasattr(stream, "io_task")
-                        and stream.io_task
-                        and not stream.io_task.done()
-                    ):
-                        stream.io_task.cancel()
-                    try:
-                        if stream.writer and not stream.writer.is_closing():
-                            stream.writer.close()
-                    except Exception:
-                        pass
-            streams.clear()
-        self.sessions.clear()
+        self.should_stop.set()
+        for session_id in list(self.sessions.keys()):
+            await self._close_session(session_id)
 
         try:
             if getattr(self, "_retransmit_task", None):
@@ -956,23 +907,6 @@ class MasterDnsVPNServer:
         self.logger.info("MasterDnsVPN Server stopped.")
         os._exit(0)
 
-    def _cancel_background_tasks(self) -> None:
-        """Cancel background tasks from the event loop thread."""
-        try:
-            if getattr(self, "_dns_task", None):
-                try:
-                    self._dns_task.cancel()
-                except Exception:
-                    pass
-            if getattr(self, "_session_cleanup_task", None):
-                try:
-                    self._session_cleanup_task.cancel()
-                except Exception:
-                    pass
-            self.logger.debug("Background tasks cancellation requested.")
-        except Exception as e:
-            self.logger.error(f"Error cancelling background tasks: {e}")
-
     def _signal_handler(self, signum: int, frame: Any = None) -> None:
         """
         Handle termination signals for graceful shutdown.
@@ -991,18 +925,6 @@ class MasterDnsVPNServer:
             pass
 
         self.logger.info("Shutdown signalled.")
-
-    def _close_udp_socket(self) -> None:
-        """Close the UDP socket from the event loop thread."""
-        try:
-            if self.udp_sock:
-                try:
-                    self.udp_sock.close()
-                    self.logger.info("UDP socket closed.")
-                finally:
-                    self.udp_sock = None
-        except Exception as e:
-            self.logger.error(f"Error closing UDP socket: {e}")
 
 
 def main():

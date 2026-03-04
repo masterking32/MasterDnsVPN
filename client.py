@@ -294,6 +294,7 @@ class MasterDnsVPNClient:
             self.logger.debug(
                 f"<cyan>[MTU]</cyan> Starting binary search for MTU. Range: {min_mtu}-{max_mtu}"
             )
+
             for _ in range(2):
                 if await test_callable(max_mtu):
                     self.logger.debug(f"<cyan>[MTU]</cyan> Max MTU {max_mtu} is valid.")
@@ -309,7 +310,8 @@ class MasterDnsVPNClient:
                     break
 
                 ok = False
-                for _ in range(1):
+
+                for _ in range(2):
                     try:
                         ok = await test_callable(mid)
                         if ok:
@@ -358,7 +360,7 @@ class MasterDnsVPNClient:
             return False
 
         response = await self._send_and_receive_dns(
-            dns_queries[0], dns_server, dns_port, 2
+            dns_queries[0], dns_server, dns_port, 1
         )
 
         parsed_header, _ = await self._process_received_packet(response)
@@ -396,7 +398,7 @@ class MasterDnsVPNClient:
             return False
 
         response = await self._send_and_receive_dns(
-            dns_queries[0], dns_server, dns_port, 2
+            dns_queries[0], dns_server, dns_port, 1
         )
         parsed_header, returned_data = await self._process_received_packet(response)
         packet_type = parsed_header["packet_type"] if parsed_header else None
@@ -705,6 +707,7 @@ class MasterDnsVPNClient:
         """Run the MasterDnsVPN Client main logic."""
         self.logger.info("Setting up connections...")
         try:
+            self.session_restart_event = asyncio.Event()
             if MTU_TEST or len(self.connections_map) <= 0:
                 await self.create_connection_map()
 
@@ -840,28 +843,14 @@ class MasterDnsVPNClient:
             for w in getattr(self, "workers", []):
                 w.cancel()
 
-            for _id, active_stream in list(self.active_streams.items()):
+            for sid in list(self.active_streams.keys()):
                 try:
-                    stream_obj = active_stream.get("stream")
-                    if stream_obj and not stream_obj.closed:
-                        stream_obj._fin_sent = True
-                        stream_obj.closed = True
-                        if (
-                            hasattr(stream_obj, "io_task")
-                            and stream_obj.io_task
-                            and not stream_obj.io_task.done()
-                        ):
-                            stream_obj.io_task.cancel()
-                except Exception:
-                    pass
-
-                try:
-                    writer = active_stream.get("writer")
                     await asyncio.wait_for(
-                        self._close_writer_safely(writer), timeout=3.0
+                        self.close_stream(sid, reason="Client App Closing"), timeout=1.5
                     )
                 except Exception:
                     pass
+            self.active_streams.clear()
 
             if hasattr(self, "tunnel_sock") and self.tunnel_sock:
                 try:
@@ -880,7 +869,7 @@ class MasterDnsVPNClient:
     async def _rx_worker(self):
         """Continuously listen for incoming VPN packets on the tunnel socket."""
         self.logger.debug("<magenta>[RX]</magenta> RX Worker started.")
-        while not self.should_stop.is_set():
+        while not self.should_stop.is_set() and not self.session_restart_event.is_set():
             try:
                 data, addr = await asyncio.wait_for(
                     async_recvfrom(self.loop, self.tunnel_sock, 65536), timeout=1.0
@@ -915,7 +904,7 @@ class MasterDnsVPNClient:
         stream_id = start
         wrapped = False
 
-        while not self.should_stop.is_set():
+        while not self.should_stop.is_set() and not self.session_restart_event.is_set():
             if stream_id > 65535:
                 if wrapped:
                     return False, 0
@@ -994,7 +983,7 @@ class MasterDnsVPNClient:
 
     async def _tx_worker(self):
         self.logger.debug("<magenta>[TX]</magenta> TX Worker started.")
-        while not self.should_stop.is_set():
+        while not self.should_stop.is_set() and not self.session_restart_event.is_set():
             try:
                 item = await asyncio.wait_for(self.outbound_queue.get(), timeout=0.2)
                 await self._send_single_packet(item)
@@ -1159,48 +1148,7 @@ class MasterDnsVPNClient:
                     )
 
         elif ptype == Packet_Type.STREAM_FIN and stream_id_exists:
-            self.logger.info(f"<y>Stream {stream_id} Closed by server.</y>")
-            stream = self.active_streams.get(stream_id)
-            if stream:
-                stream_obj = stream.get("stream")
-                if stream_obj:
-                    stream_obj._fin_sent = True
-                    stream_obj.closed = True
-                    await self._client_enqueue_tx(1, stream_id, 0, b"", is_fin=True)
-
-                self.active_streams.pop(stream_id, None)
-                await self._clear_stream_from_queue(stream_id)
-
-                if stream_obj:
-                    if (
-                        hasattr(stream_obj, "io_task")
-                        and stream_obj.io_task
-                        and not stream_obj.io_task.done()
-                    ):
-                        stream_obj.io_task.cancel()
-                        try:
-                            await asyncio.wait_for(stream_obj.io_task, timeout=0.1)
-                        except Exception:
-                            pass
-                    try:
-                        writer_tcp = stream_obj.writer
-                        if (
-                            writer_tcp
-                            and hasattr(writer_tcp, "is_closing")
-                            and not writer_tcp.is_closing()
-                        ):
-                            writer_tcp.close()
-                            await asyncio.wait_for(
-                                writer_tcp.wait_closed(), timeout=3.0
-                            )
-                    except Exception:
-                        pass
-
-                try:
-                    local_writer = stream.get("writer")
-                    await self._close_writer_safely(local_writer)
-                except Exception:
-                    pass
+            await self.close_stream(stream_id, reason="Server sent FIN")
 
         elif ptype == Packet_Type.ERROR_DROP:
             self.logger.error(
@@ -1210,9 +1158,28 @@ class MasterDnsVPNClient:
             if self.session_restart_event:
                 self.session_restart_event.set()
 
+    async def close_stream(self, stream_id: int, reason: str = "Unknown") -> None:
+        """Safely and fully close a specific local stream."""
+        if stream_id not in self.active_streams:
+            return
+
+        self.logger.info(f"<y>Closing Client Stream {stream_id}. Reason: {reason}</y>")
+        stream_data = self.active_streams.pop(stream_id)
+
+        await self._clear_stream_from_queue(stream_id)
+
+        stream_obj = stream_data.get("stream")
+        if stream_obj:
+            await stream_obj.close(reason=reason)
+        else:
+            await self._client_enqueue_tx(1, stream_id, 0, b"", is_fin=True)
+
+        writer = stream_data.get("writer")
+        await self._close_writer_safely(writer)
+
     async def _retransmit_worker(self):
         self.logger.debug("<magenta>[RETRANS]</magenta> Retransmit Worker started.")
-        while not self.should_stop.is_set():
+        while not self.should_stop.is_set() and not self.session_restart_event.is_set():
             await asyncio.sleep(0.1)
 
             dead_streams = [
@@ -1238,51 +1205,11 @@ class MasterDnsVPNClient:
                     s.get("status") == "PENDING"
                     and self.loop.time() - s.get("create_time", 0) > 30.0
                 ):
-                    self.logger.warning(f"Stream {sid} handshake timeout. Closing.")
+                    reason = "Handshake timeout (No SYN_ACK from server)"
                 else:
-                    self.logger.info(f"Stream {sid} closed locally. Notifying server.")
+                    reason = "Closed locally or Inactivity Timeout"
 
-                try:
-                    stream_obj = s.get("stream")
-                    fin_already_sent = False
-                    if stream_obj and getattr(stream_obj, "_fin_sent", False):
-                        fin_already_sent = True
-
-                    if not fin_already_sent:
-                        self.ping_manager.update_activity()
-                        target_conns = self.balancer.get_unique_servers(
-                            self.packet_duplication
-                        )
-                        if target_conns:
-                            for conn in target_conns:
-                                query_packets = await self.dns_packet_parser.build_request_dns_query(
-                                    domain=conn["domain"],
-                                    session_id=self.session_id,
-                                    packet_type=Packet_Type.STREAM_FIN,
-                                    data=b"",
-                                    mtu_chars=self.synced_upload_mtu_chars,
-                                    encode_data=True,
-                                    qType=DNS_Record_Type.TXT,
-                                    stream_id=sid,
-                                    sequence_num=0,
-                                )
-                                if query_packets:
-                                    for qp in query_packets:
-                                        await async_sendto(
-                                            self.loop,
-                                            self.tunnel_sock,
-                                            qp,
-                                            (conn["resolver"], 53),
-                                        )
-
-                    stream_data = self.active_streams.pop(sid, None)
-                    await self._clear_stream_from_queue(sid)
-                    if stream_data:
-                        writer = stream_data.get("writer")
-                        await self._close_writer_safely(writer)
-
-                except Exception as e:
-                    self.logger.debug(f"Error handling dead stream {sid}: {e}")
+                await self.close_stream(sid, reason=reason)
 
             for s in list(self.active_streams.values()):
                 arq = s.get("stream")
