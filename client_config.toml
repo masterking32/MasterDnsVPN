@@ -1,0 +1,105 @@
+# MasterDnsVPN Client Configuration File
+# ----------------------------------------
+# Author: MasterkinG32
+# Github: https://github.com/masterking32
+# Year: 2026
+#
+# Place this file in the same directory as the client executable.
+# After modifying this file, restart the client to apply changes.
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+# Logging level for client output.
+# Options:
+#   DEBUG    - Detailed information, useful for debugging.
+#   INFO     - General operational messages.
+#   WARNING  - Indications of possible issues.
+#   ERROR    - Errors that prevent some operations.
+#   CRITICAL - Severe errors causing shutdown.
+LOG_LEVEL = "INFO"
+
+# ---------------------------------------------------------------------------
+# DNS Resolver Servers
+# ---------------------------------------------------------------------------
+# DNS servers that client queries will be forwarded to.
+# Recommendations:
+#   - Use fast, reliable public DNS servers (e.g., Google, Cloudflare) or your own.
+#   - Check upload/download MTU values in client logs after the first run.
+#   - Remove resolvers that show poor performance or high latency.
+RESOLVER_DNS_SERVERS = [
+    "8.8.8.8",
+    # "1.1.1.1",
+]
+
+# ---------------------------------------------------------------------------
+# MTU Settings
+# ---------------------------------------------------------------------------
+# Minimum MTU thresholds for resolver selection.
+# If a resolver's upload or download MTU is below these values, it will be excluded.
+# Set to 0 to disable minimum MTU checks.
+MIN_UPLOAD_MTU = 40
+MIN_DOWNLOAD_MTU = 40
+
+# Maximum size of data packets sent to the server.
+MAX_UPLOAD_MTU = 160
+# Maximum size of data packets received from the server.
+MAX_DOWNLOAD_MTU = 200
+
+# ---------------------------------------------------------------------------
+# Load Balancing
+# ---------------------------------------------------------------------------
+# Strategy to balance load across multiple DNS resolvers.
+# Options:
+#   1 - Random: Randomly select a resolver for each query.
+#   2 - Round Robin: Cycle through resolvers in order.
+RESOLVER_BALANCING_STRATEGY = 1
+
+# ---------------------------------------------------------------------------
+# Tunnel Domains
+# ---------------------------------------------------------------------------
+# Domains used for DNS tunneling.
+# These domains must be controlled by you and configured to point to this server.
+# Add multiple domains for redundancy or load balancing.
+DOMAINS = [
+    "t.example.com",
+    # "b.example.com",
+]
+
+# ---------------------------------------------------------------------------
+# Encryption
+# ---------------------------------------------------------------------------
+# Data encryption method.
+# IMPORTANT: This MUST match the server's DATA_ENCRYPTION_METHOD!
+# Options:
+#   0 - No encryption (NOT recommended)
+#   1 - XOR encryption (default, fast, basic security)
+#   2 - ChaCha20 encryption (stronger, slower, larger packets)
+#   3 - AES-128-CTR encryption (strong, slower, larger packets)
+#   4 - AES-192-CTR encryption (strong, slower, larger packets)
+#   5 - AES-256-CTR encryption (strongest, slowest, largest packets)
+DATA_ENCRYPTION_METHOD = 1
+
+# Encryption key used to encrypt and decrypt all tunneled data.
+# - Run the server first; it will generate and display the key in the logs.
+# - Copy that key here to ensure the client and server use the same key.
+# - If you change this key, the server config must also be updated.
+ENCRYPTION_KEY = ""
+
+# ---------------------------------------------------------------------------
+# Connection Settings
+# ---------------------------------------------------------------------------
+# Maximum time (in seconds) the client waits for a DNS response.
+DNS_QUERY_TIMEOUT = 5
+
+# IP address and port on which the client listens for local connections.
+LISTEN_IP = "127.0.0.1"
+LISTEN_PORT = 1080
+
+# Number of concurrent DNS worker tasks.
+# Increase for high-traffic clients; start with 4 and adjust as needed.
+NUM_DNS_WORKERS = 4
+
+# Number of times each packet is duplicated before sending.
+# 1 = no duplication; higher values improve reliability at the cost of bandwidth.
+PACKET_DUPLICATION_COUNT = 3
