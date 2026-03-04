@@ -74,6 +74,8 @@ class MasterDnsVPNServer:
                 self.sessions[session_id] = {
                     "last_packet_time": asyncio.get_event_loop().time(),
                     "streams": {},
+                    "stream_states": {},
+                    "outbound_queue": asyncio.PriorityQueue(),
                 }
                 self.logger.info(f"Created new session with ID: {session_id}")
                 return session_id
@@ -98,10 +100,14 @@ class MasterDnsVPNServer:
             session = self.sessions.get(session_id)
             if session:
                 streams = session.get("streams", {})
+                stream_states = session.get("stream_states", {})
+
                 for sid, stream in list(streams.items()):
                     if stream == "PENDING":
                         streams.pop(sid, None)
+                        stream_states.pop(sid, None)
                         continue
+
                     stream._fin_sent = True
                     stream.closed = True
                     if (
@@ -118,6 +124,17 @@ class MasterDnsVPNServer:
                             )
                     except Exception:
                         pass
+
+                out_queue = session.get("outbound_queue")
+                if out_queue:
+                    while not out_queue.empty():
+                        try:
+                            out_queue.get_nowait()
+                        except Exception:
+                            break
+
+                session.get("streams", {}).clear()
+                session.get("stream_states", {}).clear()
 
             del self.sessions[session_id]
             self.logger.info(f"Closed inactive session with ID: {session_id}")
@@ -284,6 +301,7 @@ class MasterDnsVPNServer:
 
         elif packet_type == Packet_Type.STREAM_FIN:
             stream = streams.get(stream_id)
+            stream_states = session.get("stream_states", {})
             if stream and stream != "PENDING":
                 await self._clear_session_stream_queue(session_id, stream_id)
                 stream._fin_sent = True
@@ -301,6 +319,7 @@ class MasterDnsVPNServer:
                 except Exception:
                     pass
                 streams.pop(stream_id, None)
+                stream_states.pop(stream_id, None)
 
         out_queue = session.get("outbound_queue")
         stream_states = session.setdefault("stream_states", {})
@@ -774,10 +793,15 @@ class MasterDnsVPNServer:
             await asyncio.sleep(0.1)
             for session_id, session in list(self.sessions.items()):
                 streams = session.get("streams", {})
+                if not streams:
+                    continue
+
+                stream_states = session.get("stream_states", {})
 
                 closed_ids = [
                     sid for sid, s in streams.items() if s != "PENDING" and s.closed
                 ]
+
                 for sid in closed_ids:
                     stream_obj = streams.get(sid)
                     await self._clear_session_stream_queue(session_id, sid)
@@ -789,6 +813,7 @@ class MasterDnsVPNServer:
                         )
 
                     streams.pop(sid, None)
+                    stream_states.pop(sid, None)
 
                 for stream in list(streams.values()):
                     if stream != "PENDING":

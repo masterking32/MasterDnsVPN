@@ -73,6 +73,11 @@ class ARQStream:
                 if not raw_data:
                     break
 
+                while len(self.snd_buf) > 2000:
+                    await asyncio.sleep(0.1)
+                    if self.closed:
+                        return
+
                 self.last_activity = time.time()
                 sn = self.snd_nxt
                 self.snd_nxt = (self.snd_nxt + 1) % 65536
