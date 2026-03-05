@@ -211,6 +211,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     steps:
+      - name: Checkout repository (fetch tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -226,10 +231,6 @@ jobs:
       - name: Get short commit SHA
         id: get_short_sha
         run: echo "short_sha=$(echo ${GITHUB_SHA} | cut -c1-7)" >> $GITHUB_OUTPUT
-      - name: Checkout repository (fetch tags)
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Build release notes body
         id: create_release
