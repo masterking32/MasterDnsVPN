@@ -1220,6 +1220,13 @@ class MasterDnsVPNClient:
                 if q_ptype == Packet_Type.STREAM_RESEND:
                     getattr(self, "pending_resends", set()).discard((q_stream_id, q_sn))
 
+                if q_ptype in (Packet_Type.STREAM_DATA, Packet_Type.STREAM_RESEND):
+                    stream_data = self.active_streams.get(q_stream_id)
+                    if stream_data and "stream" in stream_data:
+                        arq = stream_data["stream"]
+                        if arq and q_sn not in arq.snd_buf:
+                            continue
+
                 await self._send_single_packet(item)
             except Exception as e:
                 self.logger.error(f"TX Error: {e}")

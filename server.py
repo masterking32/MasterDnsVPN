@@ -359,6 +359,12 @@ class MasterDnsVPNServer:
                             (q_stream_id, q_sn)
                         )
 
+                    if q_ptype in (Packet_Type.STREAM_DATA, Packet_Type.STREAM_RESEND):
+                        arq = session.get("streams", {}).get(q_stream_id)
+                        if arq and arq != "PENDING":
+                            if q_sn not in arq.snd_buf:
+                                continue
+
                     res_ptype, res_stream_id, res_sn, res_data = (
                         q_ptype,
                         q_stream_id,
