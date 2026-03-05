@@ -308,10 +308,20 @@ jobs:
           echo "Contents of release_assets:"
           find release_assets -maxdepth 5 -type f -print || true
 
+      - name: Fail if no artifacts downloaded
+        run: |
+          set -euo pipefail
+          cnt=$(find release_assets -type f | wc -l || true)
+          echo "Found $cnt artifact file(s) in release_assets"
+          if [ "$cnt" -eq 0 ]; then
+            echo "No artifacts found to upload. Aborting release." >&2
+            exit 1
+          fi
+
       - name: Create GitHub Release and upload assets
         uses: softprops/action-gh-release@v1
         with:
-          files: release_assets/**/*
+          files: release_assets/**
           tag_name: ${{ steps.get_short_sha.outputs.short_sha }}-${{ steps.get_timestamp.outputs.ts }}
           name: Release-${{ steps.get_short_sha.outputs.short_sha }}-${{ steps.get_timestamp.outputs.ts }}
           body: ${{ steps.create_release.outputs.body }}
