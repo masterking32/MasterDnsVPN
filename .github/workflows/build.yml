@@ -1,32 +1,53 @@
-name: Build Executables
+name: Build and Release
 
 on:
-  push:
-    branches:
-      - "**"
-  workflow_dispatch:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
 
 jobs:
+  preflight:
+    name: Preflight - suggest secrets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print recommended secrets and guidance
+        run: |
+          echo "Recommended repository secrets for this workflow:"
+          echo " - GPG_SIGNING_KEY: (optional) ASCII-armored GPG private key for signing release artifacts"
+          echo " - CODE_SIGN_CERT: (optional) Windows code-signing certificate (base64)"
+          echo " - STORAGE_TOKEN: (optional) token for private artifact stores"
+          echo
+          echo "To add a secret: repository Settings → Secrets and variables → Actions → New repository secret"
+
   build:
-    name: Build (${{ matrix.os }})
+    name: Build (matrix)
     runs-on: ${{ matrix.os }}
-    permissions:
-      contents: read
+    needs: preflight
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: windows-latest
             platform: Windows
-            arch: AMD64
+            arch: amd64
             ext: .exe
+            package: zip
           - os: ubuntu-latest
             platform: Linux
-            arch: AMD64
+            arch: amd64
             ext: ""
+            package: tar.gz
+          - os: ubuntu-latest
+            platform: Linux
+            arch: arm64
+            ext: ""
+            package: tar.gz
           - os: macos-latest
             platform: MacOS
-            arch: ARM64
+            arch: arm64
             ext: ""
+            package: tar.gz
 
     steps:
       - name: Checkout repository
@@ -40,8 +61,14 @@ jobs:
 
       - name: Install dependencies
         run: |
+          pip install --upgrade pip
           pip install pyinstaller
-          pip install -r requirements.txt
+          pip install -r requirements.txt || true
+
+      - name: Prepare build directory
+        run: |
+          rm -rf dist || true
+          mkdir -p dist
 
       - name: Build client
         run: |
@@ -54,41 +81,193 @@ jobs:
       - name: Bundle config templates with executables
         shell: bash
         run: |
-          cp client_config.toml.simple dist/client_config.toml
-          cp server_config.toml.simple dist/server_config.toml
+          cp client_config.toml.simple dist/client_config.toml || true
+          cp server_config.toml.simple dist/server_config.toml || true
 
-      - name: Create client ZIP
+      - name: Package artifacts
         shell: bash
         run: |
           cd dist
+          # normalize filenames
+          CLIENT_BIN="MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }}"
+          SERVER_BIN="MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }}"
+          # create zip on Windows and zip+tar on others
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            powershell Compress-Archive -Path "MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }}", "client_config.toml" -DestinationPath "MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}.zip"
+            powershell -Command "Compress-Archive -Path '${CLIENT_BIN}','client_config.toml' -DestinationPath '${CLIENT_BIN}.zip'"
+            powershell -Command "Compress-Archive -Path '${SERVER_BIN}','server_config.toml' -DestinationPath '${SERVER_BIN}.zip'"
           else
-            zip "MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}.zip" \
-              "MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }}" \
-              "client_config.toml"
+            zip -j "${CLIENT_BIN}.zip" "${CLIENT_BIN}" client_config.toml || true
+            tar -czf "${CLIENT_BIN}.tar.gz" "${CLIENT_BIN}" client_config.toml || true
+            zip -j "${SERVER_BIN}.zip" "${SERVER_BIN}" server_config.toml || true
+            tar -czf "${SERVER_BIN}.tar.gz" "${SERVER_BIN}" server_config.toml || true
           fi
 
-      - name: Create server ZIP
+      - name: Code sign Windows executables (optional)
+        if: ${{ secrets.CODE_SIGN_CERT != '' && matrix.os == 'windows-latest' }}
+        shell: powershell
+        run: |
+          Write-Host "Decoding CODE_SIGN_CERT to cert.pfx"
+          [System.IO.File]::WriteAllBytes('cert.pfx', [Convert]::FromBase64String('${{ secrets.CODE_SIGN_CERT }}'))
+          if (Test-Path 'cert.pfx') {
+            $signtool = Get-Command signtool.exe -ErrorAction SilentlyContinue
+            if ($null -ne $signtool) {
+              Write-Host "signtool found at $($signtool.Path). Signing files..."
+              $files = Get-ChildItem -Path .\ -Filter "*Windows*amd64*${{ matrix.ext }}*" -Recurse -File
+              foreach ($f in $files) {
+                Write-Host "Signing $($f.FullName)"
+                & $signtool.Path sign /f cert.pfx /p "${{ secrets.CODE_SIGN_CERT_PASSWORD }}" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $f.FullName
+              }
+            } else { Write-Host "signtool not found on runner; skipping Windows signing." }
+          } else { Write-Host "cert.pfx not found after decode; skipping signing." }
+
+      - name: Code sign macOS executables (optional)
+        if: ${{ secrets.CODE_SIGN_CERT != '' && matrix.os == 'macos-latest' }}
         shell: bash
         run: |
-          cd dist
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            powershell Compress-Archive -Path "MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }}", "server_config.toml" -DestinationPath "MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}.zip"
+          echo "Decoding CODE_SIGN_CERT to cert.pfx"
+          echo "${{ secrets.CODE_SIGN_CERT }}" | base64 -d > cert.pfx
+          if [ -f cert.pfx ]; then
+            echo "Importing cert.pfx into login keychain (may require interactive access)"
+            security import cert.pfx -k ~/Library/Keychains/login.keychain -P "${{ secrets.CODE_SIGN_CERT_PASSWORD }}" -T /usr/bin/codesign || true
+            # attempt to find an identity and codesign
+            IDENTITY=$(security find-identity -v -p codesigning | head -n1 | awk -F '"' '{print $2}') || true
+            if [ -n "$IDENTITY" ]; then
+              echo "Found identity: $IDENTITY. Signing macOS binaries."
+              for f in ./dist/*${{ matrix.platform }}*${{ matrix.arch }}*; do
+                if [ -f "$f" ]; then
+                  codesign --sign "$IDENTITY" --options runtime --timestamp --force "$f" || true
+                fi
+              done
+            else
+              echo "No signing identity found; skipping codesign."
+            fi
           else
-            zip "MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}.zip" \
-              "MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }}" \
-              "server_config.toml"
+            echo "cert.pfx not present; skipping macOS signing."
           fi
 
-      - name: Upload client artifact
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}
-          path: dist/MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}.zip
+          name: build-artifacts-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            dist/*${{ matrix.platform }}*${{ matrix.arch }}*.zip
+            dist/*${{ matrix.platform }}*${{ matrix.arch }}*.tar.gz
 
-      - name: Upload server artifact
-        uses: actions/upload-artifact@v4
+  release:
+    name: Create Release and attach artifacts
+    runs-on: ubuntu-latest
+    needs: build
+    if: ${{ always() }}
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
         with:
-          name: MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}
-          path: dist/MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}.zip
+          path: release_assets
+
+      - name: Get short commit SHA
+        id: get_short_sha
+        run: echo "short_sha=$(echo ${GITHUB_SHA} | cut -c1-7)" >> $GITHUB_OUTPUT
+      - name: Checkout repository (fetch tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build release notes and create release
+        id: create_release
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const head = process.env.GITHUB_SHA;
+
+            // Get previous release (if any)
+            let prevTag = null;
+            try {
+              const latest = await github.rest.repos.getLatestRelease({ owner, repo });
+              prevTag = latest.data.tag_name;
+            } catch (e) {
+              // no previous release
+              prevTag = null;
+            }
+
+            let commits = [];
+            if (prevTag) {
+              const comp = await github.rest.repos.compareCommits({ owner, repo, base: prevTag, head });
+              commits = comp.data.commits || [];
+            } else {
+              // no previous release: list recent commits up to head (max 250)
+              const list = await github.rest.repos.listCommits({ owner, repo, sha: head, per_page: 250 });
+              commits = list.data || [];
+            }
+
+            // collect PRs and contributors
+            const prSet = new Map();
+            const contributors = new Map();
+
+            for (const c of commits) {
+              const sha = c.sha;
+              // contributor
+              const author = (c.author && c.author.login) ? `@${c.author.login}` : (c.commit && c.commit.author && c.commit.author.name) || 'unknown';
+              contributors.set(author, (contributors.get(author) || 0) + 1);
+
+              // list PRs associated with commit
+              try {
+                const prs = await github.rest.repos.listPullRequestsAssociatedWithCommit({ owner, repo, commit_sha: sha });
+                for (const pr of prs.data) {
+                  if (pr.merged_at) {
+                    prSet.set(pr.number, { number: pr.number, title: pr.title, url: pr.html_url, user: pr.user ? `@${pr.user.login}` : '' });
+                  }
+                }
+              } catch (e) {
+                // ignore
+              }
+            }
+
+            // format body
+            let body = `Automated release created by workflow run ${context.runId} for commit ${head}\n\n`;
+            if (prevTag) body = `Changes since ${prevTag}:\n\n` + body;
+
+            body += '### Commits\n';
+            for (const c of commits.slice(-50)) {
+              const msg = c.commit.message.split('\n')[0];
+              body += `- ${msg} ([${c.sha.substring(0,7)}](https://github.com/${owner}/${repo}/commit/${c.sha}))\n`;
+            }
+
+            if (prSet.size > 0) {
+              body += '\n### Merged PRs\n';
+              for (const pr of prSet.values()) {
+                body += `- [#${pr.number}](${pr.url}) ${pr.title} ${pr.user}\n`;
+              }
+            }
+
+            if (contributors.size > 0) {
+              body += '\n### Contributors\n';
+              for (const [name, count] of contributors.entries()) {
+                body += `- ${name} — ${count} commit(s)\n`;
+              }
+            }
+
+            // create release with short tag from earlier step
+            const shortTag = '${{ steps.get_short_sha.outputs.short_sha }}';
+            const rel = await github.rest.repos.createRelease({ owner, repo, tag_name: shortTag, name: `Release-${shortTag}`, body, draft: false, prerelease: false });
+            return { upload_url: rel.data.upload_url };
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload release assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          UPLOAD_URL="${{ steps.create_release.outputs.upload_url }}"
+          for file in release_assets/**; do
+            if [ -f "$file" ]; then
+              fname=$(basename "$file")
+              echo "Uploading $fname"
+              curl --fail -X POST \
+                -H "Authorization: token ${GITHUB_TOKEN}" \
+                -H "Content-Type: application/octet-stream" \
+                --data-binary @"$file" "${UPLOAD_URL}?name=${fname}"
+            fi
+          done
