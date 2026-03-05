@@ -82,8 +82,9 @@ class MasterDnsVPNServer:
                 self.sessions[session_id] = {
                     "last_packet_time": asyncio.get_event_loop().time(),
                     "streams": {},
-                    "stream_states": {},
-                    "outbound_queue": asyncio.PriorityQueue(),
+                    "session_queue": asyncio.PriorityQueue(),
+                    "stream_queues": {},
+                    "round_robin_index": 0,
                     "pending_resends": set(),
                     "canceled_streams": set(),
                     "enqueue_seq": 0,
@@ -115,13 +116,22 @@ class MasterDnsVPNServer:
             except Exception:
                 pass
 
-        out_queue = session.get("outbound_queue")
-        if out_queue:
-            while not out_queue.empty():
+        session_queue = session.get("session_queue")
+        if session_queue:
+            while not session_queue.empty():
                 try:
-                    out_queue.get_nowait()
+                    session_queue.get_nowait()
                 except Exception:
                     break
+
+        stream_queues = session.get("stream_queues", {})
+        for sq in stream_queues.values():
+            while not sq.empty():
+                try:
+                    sq.get_nowait()
+                except Exception:
+                    break
+        stream_queues.clear()
 
         del self.sessions[session_id]
         self.logger.info(f"Closed session with ID: {session_id}")
@@ -312,20 +322,32 @@ class MasterDnsVPNServer:
         elif packet_type == Packet_Type.STREAM_FIN:
             await self.close_stream(session_id, stream_id, reason="Client sent FIN")
 
-        out_queue = session.get("outbound_queue")
+        session_queue = session.get("session_queue")
+        stream_queues = session.get("stream_queues", {})
+        canceled = session.get("canceled_streams", set())
 
         res_data = None
         res_stream_id = 0
         res_sn = 0
         res_ptype = Packet_Type.PONG
 
-        if out_queue:
+        active_streams = [sid for sid, q in stream_queues.items() if not q.empty()]
+
+        if active_streams:
+            rr_index = session.get("round_robin_index", 0)
+            if rr_index >= len(active_streams):
+                rr_index = 0
+
+            selected_sid = active_streams[rr_index]
+            target_queue = stream_queues[selected_sid]
+
+            session["round_robin_index"] = (rr_index + 1) % len(active_streams)
+
             try:
-                while not out_queue.empty():
-                    item = out_queue.get_nowait()
+                while not target_queue.empty():
+                    item = target_queue.get_nowait()
                     q_ptype, q_stream_id, q_sn = item[3], item[4], item[5]
 
-                    canceled = session.get("canceled_streams", set())
                     if q_stream_id in canceled and q_ptype not in (
                         Packet_Type.STREAM_FIN,
                         Packet_Type.STREAM_SYN_ACK,
@@ -347,9 +369,24 @@ class MasterDnsVPNServer:
             except Exception:
                 pass
 
+        if not res_data and session_queue and not session_queue.empty():
+            try:
+                while not session_queue.empty():
+                    item = session_queue.get_nowait()
+                    q_ptype, q_stream_id, q_sn = item[3], item[4], item[5]
+                    res_ptype, res_stream_id, res_sn, res_data = (
+                        q_ptype,
+                        q_stream_id,
+                        q_sn,
+                        item[6],
+                    )
+                    break
+            except Exception:
+                pass
+
         if not res_data:
             pong_data = (
-                f"PONG:{int(time.time()) % 10000}:{random.randint(1000, 9999)}".encode()
+                f"PO:{int(time.time()) % 10000}:{random.randint(1000, 9999)}".encode()
             )
             res_ptype, res_stream_id, res_sn, res_data = (
                 Packet_Type.PONG,
@@ -677,7 +714,6 @@ class MasterDnsVPNServer:
             return
 
         streams = session.get("streams", {})
-        stream_states = session.get("stream_states", {})
         stream = streams.get(stream_id)
 
         if not stream:
@@ -700,7 +736,6 @@ class MasterDnsVPNServer:
             await stream.close(reason=reason)
 
         streams.pop(stream_id, None)
-        stream_states.pop(stream_id, None)
 
     async def _server_enqueue_tx(
         self,
@@ -718,7 +753,13 @@ class MasterDnsVPNServer:
             return
 
         session = self.sessions[session_id]
-        out_queue = session.setdefault("outbound_queue", asyncio.PriorityQueue())
+
+        if stream_id == 0:
+            target_queue = session.setdefault("session_queue", asyncio.PriorityQueue())
+        else:
+            stream_queues = session.setdefault("stream_queues", {})
+            target_queue = stream_queues.setdefault(stream_id, asyncio.PriorityQueue())
+
         pending_resends = session.setdefault("pending_resends", set())
 
         ptype = Packet_Type.STREAM_DATA
@@ -746,7 +787,7 @@ class MasterDnsVPNServer:
         session["enqueue_seq"] = (session.get("enqueue_seq", 0) + 1) & 0x7FFFFFFF
         seq = session["enqueue_seq"]
 
-        await out_queue.put(
+        await target_queue.put(
             (effective_priority, seq, time.time(), ptype, stream_id, sn, data)
         )
 

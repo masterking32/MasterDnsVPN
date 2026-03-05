@@ -162,15 +162,37 @@ class MasterDnsVPNClient:
 
     async def _send_ping_packet(self, payload=None):
         """Unified function to queue PING/PULL packets with lowest priority (4) and max limit (3)."""
-        if not hasattr(self, "outbound_queue") or self.outbound_queue is None:
+        if not hasattr(self, "session_queue") or self.session_queue is None:
             return
 
-        # outbound_queue items layout: (priority, seq, time, ptype, stream_id, sn, data)
         ping_count = sum(
             1
-            for item in self.outbound_queue._queue
+            for item in self.session_queue._queue
             if len(item) > 3 and item[3] == Packet_Type.PING
         )
+
+        if ping_count >= 3:
+            return
+
+        if payload is None:
+            payload = f"P{int(time.time() % 60)}R{random.randint(100, 999)}".encode()
+
+        try:
+            self._enqueue_seq = (getattr(self, "_enqueue_seq", 0) + 1) & 0x7FFFFFFF
+            self.session_queue.put_nowait(
+                (
+                    4,
+                    self._enqueue_seq,
+                    self.loop.time(),
+                    Packet_Type.PING,
+                    0,
+                    0,
+                    payload,
+                )
+            )
+            self.tx_event.set()
+        except asyncio.QueueFull:
+            pass
 
         if ping_count >= 3:
             return
@@ -798,7 +820,10 @@ class MasterDnsVPNClient:
         """Start local TCP server and main worker tasks."""
         self.logger.info("Entering VPN Tunnel Main Loop...")
         self.session_restart_event = asyncio.Event()
-        self.outbound_queue = asyncio.PriorityQueue()
+        self.session_queue = asyncio.PriorityQueue()
+        self.stream_queues = {}
+        self.round_robin_index = 0
+        self.tx_event = asyncio.Event()
         self.active_streams = {}
         self.pending_resends = set()
         self.canceled_streams = set()
@@ -907,6 +932,21 @@ class MasterDnsVPNClient:
                 except Exception:
                     pass
 
+            if hasattr(self, "session_queue"):
+                while not self.session_queue.empty():
+                    try:
+                        self.session_queue.get_nowait()
+                    except Exception:
+                        break
+            if hasattr(self, "stream_queues"):
+                for sq in self.stream_queues.values():
+                    while not sq.empty():
+                        try:
+                            sq.get_nowait()
+                        except Exception:
+                            break
+                self.stream_queues.clear()
+
         if not stop_task.done():
             stop_task.cancel()
         if not restart_task.done():
@@ -987,17 +1027,13 @@ class MasterDnsVPNClient:
             syn_data = (
                 f"PONG:{int(time.time()) % 10000}:{random.randint(1000, 9999)}".encode()
             )
-            self.outbound_queue.put_nowait(
-                (
-                    0,
-                    0,
-                    now,
-                    Packet_Type.STREAM_SYN,
-                    stream_id,
-                    0,
-                    syn_data,
-                )
+            target_queue = self.stream_queues.setdefault(
+                stream_id, asyncio.PriorityQueue()
             )
+            target_queue.put_nowait(
+                (0, 0, now, Packet_Type.STREAM_SYN, stream_id, 0, syn_data)
+            )
+            self.tx_event.set()
         except asyncio.QueueFull:
             self.logger.debug("Queue is full, dropping new connection.")
             await self._close_writer_safely(writer)
@@ -1047,9 +1083,23 @@ class MasterDnsVPNClient:
                 return
             self.pending_resends.add(resend_key)
 
+        if stream_id == 0:
+            target_queue = self.session_queue
+        else:
+            target_queue = self.stream_queues.setdefault(
+                stream_id, asyncio.PriorityQueue()
+            )
+
+        if stream_id == 0:
+            target_queue = self.session_queue
+        else:
+            target_queue = self.stream_queues.setdefault(
+                stream_id, asyncio.PriorityQueue()
+            )
+
         try:
             self._enqueue_seq = (getattr(self, "_enqueue_seq", 0) + 1) & 0x7FFFFFFF
-            self.outbound_queue.put_nowait(
+            target_queue.put_nowait(
                 (
                     effective_priority,
                     self._enqueue_seq,
@@ -1060,6 +1110,7 @@ class MasterDnsVPNClient:
                     data,
                 )
             )
+            self.tx_event.set()
         except asyncio.QueueFull:
             pass
 
@@ -1067,23 +1118,58 @@ class MasterDnsVPNClient:
         self.logger.debug("<magenta>[TX]</magenta> TX Worker started.")
         while not self.should_stop.is_set() and not self.session_restart_event.is_set():
             try:
-                item = await asyncio.wait_for(self.outbound_queue.get(), timeout=0.2)
+                await asyncio.wait_for(self.tx_event.wait(), timeout=0.2)
+            except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                self.logger.error(f"TX wait error: {e}")
+                continue
 
+            item = None
+            active_streams = [
+                sid for sid, q in self.stream_queues.items() if not q.empty()
+            ]
+
+            if active_streams:
+                if self.round_robin_index >= len(active_streams):
+                    self.round_robin_index = 0
+
+                selected_sid = active_streams[self.round_robin_index]
+                target_queue = self.stream_queues[selected_sid]
+                self.round_robin_index = (self.round_robin_index + 1) % len(
+                    active_streams
+                )
+
+                try:
+                    item = target_queue.get_nowait()
+                except Exception:
+                    pass
+
+            elif not self.session_queue.empty():
+                try:
+                    item = self.session_queue.get_nowait()
+                except Exception:
+                    pass
+
+            else:
+                self.tx_event.clear()
+                continue
+
+            if not item:
+                continue
+
+            try:
                 q_ptype, q_stream_id, q_sn = item[3], item[4], item[5]
 
                 if q_stream_id in getattr(
                     self, "canceled_streams", set()
                 ) and q_ptype not in (Packet_Type.STREAM_FIN, Packet_Type.STREAM_SYN):
-                    self.outbound_queue.task_done()
                     continue
 
                 if q_ptype == Packet_Type.STREAM_RESEND:
                     getattr(self, "pending_resends", set()).discard((q_stream_id, q_sn))
 
                 await self._send_single_packet(item)
-                self.outbound_queue.task_done()
-            except asyncio.TimeoutError:
-                continue
             except Exception as e:
                 self.logger.error(f"TX Error: {e}")
 
@@ -1386,11 +1472,11 @@ def main():
         asyncio.set_event_loop(loop)
 
         def custom_exception_handler(loop, context):
-            msg = context.get("message", "")
-            if "socket.send() raised exception" in msg:
-                return
-
-            loop.default_exception_handler(context)
+            # msg = context.get("message", "")
+            # if "socket.send() raised exception" in msg:
+            #     return
+            # loop.default_exception_handler(context)
+            return
 
         loop.set_exception_handler(custom_exception_handler)
 
