@@ -95,11 +95,37 @@ jobs:
           cp client_config.toml.simple dist/client_config.toml || true
           cp server_config.toml.simple dist/server_config.toml || true
 
-      - name: Package artifacts
+      - name: Package artifacts (Windows)
+        if: ${{ matrix.os == 'windows-latest' }}
+        shell: powershell
+        run: |
+          Set-StrictMode -Version Latest
+          Set-Location dist
+          $platform = '${{ matrix.platform }}'
+          $arch = '${{ matrix.arch }}'
+          $ext = '${{ matrix.ext }}'
+          $archUpper = $arch.ToUpper()
+          $clientDesiredBase = "MasterDnsVPN_Client_${platform}_$archUpper"
+          $serverDesiredBase = "MasterDnsVPN_Server_${platform}_$archUpper"
+          $clientOrig = "MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }}"
+          $serverOrig = "MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }}"
+
+          if (Test-Path $clientOrig) {
+            Rename-Item -Path $clientOrig -NewName "${clientDesiredBase}${ext}" -Force
+          }
+          if (Test-Path $serverOrig) {
+            Rename-Item -Path $serverOrig -NewName "${serverDesiredBase}${ext}" -Force
+          }
+
+          Compress-Archive -Path "${clientDesiredBase}${ext}","client_config.toml" -DestinationPath "${clientDesiredBase}.zip" -Force
+          Compress-Archive -Path "${serverDesiredBase}${ext}","server_config.toml" -DestinationPath "${serverDesiredBase}.zip" -Force
+
+      - name: Package artifacts (non-Windows)
+        if: ${{ matrix.os != 'windows-latest' }}
         shell: bash
         run: |
+          set -euo pipefail
           cd dist
-          # compute display-friendly uppercase arch
           ARCH_UPPER=$(echo "${{ matrix.arch }}" | tr '[:lower:]' '[:upper:]')
           PLATFORM="${{ matrix.platform }}"
 
@@ -109,7 +135,6 @@ jobs:
           CLIENT_ORIG="MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }}"
           SERVER_ORIG="MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }}"
 
-          # rename built binaries to desired names (preserve extension)
           if [ -f "${CLIENT_ORIG}" ]; then
             mv "${CLIENT_ORIG}" "${CLIENT_DESIRED_BASE}${{ matrix.ext }}" || true
           fi
@@ -117,26 +142,18 @@ jobs:
             mv "${SERVER_ORIG}" "${SERVER_DESIRED_BASE}${{ matrix.ext }}" || true
           fi
 
-          # prepare package names
           CLIENT_ZIP="${CLIENT_DESIRED_BASE}.zip"
           SERVER_ZIP="${SERVER_DESIRED_BASE}.zip"
           CLIENT_TAR="${CLIENT_DESIRED_BASE}.tar.gz"
           SERVER_TAR="${SERVER_DESIRED_BASE}.tar.gz"
 
-          # choose toml files
           CLIENT_TOML="client_config.toml"
           SERVER_TOML="server_config.toml"
 
-          # package for Windows using PowerShell's Compress-Archive when on Windows runner
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            powershell -Command "Compress-Archive -Path '${CLIENT_DESIRED_BASE}${{ matrix.ext}}','${CLIENT_TOML}' -DestinationPath '${CLIENT_ZIP}'"
-            powershell -Command "Compress-Archive -Path '${SERVER_DESIRED_BASE}${{ matrix.ext}}','${SERVER_TOML}' -DestinationPath '${SERVER_ZIP}'"
-          else
-            zip -j "${CLIENT_ZIP}" "${CLIENT_DESIRED_BASE}${{ matrix.ext }}" "${CLIENT_TOML}" || true
-            tar -czf "${CLIENT_TAR}" "${CLIENT_DESIRED_BASE}${{ matrix.ext }}" "${CLIENT_TOML}" || true
-            zip -j "${SERVER_ZIP}" "${SERVER_DESIRED_BASE}${{ matrix.ext }}" "${SERVER_TOML}" || true
-            tar -czf "${SERVER_TAR}" "${SERVER_DESIRED_BASE}${{ matrix.ext }}" "${SERVER_TOML}" || true
-          fi
+          zip -j "${CLIENT_ZIP}" "${CLIENT_DESIRED_BASE}${{ matrix.ext }}" "${CLIENT_TOML}" || true
+          tar -czf "${CLIENT_TAR}" "${CLIENT_DESIRED_BASE}${{ matrix.ext }}" "${CLIENT_TOML}" || true
+          zip -j "${SERVER_ZIP}" "${SERVER_DESIRED_BASE}${{ matrix.ext }}" "${SERVER_TOML}" || true
+          tar -czf "${SERVER_TAR}" "${SERVER_DESIRED_BASE}${{ matrix.ext }}" "${SERVER_TOML}" || true
 
       - name: Code sign Windows executables (optional)
         if: ${{ env.CODE_SIGN_CERT != '' && matrix.os == 'windows-latest' }}
