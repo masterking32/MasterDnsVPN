@@ -47,11 +47,16 @@ class MasterDnsVPNClient:
         self.session_restart_event = None
         self.config: dict = load_config("client_config.toml")
         if not os.path.isfile(get_config_path("client_config.toml")):
-            print(
-                "[MasterDnsVPN] Config file 'client_config.toml' not found. "
+            self.logger = getLogger(log_level=self.config.get("LOG_LEVEL", "DEBUG"))
+            self.logger.error(
+                "Config file '<cyan>client_config.toml</cyan>' not found."
+            )
+            self.logger.error(
                 "Please place it in the same directory as the executable and restart."
             )
+            input("Press Enter to exit...")
             sys.exit(1)
+
         self.logger = getLogger(log_level=self.config.get("LOG_LEVEL", "INFO"))
         self.resolvers: list = self.config.get("RESOLVER_DNS_SERVERS", [])
         self.domains: list = self.config.get("DOMAINS", [])
@@ -72,6 +77,7 @@ class MasterDnsVPNClient:
                 "No encryption key provided. "
                 "Please set <yellow>ENCRYPTION_KEY</yellow> in <yellow>client_config.toml</yellow>."
             )
+            input("Press Enter to exit...")
             sys.exit(1)
 
         self.dns_packet_parser = DnsPacketParser(
@@ -164,7 +170,7 @@ class MasterDnsVPNClient:
                 pass
 
     async def _send_ping_packet(self, payload=None):
-        """Unified function to queue PING/PULL packets with lowest priority (4) and max limit (5)."""
+        """Unified function to queue PING/PULL packets with lowest priority (4) and max limit (3)."""
         if not hasattr(self, "outbound_queue") or self.outbound_queue is None:
             return
 
@@ -175,7 +181,7 @@ class MasterDnsVPNClient:
             if len(item) > 3 and item[3] == Packet_Type.PING
         )
 
-        if ping_count >= 5:
+        if ping_count >= 3:
             return
 
         if payload is None:
@@ -1010,30 +1016,12 @@ class MasterDnsVPNClient:
         }
 
     async def _clear_stream_from_queue(self, stream_id: int):
-        """Removes all packets of a specific stream from the outbound queue except FIN."""
+        """Marks a stream as canceled so the TX worker skips its packets instantly."""
         if hasattr(self, "canceled_streams"):
             self.canceled_streams.add(stream_id)
-            self.logger.debug(f"Stream {stream_id} marked as canceled in queue.")
-
-        if not hasattr(self, "outbound_queue") or self.outbound_queue.empty():
-            return
-
-        items = []
-        while not self.outbound_queue.empty():
-            try:
-                item = self.outbound_queue.get_nowait()
-                if item[4] != stream_id or item[3] == Packet_Type.STREAM_FIN:
-                    items.append(item)
-            except asyncio.QueueEmpty:
-                break
-
-        for item in items:
-            try:
-                self.outbound_queue.put_nowait(item)
-            except asyncio.QueueFull:
-                pass
-
-        self.logger.debug(f"Queue cleared for Stream {stream_id}")
+            self.logger.debug(
+                f"Stream {stream_id} marked as canceled. TX worker will skip its pending packets."
+            )
 
     async def _client_enqueue_tx(
         self, priority, stream_id, sn, data, is_ack=False, is_fin=False, is_resend=False
@@ -1124,9 +1112,12 @@ class MasterDnsVPNClient:
                 else b""
             )
 
-            target_conns = self.balancer.get_unique_servers(self.packet_duplication)
-            if not target_conns:
-                return
+            if stream_id and stream_id != 0:
+                target_conns = self.balancer.get_servers_for_stream(
+                    stream_id, self.packet_duplication
+                )
+            else:
+                target_conns = self.balancer.get_unique_servers(self.packet_duplication)
 
             for conn in target_conns:
                 self.balancer.report_send(f"{conn['resolver']}:{conn['domain']}")
@@ -1225,6 +1216,7 @@ class MasterDnsVPNClient:
                     writer=writer,
                     mtu=safe_uplink_mtu,
                     logger=self.logger,
+                    window_size=self.config.get("ARQ_WINDOW_SIZE", 600),
                 )
 
                 self.active_streams[stream_id]["stream"] = stream

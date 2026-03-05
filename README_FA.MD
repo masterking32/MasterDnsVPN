@@ -56,6 +56,7 @@
 |------------|--------|
 | 🪟 ویندوز (AMD64) | [MasterDnsVPN_Client_Windows_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Windows_AMD64.zip) |
 | 🐧 لینوکس (AMD64) | [MasterDnsVPN_Client_Linux_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Linux_AMD64.zip) |
+| 🐧 لینوکس (ARM64) | [MasterDnsVPN_Client_Linux_ARM64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Linux_ARM64.zip) |
 | 🍎 مک‌اواس (ARM64) | [MasterDnsVPN_Client_MacOS_ARM64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_MacOS_ARM64.zip) |
 
 **دانلود سرور:**
@@ -64,6 +65,7 @@
 |------------|--------|
 | 🪟 ویندوز (AMD64) | [MasterDnsVPN_Server_Windows_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Windows_AMD64.zip) |
 | 🐧 لینوکس (AMD64) | [MasterDnsVPN_Server_Linux_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Linux_AMD64.zip) |
+| 🐧 لینوکس (ARM64) | [MasterDnsVPN_Server_Linux_ARM64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Linux_ARM64.zip) |
 | 🍎 مک‌اواس (ARM64) | [MasterDnsVPN_Server_MacOS_ARM64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_MacOS_ARM64.zip) |
 
 هر فایل ZIP کلاینت شامل فایل اجرایی و یک فایل قالب `client_config.toml` است. هر فایل ZIP سرور شامل فایل اجرایی و یک فایل قالب `server_config.toml` است.
@@ -171,6 +173,7 @@ python client.py
 | `SESSION_CLEANUP_INTERVAL` | `60` | بازه زمانی (ثانیه) برای پاکسازی نشست‌های منقضی‌شده. |
 | `FORWARD_IP` | `"127.0.0.1"` | آدرس IP پروکسی/سرویس محلی که ترافیک رمزگشایی‌شده به آن ارسال می‌شود. |
 | `FORWARD_PORT` | `8080` | پورت پروکسی/سرویس محلی (مثلاً `1080` برای SOCKS5، `443` برای VLESS). |
+| `ARQ_WINDOW_SIZE` | `600` | اندازه پنجره ARQ (تعداد پکت‌های بدون تأیید که می‌توانند در جریان باشند). اندازه‌های بزرگ‌تر می‌توانند عملکرد را در اتصالات با تأخیر بالا بهبود بخشند اما ممکن است مصرف حافظه را افزایش دهند. |
 
 ### 💻 کلاینت — `client_config.toml`
 
@@ -191,6 +194,7 @@ python client.py
 | `LISTEN_PORT` | `1080` | پورت محلی پروکسی SOCKS5. برنامه خود را به این آدرس هدایت کنید. |
 | `NUM_DNS_WORKERS` | `4` | تعداد وظایف async DNS موازی. برای ترافیک بالاتر افزایش دهید. |
 | `PACKET_DUPLICATION_COUNT` | `3` | تعداد مسیرهای resolver+domain که هر پکت به‌طور همزمان از آن‌ها ارسال می‌شود. بیشتر = قابل‌اطمینان‌تر اما پهنای باند بیشتر. |
+| `ARQ_WINDOW_SIZE` | `600` | اندازه پنجره ARQ (تعداد پکت‌های بدون تأیید که می‌توانند در جریان باشند). اندازه‌های بزرگ‌تر می‌توانند عملکرد را در اتصالات با تأخیر بالا بهبود بخشند اما ممکن است مصرف حافظه را افزایش دهند. |
 
 ---
 

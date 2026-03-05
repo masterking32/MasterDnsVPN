@@ -18,3 +18,8 @@ logs/
 *.o
 *.h
 *.cpp
+*.zip
+*.tar.gz
+*.bak
+*.tmp
+.exe

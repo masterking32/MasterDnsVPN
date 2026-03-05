@@ -41,11 +41,16 @@ class MasterDnsVPNServer:
 
         self.config = load_config("server_config.toml")
         if not os.path.isfile(get_config_path("server_config.toml")):
-            print(
-                "[MasterDnsVPN] Config file 'server_config.toml' not found. "
+            self.logger = getLogger(log_level=self.config.get("LOG_LEVEL", "DEBUG"))
+            self.logger.error(
+                "Config file '<cyan>server_config.toml</cyan>' not found."
+            )
+            self.logger.error(
                 "Please place it in the same directory as the executable and restart."
             )
+            input("Press Enter to exit...")
             sys.exit(1)
+
         self.logger = getLogger(log_level=self.config.get("LOG_LEVEL", "INFO"))
         self.allowed_domains = self.config.get("DOMAIN", [])
         self.encryption_method: int = self.config.get("DATA_ENCRYPTION_METHOD", 1)
@@ -794,6 +799,7 @@ class MasterDnsVPNServer:
                 writer=writer,
                 mtu=safe_downlink_mtu,
                 logger=self.logger,
+                window_size=self.config.get("ARQ_WINDOW_SIZE", 600),
             )
 
             self.sessions[session_id]["streams"][stream_id] = stream

@@ -62,3 +62,25 @@ class DNSBalancer:
                 selected.append(self.valid_servers[self.rr_index])
                 self.rr_index = (self.rr_index + 1) % self.valid_servers_count
             return selected
+
+    def get_servers_for_stream(self, stream_id, required_count):
+        """
+        Return a list of servers to use for a given stream.
+        If required_count==1, prefer affinity: deterministic selection by stream_id.
+        Otherwise fall back to get_unique_servers.
+        """
+        actual_count = min(required_count, self.valid_servers_count)
+        if actual_count == 0:
+            return []
+
+        if actual_count == 1:
+            # affinity: stable mapping from stream_id to server index
+            try:
+                idx = hash(stream_id) % self.valid_servers_count
+            except Exception:
+                idx = self.rr_index % self.valid_servers_count
+
+            if 0 <= idx < self.valid_servers_count:
+                return [self.valid_servers[idx]]
+
+        return self.get_unique_servers(required_count)

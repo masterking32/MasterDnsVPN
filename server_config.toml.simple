@@ -80,3 +80,10 @@ SESSION_CLEANUP_INTERVAL = 60  # 1 minute
 # Example: if you have a local SOCKS5 proxy on port 1080, set FORWARD_PORT = 1080.
 FORWARD_IP = "127.0.0.1"
 FORWARD_PORT = 8080
+
+# ---------------------------------------------------------------------------
+# ARQ (Automatic Repeat reQuest) Settings
+# ---------------------------------------------------------------------------
+# ARQ window size (number of unacknowledged packets allowed in flight).
+# Larger window sizes can improve performance on high-latency connections but may increase memory usage.
+ARQ_WINDOW_SIZE = 600

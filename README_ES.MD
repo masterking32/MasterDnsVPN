@@ -57,6 +57,7 @@ Puede descargar el binario precompilado más reciente para su plataforma, sin ne
 |------------|----------|
 | 🪟 Windows (AMD64) | [MasterDnsVPN_Client_Windows_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Windows_AMD64.zip) |
 | 🐧 Linux (AMD64) | [MasterDnsVPN_Client_Linux_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Linux_AMD64.zip) |
+| 🐧 Linux (ARM64) | [MasterDnsVPN_Client_Linux_ARM64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Linux_ARM64.zip) |
 | 🍎 macOS (ARM64) | [MasterDnsVPN_Client_MacOS_ARM64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_MacOS_ARM64.zip) |
 
 **Descargas del servidor:**
@@ -65,6 +66,7 @@ Puede descargar el binario precompilado más reciente para su plataforma, sin ne
 |------------|----------|
 | 🪟 Windows (AMD64) | [MasterDnsVPN_Server_Windows_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Windows_AMD64.zip) |
 | 🐧 Linux (AMD64) | [MasterDnsVPN_Server_Linux_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Linux_AMD64.zip) |
+| 🐧 Linux (ARM64) | [MasterDnsVPN_Server_Linux_ARM64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Linux_ARM64.zip) |
 | 🍎 macOS (ARM64) | [MasterDnsVPN_Server_MacOS_ARM64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_MacOS_ARM64.zip) |
 
 Cada archivo ZIP del cliente contiene el ejecutable y una plantilla de configuración `client_config.toml`. Cada archivo ZIP del servidor contiene el ejecutable y una plantilla de configuración `server_config.toml`.
@@ -173,6 +175,7 @@ El cliente inicia un proxy SOCKS5 local en `127.0.0.1:1080` (configurable median
 | `SESSION_CLEANUP_INTERVAL` | `60` | Intervalo (segundos) para eliminar sesiones expiradas. |
 | `FORWARD_IP` | `"127.0.0.1"` | IP del proxy/servicio local al que se reenvía el tráfico descifrado. |
 | `FORWARD_PORT` | `8080` | Puerto del proxy/servicio local (p. ej. `1080` para SOCKS5, `443` para VLESS). |
+| `ARQ_WINDOW_SIZE` | `600` | Tamaño de la ventana ARQ (número de paquetes no reconocidos permitidos en vuelo). Ventanas más grandes pueden mejorar el rendimiento en conexiones de alta latencia pero pueden aumentar el uso de memoria. |
 
 ### 💻 Cliente — `client_config.toml`
 
@@ -193,6 +196,7 @@ El cliente inicia un proxy SOCKS5 local en `127.0.0.1:1080` (configurable median
 | `LISTEN_PORT` | `1080` | Puerto local del proxy SOCKS5. Configure su aplicación para usar esta dirección. |
 | `NUM_DNS_WORKERS` | `4` | Número de tareas async DNS concurrentes. Aumente para mayor tráfico. |
 | `PACKET_DUPLICATION_COUNT` | `3` | Rutas resolver+dominio por las que se envía cada paquete simultáneamente. Mayor = más fiable pero más ancho de banda. |
+| `ARQ_WINDOW_SIZE` | `600` | Tamaño de la ventana ARQ (número de paquetes no reconocidos permitidos en vuelo). Ventanas más grandes pueden mejorar el rendimiento en conexiones de alta latencia pero pueden aumentar el uso de memoria. |
 
 ---
 

@@ -20,6 +20,7 @@ class ARQStream:
         writer,
         mtu,
         logger=None,
+        window_size: int = 600,
     ):
         self.stream_id = stream_id
         self.session_id = session_id
@@ -41,7 +42,7 @@ class ARQStream:
         self._write_lock = asyncio.Lock()
         self._snd_lock = asyncio.Lock()
 
-        self.window_size = 600
+        self.window_size = window_size
         self.window_not_full = asyncio.Event()
         self.window_not_full.set()
 
