@@ -102,6 +102,7 @@ class ARQStream:
                     self.snd_buf[sn] = {
                         "data": raw_data,
                         "time": time.time(),
+                        "first_sent": time.time(),
                         "retries": 0,
                     }
 
@@ -180,7 +181,7 @@ class ARQStream:
         async with self._snd_lock:
             for sn, info in self.snd_buf.items():
                 if now - info["time"] >= self.rto:
-                    if info["retries"] > 40:
+                    if now - info.get("first_sent", info["time"]) > 120.0:
                         stream_dead = True
                         break
 
