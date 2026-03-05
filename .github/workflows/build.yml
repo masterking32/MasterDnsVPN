@@ -231,23 +231,20 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Build release notes and create release
+      - name: Build release notes body
         id: create_release
         uses: actions/github-script@v6
         with:
           script: |
-            const core = require('@actions/core');
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const head = process.env.GITHUB_SHA;
 
-            // Get previous release (if any)
             let prevTag = null;
             try {
               const latest = await github.rest.repos.getLatestRelease({ owner, repo });
               prevTag = latest.data.tag_name;
             } catch (e) {
-              // no previous release
               prevTag = null;
             }
 
@@ -256,22 +253,17 @@ jobs:
               const comp = await github.rest.repos.compareCommits({ owner, repo, base: prevTag, head });
               commits = comp.data.commits || [];
             } else {
-              // no previous release: list recent commits up to head (max 250)
               const list = await github.rest.repos.listCommits({ owner, repo, sha: head, per_page: 250 });
               commits = list.data || [];
             }
 
-            // collect PRs and contributors
             const prSet = new Map();
             const contributors = new Map();
 
             for (const c of commits) {
               const sha = c.sha;
-              // contributor
               const author = (c.author && c.author.login) ? `@${c.author.login}` : (c.commit && c.commit.author && c.commit.author.name) || 'unknown';
               contributors.set(author, (contributors.get(author) || 0) + 1);
-
-              // list PRs associated with commit
               try {
                 const prs = await github.rest.repos.listPullRequestsAssociatedWithCommit({ owner, repo, commit_sha: sha });
                 for (const pr of prs.data) {
@@ -279,63 +271,49 @@ jobs:
                     prSet.set(pr.number, { number: pr.number, title: pr.title, url: pr.html_url, user: pr.user ? `@${pr.user.login}` : '' });
                   }
                 }
-              } catch (e) {
-                // ignore
-              }
+              } catch (e) {}
             }
 
-            // format body
             let body = `Automated release created by workflow run ${context.runId} for commit ${head}\n\n`;
             if (prevTag) body = `Changes since ${prevTag}:\n\n` + body;
-
             body += '### Commits\n';
             for (const c of commits.slice(-50)) {
               const msg = c.commit.message.split('\n')[0];
               body += `- ${msg} ([${c.sha.substring(0,7)}](https://github.com/${owner}/${repo}/commit/${c.sha}))\n`;
             }
-
             if (prSet.size > 0) {
-              body += '\n### Merged PRs\n';
+              body += '\n### Merged PRS\n';
               for (const pr of prSet.values()) {
                 body += `- [#${pr.number}](${pr.url}) ${pr.title} ${pr.user}\n`;
               }
             }
-
             if (contributors.size > 0) {
               body += '\n### Contributors\n';
               for (const [name, count] of contributors.entries()) {
                 body += `- ${name} — ${count} commit(s)\n`;
               }
             }
-
-            // create release with short tag from earlier step
-            const shortTag = '${{ steps.get_short_sha.outputs.short_sha }}';
-            const rel = await github.rest.repos.createRelease({ owner, repo, tag_name: shortTag, name: `Release-${shortTag}`, body, draft: false, prerelease: false });
-            core.setOutput('upload_url', rel.data.upload_url);
-            console.log('Created release upload_url=' + rel.data.upload_url);
-            // also return for compatibility
-            return { upload_url: rel.data.upload_url };
+            return { body };
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Debug release upload URL and assets
+      - name: Get timestamp for tag
+        id: get_timestamp
         run: |
-          echo "Resolved upload_url: '${{ steps.create_release.outputs.upload_url }}'"
-          echo "Contents of release_assets before upload:"
-          find release_assets -maxdepth 3 -print || true
+          echo "ts=$(date -u +%Y%m%dT%H%M%SZ)" >> $GITHUB_OUTPUT
 
-      - name: Upload release assets
+      - name: Debug release assets and planned tag
+        run: |
+          echo "Planned release tag: ${{ steps.get_short_sha.outputs.short_sha }}-${{ steps.get_timestamp.outputs.ts }}"
+          echo "Contents of release_assets:"
+          find release_assets -maxdepth 5 -type f -print || true
+
+      - name: Create GitHub Release and upload assets
+        uses: softprops/action-gh-release@v1
+        with:
+          files: release_assets/**/*
+          tag_name: ${{ steps.get_short_sha.outputs.short_sha }}-${{ steps.get_timestamp.outputs.ts }}
+          name: Release-${{ steps.get_short_sha.outputs.short_sha }}-${{ steps.get_timestamp.outputs.ts }}
+          body: ${{ steps.create_release.outputs.body }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          UPLOAD_URL="${{ steps.create_release.outputs.upload_url }}"
-          # find files recursively and upload each
-          find release_assets -type f -print0 | while IFS= read -r -d '' file; do
-            fname=$(basename "$file")
-            echo "Uploading $file as $fname"
-            curl --fail -X POST \
-              -H "Authorization: token ${GITHUB_TOKEN}" \
-              -H "Content-Type: application/octet-stream" \
-              --data-binary @"$file" "${UPLOAD_URL}?name=${fname}"
-          done
