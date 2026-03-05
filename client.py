@@ -286,7 +286,12 @@ class MasterDnsVPNClient:
     # MTU Testing Logic
     # ---------------------------------------------------------
     async def _binary_search_mtu(
-        self, test_callable, min_mtu: int, max_mtu: int, min_threshold: int = 30
+        self,
+        test_callable,
+        min_mtu: int,
+        max_mtu: int,
+        min_threshold: int = 30,
+        allowed_min_mtu: int = 0,
     ) -> int:
         """Generic binary search for finding the optimal MTU size."""
         try:
@@ -308,7 +313,7 @@ class MasterDnsVPNClient:
 
             while low <= high:
                 mid = (low + high) // 2
-                if mid < min_threshold:
+                if mid < min_threshold or mid < allowed_min_mtu:
                     break
 
                 ok = False
@@ -370,12 +375,12 @@ class MasterDnsVPNClient:
 
         if packet_type == Packet_Type.MTU_UP_RES:
             self.logger.success(
-                f"<green>Upload Test Success: {mtu_size}B ({mtu_char_len} chars) via {dns_server} for {domain}</green>"
+                f"<green>Upload Test Success: <yellow>{mtu_size}</yellow> via <cyan>{dns_server}</cyan> for <cyan>{domain}</cyan></green>"
             )
             return True
         elif packet_type == Packet_Type.ERROR_DROP:
             self.logger.warning(
-                f"<yellow>Upload Test Dropped (Server MTU Limit): {mtu_size}B via {dns_server} for {domain}</yellow>"
+                f"<yellow>Upload Test Dropped (Server MTU Limit): <yellow>{mtu_size}</yellow> via <cyan>{dns_server}</cyan> for <cyan>{domain}</cyan></yellow>"
             )
             return False
         return False
@@ -414,12 +419,12 @@ class MasterDnsVPNClient:
         if packet_type == Packet_Type.MTU_DOWN_RES:
             if returned_data and len(returned_data) == mtu_size:
                 self.logger.success(
-                    f"<green>Download Test Success: {mtu_size}B via {dns_server} for {domain}</green>"
+                    f"<green>Download Test Success: <yellow>{mtu_size}</yellow> via <cyan>{dns_server}</cyan> for <cyan>{domain}</cyan></green>"
                 )
                 return True
             else:
                 self.logger.warning(
-                    f"<yellow>Download Test Failed (Data Mismatch): {mtu_size}B via {dns_server} for {domain}</yellow>"
+                    f"<yellow>Download Test Failed (Data Mismatch): <yellow>{mtu_size}</yellow> via <cyan>{dns_server}</cyan> for <cyan>{domain}</cyan></yellow>"
                 )
                 return False
         return False
@@ -441,7 +446,11 @@ class MasterDnsVPNClient:
                 self.send_upload_mtu_test, domain, dns_server, dns_port
             )
             optimal_mtu = await self._binary_search_mtu(
-                test_fn, 0, default_mtu, min_threshold=30
+                test_fn,
+                0,
+                default_mtu,
+                min_threshold=30,
+                allowed_min_mtu=self.min_upload_mtu,
             )
 
             if optimal_mtu > 29:
@@ -462,7 +471,11 @@ class MasterDnsVPNClient:
                 self.send_download_mtu_test, domain, dns_server, dns_port
             )
             optimal_mtu = await self._binary_search_mtu(
-                test_fn, 0, default_mtu, min_threshold=30
+                test_fn,
+                0,
+                default_mtu,
+                min_threshold=30,
+                allowed_min_mtu=self.min_download_mtu,
             )
 
             if optimal_mtu >= max(30, self.min_download_mtu):
@@ -498,7 +511,7 @@ class MasterDnsVPNClient:
                 self.min_upload_mtu > 0 and up_mtu_bytes < self.min_upload_mtu
             ):
                 self.logger.warning(
-                    f"<red>❌ Connection invalid for {domain} via {resolver}: Upload MTU failed.</red>"
+                    f"<red>❌ Connection invalid for <yellow>{domain}</yellow> via <yellow>{resolver}</yellow>: Upload MTU failed.</red>"
                 )
                 continue
 
@@ -511,7 +524,7 @@ class MasterDnsVPNClient:
                 self.min_download_mtu > 0 and down_mtu_bytes < self.min_download_mtu
             ):
                 self.logger.warning(
-                    f"<red>❌ Connection invalid for {domain} via {resolver}: Download MTU failed.</red>"
+                    f"<red>❌ Connection invalid for <yellow>{domain}</yellow> via <yellow>{resolver}</yellow>: Download MTU failed.</red>"
                 )
                 continue
 
