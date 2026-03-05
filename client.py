@@ -142,21 +142,12 @@ class MasterDnsVPNClient:
             buffer_size = self.buffer_size
 
         try:
-            self.logger.debug(
-                f"<blue>[DNS_IO]</blue> Sending query to {resolver}:{port} ({len(query_data)} bytes)"
-            )
             await async_sendto(self.loop, sock, query_data, (resolver, port))
             response, _ = await asyncio.wait_for(
                 async_recvfrom(self.loop, sock, buffer_size), timeout=timeout
             )
-            self.logger.debug(
-                f"<blue>[DNS_IO]</blue> Received response from {resolver}:{port} ({len(response)} bytes)"
-            )
             return response
         except asyncio.TimeoutError:
-            self.logger.debug(
-                f"<blue>[DNS_IO]</blue> Timeout waiting for response from {resolver}"
-            )
             return None
         except Exception as e:
             self.logger.debug(
@@ -202,8 +193,8 @@ class MasterDnsVPNClient:
             )
         except asyncio.QueueFull:
             pass
-        except Exception as e:
-            self.logger.debug(f"Failed to enqueue PING: {e}")
+        except Exception as _:
+            pass
 
     async def _process_received_packet(
         self, response_bytes: bytes, addr=None
@@ -288,10 +279,6 @@ class MasterDnsVPNClient:
 
         decoded_data = self.dns_packet_parser.decode_and_decrypt_data(
             assembled_data_str, lowerCaseOnly=False
-        )
-
-        self.logger.debug(
-            f"<yellow>[PARSER]</yellow> Packet Type: {detected_packet_type}, Data Len: {len(decoded_data)}"
         )
         return final_parsed_header, decoded_data
 
@@ -382,12 +369,12 @@ class MasterDnsVPNClient:
         packet_type = parsed_header["packet_type"] if parsed_header else None
 
         if packet_type == Packet_Type.MTU_UP_RES:
-            self.logger.info(
+            self.logger.success(
                 f"<green>Upload Test Success: {mtu_size}B ({mtu_char_len} chars) via {dns_server} for {domain}</green>"
             )
             return True
         elif packet_type == Packet_Type.ERROR_DROP:
-            self.logger.info(
+            self.logger.warning(
                 f"<yellow>Upload Test Dropped (Server MTU Limit): {mtu_size}B via {dns_server} for {domain}</yellow>"
             )
             return False
@@ -426,12 +413,12 @@ class MasterDnsVPNClient:
 
         if packet_type == Packet_Type.MTU_DOWN_RES:
             if returned_data and len(returned_data) == mtu_size:
-                self.logger.info(
+                self.logger.success(
                     f"<green>Download Test Success: {mtu_size}B via {dns_server} for {domain}</green>"
                 )
                 return True
             else:
-                self.logger.info(
+                self.logger.warning(
                     f"<yellow>Download Test Failed (Data Mismatch): {mtu_size}B via {dns_server} for {domain}</yellow>"
                 )
                 return False
@@ -923,9 +910,6 @@ class MasterDnsVPNClient:
                 data, addr = await asyncio.wait_for(
                     async_recvfrom(self.loop, self.tunnel_sock, 65536), timeout=1.0
                 )
-                self.logger.debug(
-                    f"<magenta>[RX]</magenta> Data from tunnel socket: {len(data)} bytes"
-                )
                 self.loop.create_task(self._process_and_route_incoming(data, addr))
 
             except asyncio.TimeoutError:
@@ -1173,9 +1157,6 @@ class MasterDnsVPNClient:
                 self.active_streams[stream_id].get("stream")
                 or self.active_streams[stream_id].get("status") == "ACTIVE"
             ):
-                self.logger.debug(
-                    f"Stream {stream_id} already has an ARQ stream; ignoring duplicate SYN_ACK."
-                )
                 return
 
             if self.active_streams[stream_id].get("stream_creating"):
@@ -1231,8 +1212,8 @@ class MasterDnsVPNClient:
             stream_obj = self.active_streams[stream_id].get("stream")
             if stream_obj:
                 await stream_obj.receive_data(sn, data)
-            else:
-                self.logger.debug(f"Got data for SID {stream_id} but stream not ready.")
+            # else:
+            #     self.logger.debug(f"Got data for SID {stream_id} but stream not ready.")
 
             pull_count = 2
             for _ in range(pull_count):
@@ -1242,8 +1223,8 @@ class MasterDnsVPNClient:
             stream_obj = self.active_streams[stream_id].get("stream")
             if stream_obj:
                 await stream_obj.receive_ack(sn)
-            else:
-                self.logger.debug(f"Got ACK for SID {stream_id} but stream not ready.")
+            # else:
+            #     self.logger.debug(f"Got ACK for SID {stream_id} but stream not ready.")
 
             pull_count = 2
             for _ in range(pull_count):
@@ -1320,8 +1301,8 @@ class MasterDnsVPNClient:
                 if arq and hasattr(arq, "check_retransmits"):
                     try:
                         await arq.check_retransmits()
-                    except Exception as e:
-                        self.logger.debug(f"Error in check_retransmits: {e}")
+                    except Exception as _:
+                        pass
 
     # ---------------------------------------------------------
     # App Lifecycle
@@ -1390,6 +1371,15 @@ def main():
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+
+        def custom_exception_handler(loop, context):
+            msg = context.get("message", "")
+            if "socket.send() raised exception" in msg:
+                return
+
+            loop.default_exception_handler(context)
+
+        loop.set_exception_handler(custom_exception_handler)
 
         try:
             loop.add_signal_handler(

@@ -474,7 +474,6 @@ class MasterDnsVPNServer:
             return
 
         parsed_packet = await self.dns_parser.parse_dns_packet(data)
-        self.logger.debug(f"Parsed DNS packet from {addr}: {parsed_packet}")
 
         # Check for VPN packet
         vpn_response = await self.validate_vpn_packet(data, parsed_packet, addr)
@@ -979,6 +978,15 @@ def main():
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+
+        def custom_exception_handler(loop, context):
+            msg = context.get("message", "")
+            if "socket.send() raised exception" in msg:
+                return
+
+            loop.default_exception_handler(context)
+
+        loop.set_exception_handler(custom_exception_handler)
 
         try:
             loop.add_signal_handler(

@@ -101,8 +101,7 @@ class ARQStream:
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            if self.logger:
-                self.logger.debug(f"Stream {self.stream_id} IO loop error: {e}")
+            self.logger.debug(f"Stream {self.stream_id} IO loop error: {e}")
         finally:
             if not self.closed:
                 loop = asyncio.get_running_loop()
@@ -181,8 +180,7 @@ class ARQStream:
             return
 
         self.closed = True
-        if self.logger:
-            self.logger.info(f"Stream {self.stream_id} closing. Reason: {reason}")
+        # self.logger.info(f"Stream {self.stream_id} closing. Reason: {reason}")
 
         if not self._fin_sent:
             self._fin_sent = True
