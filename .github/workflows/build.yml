@@ -199,6 +199,13 @@ jobs:
         with:
           path: release_assets
 
+      - name: List downloaded artifacts
+        run: |
+          echo "Contents of release_assets:" 
+          ls -la release_assets || true
+          echo "Recursive listing:" 
+          find release_assets -maxdepth 3 -print || true
+
       - name: Get short commit SHA
         id: get_short_sha
         run: echo "short_sha=$(echo ${GITHUB_SHA} | cut -c1-7)" >> $GITHUB_OUTPUT
@@ -294,15 +301,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -e
+          set -euo pipefail
           UPLOAD_URL="${{ steps.create_release.outputs.upload_url }}"
-          for file in release_assets/**; do
-            if [ -f "$file" ]; then
-              fname=$(basename "$file")
-              echo "Uploading $fname"
-              curl --fail -X POST \
-                -H "Authorization: token ${GITHUB_TOKEN}" \
-                -H "Content-Type: application/octet-stream" \
-                --data-binary @"$file" "${UPLOAD_URL}?name=${fname}"
-            fi
+          # find files recursively and upload each
+          find release_assets -type f -print0 | while IFS= read -r -d '' file; do
+            fname=$(basename "$file")
+            echo "Uploading $file as $fname"
+            curl --fail -X POST \
+              -H "Authorization: token ${GITHUB_TOKEN}" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @"$file" "${UPLOAD_URL}?name=${fname}"
           done
