@@ -41,7 +41,9 @@ class MasterDnsVPNServer:
 
         self.config = load_config("server_config.toml")
         if not os.path.isfile(get_config_path("server_config.toml")):
-            self.logger = getLogger(log_level=self.config.get("LOG_LEVEL", "DEBUG"))
+            self.logger = getLogger(
+                log_level=self.config.get("LOG_LEVEL", "DEBUG"), is_server=True
+            )
             self.logger.error(
                 "Config file '<cyan>server_config.toml</cyan>' not found."
             )
@@ -51,7 +53,9 @@ class MasterDnsVPNServer:
             input("Press Enter to exit...")
             sys.exit(1)
 
-        self.logger = getLogger(log_level=self.config.get("LOG_LEVEL", "INFO"))
+        self.logger = getLogger(
+            log_level=self.config.get("LOG_LEVEL", "INFO"), is_server=True
+        )
         self.allowed_domains = self.config.get("DOMAIN", [])
         self.encryption_method: int = self.config.get("DATA_ENCRYPTION_METHOD", 1)
 
@@ -191,7 +195,7 @@ class MasterDnsVPNServer:
             response_str.encode(), encrypt=True
         )
 
-        response_packet = await self.dns_parser.generate_vpn_response_packet(
+        response_packet = self.dns_parser.generate_vpn_response_packet(
             domain=request_domain,
             session_id=new_session_id,
             packet_type=Packet_Type.SESSION_ACCEPT,
@@ -284,7 +288,7 @@ class MasterDnsVPNServer:
             self.logger.warning(
                 f"Packet received for expired/invalid session {session_id} from {addr}. Dropping."
             )
-            response_packet = await self.dns_parser.generate_vpn_response_packet(
+            response_packet = self.dns_parser.generate_vpn_response_packet(
                 domain=request_domain,
                 session_id=session_id,
                 packet_type=Packet_Type.ERROR_DROP,
@@ -458,7 +462,7 @@ class MasterDnsVPNServer:
             self.dns_parser.codec_transform(res_data, encrypt=True) if res_data else b""
         )
 
-        return await self.dns_parser.generate_vpn_response_packet(
+        return self.dns_parser.generate_vpn_response_packet(
             domain=request_domain,
             session_id=session_id,
             packet_type=res_ptype,
@@ -558,7 +562,7 @@ class MasterDnsVPNServer:
             self.logger.debug("Invalid data or address in DNS request.")
             return
 
-        parsed_packet = await self.dns_parser.parse_dns_packet(data)
+        parsed_packet = self.dns_parser.parse_dns_packet(data)
 
         # Check for VPN packet
         vpn_response = await self.validate_vpn_packet(data, parsed_packet, addr)
@@ -566,7 +570,7 @@ class MasterDnsVPNServer:
             await self.send_udp_response(vpn_response, addr)
             return
         else:
-            response = await self.dns_parser.server_fail_response(data)
+            response = self.dns_parser.server_fail_response(data)
             if not response:
                 return
 
@@ -658,7 +662,7 @@ class MasterDnsVPNServer:
         response_data = sync_token
         data_bytes = self.dns_parser.codec_transform(response_data, encrypt=True)
 
-        response_packet = await self.dns_parser.generate_vpn_response_packet(
+        response_packet = self.dns_parser.generate_vpn_response_packet(
             domain=request_domain,
             session_id=session_id,
             packet_type=Packet_Type.SET_MTU_RES,
@@ -726,7 +730,7 @@ class MasterDnsVPNServer:
             )
             return None
 
-        response_packet = await self.dns_parser.generate_vpn_response_packet(
+        response_packet = self.dns_parser.generate_vpn_response_packet(
             domain=request_domain,
             session_id=session_id if session_id is not None else 255,
             packet_type=Packet_Type.MTU_DOWN_RES,
@@ -751,7 +755,7 @@ class MasterDnsVPNServer:
         txt_str = "1"
         data_bytes = self.dns_parser.codec_transform(txt_str.encode(), encrypt=True)
 
-        response_packet = await self.dns_parser.generate_vpn_response_packet(
+        response_packet = self.dns_parser.generate_vpn_response_packet(
             domain=request_domain,
             session_id=session_id if session_id is not None else 255,
             packet_type=Packet_Type.MTU_UP_RES,

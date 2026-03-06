@@ -2,12 +2,12 @@
 # Author: MasterkinG32
 # Github: https://github.com/masterking32
 # Year: 2026
-
+import os
 import hashlib
 import math
 import random
 from typing import Any, Optional
-
+import struct
 from dns_utils.DNS_ENUMS import DNS_QClass, DNS_Record_Type, Packet_Type
 
 
@@ -17,6 +17,46 @@ class DnsPacketParser:
     Handles DNS packet parsing, construction, and custom VPN header encoding.
     """
 
+    _PT_STREAM_EXT = frozenset(
+        {
+            Packet_Type.STREAM_SYN,
+            Packet_Type.STREAM_SYN_ACK,
+            Packet_Type.STREAM_FIN,
+            Packet_Type.STREAM_DATA,
+            Packet_Type.STREAM_DATA_ACK,
+            Packet_Type.STREAM_RESEND,
+            Packet_Type.MTU_UP_REQ,
+            Packet_Type.MTU_DOWN_RES,
+        }
+    )
+    _PT_SEQ_EXT = frozenset(
+        {
+            Packet_Type.STREAM_DATA_ACK,
+            Packet_Type.STREAM_DATA,
+            Packet_Type.STREAM_RESEND,
+            Packet_Type.MTU_UP_REQ,
+            Packet_Type.MTU_DOWN_RES,
+        }
+    )
+    _PT_FRAG_EXT = frozenset(
+        {
+            Packet_Type.STREAM_DATA,
+            Packet_Type.STREAM_RESEND,
+            Packet_Type.MTU_UP_REQ,
+            Packet_Type.MTU_DOWN_RES,
+        }
+    )
+
+    _RR_PACKER = struct.Struct(">HHIH")
+    _Q_PACKER = struct.Struct(">HH")
+    _HEADER_PACKER = struct.Struct(">HHHHHH")
+
+    _VALID_QTYPES = frozenset(
+        v for k, v in DNS_Record_Type.__dict__.items() if not k.startswith("__")
+    )
+
+    LOG2_36 = math.log2(36)
+
     def __init__(
         self,
         logger: Optional[Any] = None,
@@ -25,7 +65,7 @@ class DnsPacketParser:
     ):
         self.logger = logger
         self.encryption_key = (
-            encryption_key.encode("utf-8")
+            encryption_key.encode("utf-8", errors="ignore")
             if isinstance(encryption_key, str)
             else encryption_key
         )
@@ -37,292 +77,307 @@ class DnsPacketParser:
             self.encryption_method = 1
 
         self.key = self._derive_key(encryption_key)
+        self._aesgcm = None
+        self._chacha_algo = None
 
+        self._urandom = os.urandom
+        self._Cipher = None
+        self._default_backend = None
+
+        if self.encryption_method in (3, 4, 5):
+            try:
+                from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+                self._aesgcm = AESGCM(self.key)
+            except ImportError:
+                if self.logger:
+                    self.logger.error("AES-GCM missing.")
+
+        elif self.encryption_method == 2:
+            try:
+                from cryptography.hazmat.primitives.ciphers import Cipher
+                from cryptography.hazmat.backends import default_backend
+
+                self._Cipher = Cipher
+                self._default_backend = default_backend
+            except ImportError:
+                pass
+
+        self._setup_crypto_dispatch()
         self.base9x_alphabet = r"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!#$%&()*+,-/;<=>?@[]^_`{|}~"
-
-    def _derive_key(self, raw_key: str) -> bytes:
-        """Derives a fixed-length key based on the encryption method."""
-        b_key = raw_key.encode() if isinstance(raw_key, str) else raw_key
-        lengths = {2: 32, 3: 16, 4: 24, 5: 32}
-        target = lengths.get(self.encryption_method, 32)
-
-        if self.encryption_method in (2, 5):
-            return hashlib.sha256(b_key).digest()
-        elif self.encryption_method == 3:
-            return hashlib.md5(b_key).digest()
-        return b_key.ljust(target, b"\0")[:target]
+        self._alphabet_cache = {}
+        self._int_bytes_cache = {
+            i: (str(i) + ".").encode("ascii", errors="ignore") for i in range(512)
+        }
 
     """
     Default DNS Packet Parsers
     Methods to parse and create standard DNS packets.
     """
 
-    async def parse_dns_headers(self, data: bytes) -> dict:
+    def parse_dns_headers(self, data: bytes) -> dict:
         """
         Parse DNS packet headers from raw bytes.
         Returns a dictionary of header fields.
         """
-        try:
-            headers = {
-                "id": int.from_bytes(data[0:2], byteorder="big"),
-                "qr": (int.from_bytes(data[2:4], byteorder="big") >> 15) & 0x1,
-                "OpCode": (int.from_bytes(data[2:4], byteorder="big") >> 11) & 0xF,
-                "aa": (int.from_bytes(data[2:4], byteorder="big") >> 10) & 0x1,
-                "tc": (int.from_bytes(data[2:4], byteorder="big") >> 9) & 0x1,
-                "rd": (int.from_bytes(data[2:4], byteorder="big") >> 8) & 0x1,
-                "ra": (int.from_bytes(data[2:4], byteorder="big") >> 7) & 0x1,
-                "z": (int.from_bytes(data[2:4], byteorder="big") >> 4) & 0x7,
-                "rCode": int.from_bytes(data[2:4], byteorder="big") & 0xF,
-                "QdCount": int.from_bytes(data[4:6], byteorder="big"),
-                "AnCount": int.from_bytes(data[6:8], byteorder="big"),
-                "NsCount": int.from_bytes(data[8:10], byteorder="big"),
-                "ArCount": int.from_bytes(data[10:12], byteorder="big"),
-            }
-            return headers
-        except Exception as e:
-            self.logger.debug(f"Failed to parse DNS headers: {e}")
-            return {}
+        pkt_id, flags, qd, an, ns, ar = self._HEADER_PACKER.unpack_from(data, 0)
 
-    async def parse_dns_question(
-        self, headers: dict, data: bytes, offset: int
-    ) -> tuple:
+        return {
+            "id": pkt_id,
+            "qr": (flags >> 15) & 0x1,
+            "OpCode": (flags >> 11) & 0xF,
+            "aa": (flags >> 10) & 0x1,
+            "tc": (flags >> 9) & 0x1,
+            "rd": (flags >> 8) & 0x1,
+            "ra": (flags >> 7) & 0x1,
+            "z": (flags >> 4) & 0x7,
+            "rCode": flags & 0xF,
+            "QdCount": qd,
+            "AnCount": an,
+            "NsCount": ns,
+            "ArCount": ar,
+        }
+
+    def parse_dns_question(self, headers: dict, data: bytes, offset: int) -> tuple:
         """
         Parse the DNS question section from the packet data.
         Returns a tuple (question_dict, new_offset).
         """
         try:
-            if headers.get("QdCount", 0) == 0:
+            qd_count = headers.get("QdCount", 0)
+            if not qd_count:
                 return None, offset
 
             questions = []
-            for _ in range(headers["QdCount"]):
-                name, offset = self._parse_dns_name_from_bytes(data, offset)
-                qType = int.from_bytes(data[offset : offset + 2], byteorder="big")
-                offset += 2
-                qClass = int.from_bytes(data[offset : offset + 2], byteorder="big")
-                offset += 2
-                question = {"qName": name, "qType": qType, "qClass": qClass}
-                questions.append(question)
+
+            _append = questions.append
+            _parse_name = self._parse_dns_name_from_bytes
+
+            for _ in range(qd_count):
+                name, offset = _parse_name(data, offset)
+
+                qType = (data[offset] << 8) | data[offset + 1]
+                qClass = (data[offset + 2] << 8) | data[offset + 3]
+
+                _append({"qName": name, "qType": qType, "qClass": qClass})
+
+                offset += 4
 
             return questions, offset
+
+        except IndexError:
+            self.logger.debug(
+                "Failed to parse DNS question: packet truncated (IndexError)"
+            )
+            return None, offset
         except Exception as e:
             self.logger.debug(f"Failed to parse DNS question: {e}")
             return None, offset
 
-    async def _parse_resource_records_section(
-        self, headers: dict, data: bytes, offset: int, count_key: str, section_name: str
+    def _parse_resource_records_section(
+        self,
+        headers: dict,
+        data: bytes,
+        offset: int,
+        count_key: str,
+        section_name: str = "",
     ) -> tuple:
         """
-        Generic parser for DNS resource record sections (answers, authorities, additional).
-        Returns a tuple (records_list, new_offset).
+        Ultra-fast generic parser using struct unpacking from the class-level packer.
         """
-        try:
-            count = headers.get(count_key, 0)
-            if count == 0:
-                return None, offset
-
-            records = []
-            for _ in range(count):
-                name, offset = self._parse_dns_name_from_bytes(data, offset)
-                r_type = int.from_bytes(data[offset : offset + 2], byteorder="big")
-                offset += 2
-                r_class = int.from_bytes(data[offset : offset + 2], byteorder="big")
-                offset += 2
-                ttl = int.from_bytes(data[offset : offset + 4], byteorder="big")
-                offset += 4
-                rdLength = int.from_bytes(data[offset : offset + 2], byteorder="big")
-                offset += 2
-                rData = data[offset : offset + rdLength]
-                offset += rdLength
-                record = {
-                    "name": name,
-                    "type": r_type,
-                    "class": r_class,
-                    "TTL": ttl,
-                    "rData": rData,
-                }
-                records.append(record)
-            return records, offset
-        except Exception as e:
-            self.logger.error(f"Failed to parse DNS authority: {e}")
+        count = headers.get(count_key, 0)
+        if count == 0:
             return None, offset
 
-    def _parse_dns_name_from_bytes(self, data: bytes, offset: int) -> tuple:
+        records = []
+        _append = records.append
+        _parse_name = self._parse_dns_name_from_bytes
+        _unpack_from = self._RR_PACKER.unpack_from
+
+        try:
+            for _ in range(count):
+                name, offset = _parse_name(data, offset)
+
+                r_type, r_class, ttl, rd_length = _unpack_from(data, offset)
+                offset += 10
+
+                end_rd = offset + rd_length
+                r_data = data[offset:end_rd]
+
+                _append(
+                    {
+                        "name": name,
+                        "type": r_type,
+                        "class": r_class,
+                        "TTL": ttl,
+                        "rData": r_data,
+                    }
+                )
+                offset = end_rd
+
+            return records, offset
+        except (IndexError, struct.error):
+            self.logger.debug(f"Failed to parse DNS {section_name}: Truncated packet.")
+            return None, offset
+        except Exception as e:
+            self.logger.error(f"Failed to parse DNS {section_name}: {e}")
+            return None, offset
+
+    def _parse_dns_name_from_bytes(self, data: bytes, offset: int) -> tuple[str, int]:
         """
-        Parse a DNS name from bytes, handling compression pointers. Returns (name, new_offset).
+        Parse a DNS name from bytes, handling compression pointers.
+        Returns (name, new_offset).
         """
         labels = []
+        append = labels.append
+        data_len = len(data)
         jumped = False
-        original_offset = offset
-        hops = 0
-        MAX_HOPS = 10
-        while True:
-            if hops > MAX_HOPS:
-                raise ValueError("DNS Compression loop detected")
+        jumps = 0
+        orig_off = offset
 
-            if offset >= len(data):
-                raise ValueError("Offset out of bounds")
+        try:
+            while True:
+                if offset >= data_len:
+                    raise ValueError("Bounds")
 
-            length = data[offset]
-            # Check for pointer (compression)
-            if (length & 0xC0) == 0xC0:
-                if not jumped:
-                    original_offset = offset + 2
-                pointer = ((length & 0x3F) << 8) | data[offset + 1]
-                offset = pointer
-                jumped = True
-                hops += 1
-                continue
-            if length == 0:
+                length = data[offset]
+
+                if length == 0:
+                    offset += 1
+                    break
+
+                if length & 0xC0 == 0xC0:
+                    if offset + 1 >= data_len:
+                        raise ValueError("Bounds")
+                    if jumps > 10:
+                        raise ValueError("Loop")
+                    if not jumped:
+                        orig_off = offset + 2
+                        jumped = True
+                    offset = ((length & 0x3F) << 8) | data[offset + 1]
+                    jumps += 1
+                    continue
+
                 offset += 1
-                break
-            offset += 1
-            labels.append(
-                data[offset : offset + length].decode("utf-8", errors="ignore")
-            )
-            offset += length
-        if not jumped:
-            return ".".join(labels), offset
-        else:
-            return ".".join(labels), original_offset
+                end = offset + length
+                if end > data_len:
+                    raise ValueError("Bounds")
+                append(data[offset:end])
+                offset = end
 
-    async def parse_dns_packet(self, data: bytes) -> dict:
+            return b".".join(labels).decode("utf-8", errors="ignore"), (
+                orig_off if jumped else offset
+            )
+
+        except IndexError:
+            raise ValueError("Bounds")
+
+    def parse_dns_packet(self, data: bytes) -> dict:
         """
         Parse the entire DNS packet from the data.
         Returns a dictionary with all sections.
         """
         if len(data) < 12:
             return {}
+        # Localize hot-path callables to reduce attribute lookups
+        _parse_headers = self.parse_dns_headers
+        _parse_question = self.parse_dns_question
+        _parse_rr = self._parse_resource_records_section
 
-        try:
-            headers = await self.parse_dns_headers(data)
-            offset = 12
-            questions, offset = await self.parse_dns_question(headers, data, offset)
-            if questions is None:
-                return {}
+        headers = _parse_headers(data)
+        offset = 12
 
-            answers, offset = await self._parse_resource_records_section(
-                headers, data, offset, "AnCount", "answer"
-            )
-            authorities, offset = await self._parse_resource_records_section(
-                headers, data, offset, "NsCount", "authority"
-            )
-            additional, offset = await self._parse_resource_records_section(
-                headers, data, offset, "ArCount", "additional"
-            )
-            dns_packet = {
-                "headers": headers,
-                "questions": questions,
-                "answers": answers,
-                "authorities": authorities,
-                "additional": additional,
-            }
-            return dns_packet
-        except Exception as e:
-            self.logger.debug(f"Failed to parse DNS packet: {e}")
+        questions, offset = _parse_question(headers, data, offset)
+        if questions is None:
             return {}
 
-    async def server_fail_response(self, request_data: bytes) -> bytes:
+        answers, offset = _parse_rr(headers, data, offset, "AnCount", "answer")
+        authorities, offset = _parse_rr(headers, data, offset, "NsCount", "authority")
+        additional, offset = _parse_rr(headers, data, offset, "ArCount", "additional")
+
+        return {
+            "headers": headers,
+            "questions": questions,
+            "answers": answers,
+            "authorities": authorities,
+            "additional": additional,
+        }
+
+    def server_fail_response(self, request_data: bytes) -> bytes:
         """
         Create a DNS Server Failure (RCODE=2) response packet based on the request data.
         """
         try:
             if len(request_data) < 12:
-                raise ValueError("Invalid DNS request data.")
+                return b""
 
-            response = bytearray(request_data)
-            # Set QR to 1 (response), Opcode remains the same, AA=0, TC=0, RD remains the same
-            # Set RA=0, Z=0, RCODE=2 (Server Failure)
-            flags = int.from_bytes(response[2:4], byteorder="big")
-            flags |= 0x8000  # Set QR to 1
-            flags &= 0xFFF0  # Clear RCODE
-            flags |= 0x0002  # Set RCODE to 2
-            response[2:4] = flags.to_bytes(2, byteorder="big")
+            pkt_id = (request_data[0] << 8) | request_data[1]
+            flags = (
+                (request_data[2] << 8) | request_data[3] | 0x8000
+            ) & 0xFFF0 | 0x0002
+            qdcount = (request_data[4] << 8) | request_data[5]
 
-            # Set AnCount, NsCount, ArCount to 0
-            response[6:8] = (0).to_bytes(2, byteorder="big")  # AnCount
-            response[8:10] = (0).to_bytes(2, byteorder="big")  # NsCount
-            response[10:12] = (0).to_bytes(2, byteorder="big")  # ArCount
+            header = self._HEADER_PACKER.pack(pkt_id, flags, qdcount, 0, 0, 0)
 
-            return bytes(response)
+            return header + request_data[12:]
         except Exception as e:
             self.logger.error(f"Failed to create Server Failure response: {e}")
             return b""
 
-    async def simple_answer_packet(
-        self, answers: list, question_packet: bytes
-    ) -> bytes:
+    def simple_answer_packet(self, answers: list, question_packet: bytes) -> bytes:
         """
         Create a simple DNS answer packet for the given answers based on the question packet.
         answers: list of answer dicts with keys: name, type, class, TTL, rData
         """
         try:
-            # Parse question section from the question_packet
-            headers = await self.parse_dns_headers(question_packet)
+            if len(question_packet) < 12:
+                return b""
+
+            pkt_id = (question_packet[0] << 8) | question_packet[1]
+            flags = ((question_packet[2] << 8) | question_packet[3]) | 0x8000
+            qd_count = (question_packet[4] << 8) | question_packet[5]
+
             offset = 12
-            questions, offset = await self.parse_dns_question(
-                headers, question_packet, offset
+            for _ in range(qd_count):
+                _, offset = self._parse_dns_name_from_bytes(question_packet, offset)
+                offset += 4  # Skip Type and Class
+
+            new_header = self._HEADER_PACKER.pack(
+                pkt_id, flags, qd_count, len(answers), 0, 0
             )
 
-            # Build sections
-            section = {
-                "headers": {
-                    "id": headers["id"],
-                    "QdCount": headers["QdCount"],
-                    "AnCount": len(answers),
-                    "NsCount": 0,
-                    "ArCount": 0,
-                },
-                "questions": questions or [],
-                "answers": answers,
-                "authorities": [],
-                "additional": [],
-            }
-            packet = await self.create_packet(
-                section, question_packet, is_response=True
-            )
-            return packet
+            parts = [new_header, question_packet[12:offset]]
+            _append = parts.append
+            for ans in answers:
+                _append(self._serialize_resource_record(ans))
+
+            return b"".join(parts)
         except Exception as e:
             self.logger.error(f"Failed to create answer packet: {e}")
             return b""
 
-    async def simple_question_packet(self, domain: str, qType: int) -> bytes:
+    def simple_question_packet(self, domain: str, qType: int) -> bytes:
         """
         Create a simple DNS question packet for the given domain and type.
         """
-        try:
-            if qType is None or qType not in DNS_Record_Type.__dict__.values():
-                self.logger.error(f"Invalid qType value: {qType}.")
-                return b""
-
-            random_id = random.randint(0, 65535)
-            section = {
-                "headers": {
-                    "id": random_id,
-                    "QdCount": 1,  # Question count
-                    "AnCount": 0,
-                    "NsCount": 0,
-                    "ArCount": 0,
-                },
-                "questions": [
-                    {
-                        "qName": domain,
-                        "qType": qType,
-                        "qClass": DNS_QClass.IN,  # Internet
-                    }
-                ],
-                "answers": [],
-                "authorities": [],
-                "additional": [],
-            }
-
-            packet = await self.create_packet(section)
-            return packet
-        except Exception as e:
-            self.logger.error(f"Failed to create question packet: {e}")
+        if qType not in self._VALID_QTYPES:
+            self.logger.debug(f"Invalid qType value: {qType}.")
             return b""
 
-    async def create_packet(
+        try:
+            pkt_id = random.getrandbits(16)
+
+            header = self._HEADER_PACKER.pack(pkt_id, 0x0100, 1, 0, 0, 0)
+
+            q_tail = self._Q_PACKER.pack(qType, DNS_QClass.IN)
+
+            return b"".join((header, self._serialize_dns_name(domain), q_tail))
+
+        except Exception as e:
+            self.logger.error(f"Failed to create simple question packet: {e}")
+            return b""
+
+    def create_packet(
         self, sections: dict, question_packet: bytes = b"", is_response: bool = False
     ) -> bytes:
         """
@@ -337,290 +392,286 @@ class DnsPacketParser:
         question_packet: original packet with question section for ID and flags (optional)
         """
         try:
-            packet = bytearray()
+            h = sections.get("headers", {})
+            qd, an, ns, ar = (
+                int(h.get("QdCount", 0)),
+                int(h.get("AnCount", 0)),
+                int(h.get("NsCount", 0)),
+                int(h.get("ArCount", 0)),
+            )
 
-            # Headers
             if question_packet and len(question_packet) >= 12:
-                packet += question_packet[0:2]  # ID
+                pkt_id = (question_packet[0] << 8) | question_packet[1]
+                flags = (question_packet[2] << 8) | question_packet[3]
                 if is_response:
-                    # Set QR to 1 (response), keep other flags from question_packet
-                    flags = int.from_bytes(question_packet[2:4], byteorder="big")
-                    flags |= 0x8000  # Set QR to 1
-                    packet += flags.to_bytes(2, byteorder="big")
-                else:
-                    # Copy flags as is for question
-                    packet += question_packet[2:4]
+                    flags |= 0x8000
             else:
-                # Ensure all header fields are integers
-                id_val = int(sections["headers"]["id"])
-                QdCount_val = int(sections["headers"]["QdCount"])
-                AnCount_val = int(sections["headers"]["AnCount"])
-                NsCount_val = int(sections["headers"]["NsCount"])
-                ArCount_val = int(sections["headers"]["ArCount"])
-                packet += id_val.to_bytes(2, byteorder="big")
-                # Set flags for a standard query: QR=0, RD=1 (0x0100)
-                flags = 0x0100
-                packet += flags.to_bytes(2, byteorder="big")
+                pkt_id, flags = int(h.get("id", 0)), 0x0100
 
-            # Always ensure these are integers
-            if question_packet and len(question_packet) >= 12:
-                # Use counts from question_packet if present
-                packet += int(sections["headers"]["QdCount"]).to_bytes(
-                    2, byteorder="big"
-                )
-                packet += int(sections["headers"]["AnCount"]).to_bytes(
-                    2, byteorder="big"
-                )
-                packet += int(sections["headers"]["NsCount"]).to_bytes(
-                    2, byteorder="big"
-                )
-                packet += int(sections["headers"]["ArCount"]).to_bytes(
-                    2, byteorder="big"
-                )
-            else:
-                packet += QdCount_val.to_bytes(2, byteorder="big")
-                packet += AnCount_val.to_bytes(2, byteorder="big")
-                packet += NsCount_val.to_bytes(2, byteorder="big")
-                packet += ArCount_val.to_bytes(2, byteorder="big")
+            parts = [self._HEADER_PACKER.pack(pkt_id, flags, qd, an, ns, ar)]
+            _append = parts.append
 
-            # Questions
-            for question in sections.get("questions", []):
-                packet += self._serialize_dns_question(question)
+            for q in sections.get("questions", []):
+                _append(self._serialize_dns_question(q))
+            for a in sections.get("answers", []):
+                _append(self._serialize_resource_record(a))
+            for au in sections.get("authorities", []):
+                _append(self._serialize_resource_record(au))
+            for ad in sections.get("additional", []):
+                _append(self._serialize_resource_record(ad))
 
-            # Answers
-            for answer in sections.get("answers", []):
-                packet += self._serialize_resource_record(answer)
-
-            # Authorities
-            for authority in sections.get("authorities", []):
-                packet += self._serialize_resource_record(authority)
-
-            # Additional
-            for additional in sections.get("additional", []):
-                packet += self._serialize_resource_record(additional)
-
-            return bytes(packet)
+            return b"".join(parts)
         except Exception as e:
-            self.logger.error(f"Failed to create DNS packet: {e}")
+            self.logger.debug(f"Failed to create DNS packet: {e}")
             return b""
 
     def _serialize_dns_question(self, question: dict) -> bytes:
         """
         Serialize a DNS question section to bytes.
         """
-        result = bytearray()
-        result += self._serialize_dns_name(question["qName"])
-        result += int(question["qType"]).to_bytes(2, byteorder="big")
-        result += int(question["qClass"]).to_bytes(2, byteorder="big")
-        return result
+        packed_q = self._Q_PACKER.pack(int(question["qType"]), int(question["qClass"]))
+
+        return b"".join((self._serialize_dns_name(question["qName"]), packed_q))
 
     def _serialize_resource_record(self, record: dict) -> bytes:
         """
-        Serialize a DNS resource record (answer, authority, additional) to bytes.
+        Serialize a DNS resource record to bytes.
         """
-        result = bytearray()
-        result += self._serialize_dns_name(record["name"])
-        result += int(record["type"]).to_bytes(2, byteorder="big")
-        result += int(record["class"]).to_bytes(2, byteorder="big")
-        result += int(record["TTL"]).to_bytes(4, byteorder="big")
-        result += len(record["rData"]).to_bytes(2, byteorder="big")
-        result += record["rData"]
-        return result
+        rdata = record["rData"]
 
-    def _serialize_dns_name(self, name: str) -> bytes:
+        packed_header = self._RR_PACKER.pack(
+            int(record["type"]), int(record["class"]), int(record["TTL"]), len(rdata)
+        )
+
+        return b"".join(
+            (self._serialize_dns_name(record["name"]), packed_header, rdata)
+        )
+
+    def _serialize_dns_name(self, name: str | bytes) -> bytes:
         """
-        Serialize a DNS name (labels) to bytes.
+        Serialize a DNS name to bytes, handling label lengths and edge cases.
         """
-        result = bytearray()
-        try:
-            labels = name.split(".") if "." in name else [name]
-            for label in labels:
-                label_bytes = (
-                    label.encode("utf-8") if not isinstance(label, bytes) else label
-                )
-                if len(label_bytes) > 63:
-                    raise ValueError("DNS label too long")
-                result.append(len(label_bytes))
-                result += label_bytes
-            result.append(0)  # End of name
-        except Exception as e:
-            self.logger.error(f"Failed to serialize DNS name: {e}")
-        return result
+        b_name = (
+            name if isinstance(name, bytes) else name.encode("utf-8", errors="ignore")
+        )
+
+        if not b_name or b_name == b".":
+            return b"\x00"
+
+        parts = b_name.split(b".")
+        res = bytearray()
+        _append = res.append
+        _extend = res.extend
+
+        for p in parts:
+            l = len(p)
+            if l:
+                if l > 63:
+                    self.logger.error("Label too long")
+                    return b"\x00"
+                _append(l)
+                _extend(p)
+
+        _append(0)
+        return bytes(res)
 
     """
     VPN over DNS Utilities
     Methods for data encoding, encryption, and custom VPN header creation.
     """
 
-    def base_encode(self, data_bytes: bytes, lowerCaseOnly: bool = True) -> str:
+    def base_encode(
+        self,
+        data_bytes: bytes,
+        lowerCaseOnly: bool = True,
+        alphabet: str | None = None,
+    ) -> str:
         if not data_bytes:
             return ""
-        alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
-        if not lowerCaseOnly:
-            alphabet = self.base9x_alphabet
 
-        base = len(alphabet)
+        alph = (
+            alphabet
+            if alphabet is not None
+            else (
+                "0123456789abcdefghijklmnopqrstuvwxyz"
+                if lowerCaseOnly
+                else self.base9x_alphabet
+            )
+        )
+        base = len(alph)
+
         num = int.from_bytes(b"\x01" + data_bytes, byteorder="big")
 
-        encoded = []
-        while num > 0:
+        res = []
+        _append = res.append
+
+        while num:
             num, rem = divmod(num, base)
-            encoded.append(alphabet[rem])
+            _append(alph[rem])
 
-        return "".join(reversed(encoded))
+        return "".join(reversed(res))
 
-    def base_decode(self, encoded_str: str, lowerCaseOnly: bool = True) -> bytes:
-        alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
-        if not lowerCaseOnly:
-            alphabet = self.base9x_alphabet
+    def base_decode(
+        self,
+        encoded_str: str,
+        lowerCaseOnly: bool = True,
+        alphabet: str | None = None,
+    ) -> bytes:
+        if not encoded_str:
+            return b""
 
-        base = len(alphabet)
-        char_map = {c: i for i, c in enumerate(alphabet)}
-        num = 0
-        for char in encoded_str:
-            if char in char_map:
-                num = num * base + char_map[char]
+        alph = (
+            alphabet
+            if alphabet is not None
+            else (
+                "0123456789abcdefghijklmnopqrstuvwxyz"
+                if lowerCaseOnly
+                else self.base9x_alphabet
+            )
+        )
+        base = len(alph)
+
+        char_map = self._alphabet_cache.get(alph)
+        if char_map is None:
+            char_map = {c: i for i, c in enumerate(alph)}
+            self._alphabet_cache[alph] = char_map
+
+        # Fast-path: native int(s, base) for common lowercase alphabets up to base36
+        if base <= 36 and alph == "0123456789abcdefghijklmnopqrstuvwxyz"[:base]:
+            valid_chars = "".join(c for c in encoded_str if c in char_map)
+            if not valid_chars:
+                return b""
+            try:
+                num = int(valid_chars, base)
+            except ValueError:
+                return b""
+        else:
+            num = 0
+            _get = char_map.get
+            for ch in encoded_str:
+                v = _get(ch)
+                if v is not None:
+                    num = num * base + v
 
         if num == 0:
             return b""
 
         full_bytes = num.to_bytes((num.bit_length() + 7) // 8, byteorder="big")
-        return full_bytes[1:] if full_bytes.startswith(b"\x01") else full_bytes
+
+        return full_bytes[1:] if full_bytes[0] == 1 else full_bytes
+
+    def _setup_crypto_dispatch(self):
+        """Pre-bind crypto functions to avoid if/else overhead in hot-paths."""
+        if self.encryption_method == 0:
+            self.data_encrypt = self._no_crypto
+            self.data_decrypt = self._no_crypto
+        elif self.encryption_method == 1:
+            self.data_encrypt = self._xor_crypto
+            self.data_decrypt = self._xor_crypto
+        elif self.encryption_method == 2 and self._Cipher and self._chacha_algo:
+            self.data_encrypt = self._chacha_encrypt
+            self.data_decrypt = self._chacha_decrypt
+        elif self.encryption_method in (3, 4, 5) and self._aesgcm:
+            self.data_encrypt = self._aes_encrypt
+            self.data_decrypt = self._aes_decrypt
+        else:
+            self.data_encrypt = self._no_crypto
+            self.data_decrypt = self._no_crypto
+
+        self.codec_transform = self._codec_transform_dynamic
+
+    def _no_crypto(self, data: bytes, key: bytes = None, method: int = None) -> bytes:
+        return data
+
+    def _xor_crypto(self, data: bytes, key: bytes = None, method: int = None) -> bytes:
+        return self.xor_data(data, key or self.key)
+
+    def _aes_encrypt(self, data: bytes, key: bytes = None, method: int = None) -> bytes:
+        if not data:
+            return data
+        nonce = self._urandom(12)
+        try:
+            return nonce + self._aesgcm.encrypt(nonce, data, None)
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"AES Encrypt failed: {e}")
+            return b""
+
+    def _aes_decrypt(self, data: bytes, key: bytes = None, method: int = None) -> bytes:
+        if len(data) <= 12:
+            return b""
+        nonce, ciphertext = data[:12], data[12:]
+        try:
+            return self._aesgcm.decrypt(nonce, ciphertext, None)
+        except Exception:
+            return b""
+
+    def _chacha_encrypt(
+        self, data: bytes, key: bytes = None, method: int = None
+    ) -> bytes:
+        if not data:
+            return data
+        nonce = self._urandom(16)
+        cipher = self._Cipher(
+            self._chacha_algo(key or self.key, nonce),
+            mode=None,
+            backend=self._default_backend(),
+        )
+        return nonce + cipher.encryptor().update(data)
+
+    def _chacha_decrypt(
+        self, data: bytes, key: bytes = None, method: int = None
+    ) -> bytes:
+        if len(data) <= 16:
+            return b""
+        nonce, ciphertext = data[:16], data[16:]
+        cipher = self._Cipher(
+            self._chacha_algo(key or self.key, nonce),
+            mode=None,
+            backend=self._default_backend(),
+        )
+        return cipher.decryptor().update(ciphertext)
+
+    def _codec_transform_dynamic(self, data: bytes, encrypt: bool = True) -> bytes:
+        """Dynamically dispatched codec transform, ZERO branching overhead."""
+        if self.encryption_method == 0:
+            return data
+        return self.data_encrypt(data) if encrypt else self.data_decrypt(data)
+
+    def _derive_key(self, raw_key: str) -> bytes:
+        """Derives a fixed-length key based on the encryption method."""
+        b_key = raw_key.encode() if isinstance(raw_key, str) else raw_key
+        lengths = {2: 32, 3: 16, 4: 24, 5: 32}
+        target = lengths.get(self.encryption_method, 32)
+
+        if self.encryption_method in (2, 5):
+            return hashlib.sha256(b_key).digest()
+        elif self.encryption_method == 3:
+            return hashlib.md5(b_key).digest()
+        return b_key.ljust(target, b"\0")[:target]
 
     def xor_data(self, data: bytes, key: bytes) -> bytes:
         """
-        Ultra-fast XOR using large integers (handled in C-level).
+        XOR data with key while minimizing temporary allocations.
         """
         if not key or not data:
             return data
 
-        data_len = len(data)
-        key_len = len(key)
+        d_len = len(data)
+        k_len = len(key)
 
-        expanded_key = (key * (data_len // key_len + 1))[:data_len]
+        if k_len == 1:
+            k = key * d_len
+        else:
+            q, r = divmod(d_len, k_len)
+            k = key * q + key[:r]
 
-        int_data = int.from_bytes(data, byteorder="big")
-        int_key = int.from_bytes(expanded_key, byteorder="big")
+        int_data = int.from_bytes(data, byteorder="little")
+        int_key = int.from_bytes(k, byteorder="little")
 
-        return (int_data ^ int_key).to_bytes(data_len, byteorder="big")
+        return (int_data ^ int_key).to_bytes(d_len, byteorder="little")
 
-    def data_encrypt(self, data: bytes, key: bytes = None, method: int = None) -> bytes:
-        """
-        Encrypt data based on the selected method.
-        Supported methods:
-            0: None, 1: XOR, 2: ChaCha20, 3: AES-128-GCM, 4: AES-192-GCM, 5: AES-256-GCM
-        """
-        try:
-            if key is None:
-                key = self.encryption_key
-            if method is None:
-                method = self.encryption_method
-
-            if method == 0:
-                return data
-            elif method == 1:
-                return self.xor_data(data, key)
-            elif method == 2:
-                import os
-
-                from cryptography.hazmat.backends import default_backend
-                from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
-
-                nonce = os.urandom(16)
-                algorithm = algorithms.ChaCha20(key, nonce)
-                cipher = Cipher(algorithm, mode=None, backend=default_backend())
-                encryptor = cipher.encryptor()
-                encrypted_data = encryptor.update(data)
-                return nonce + encrypted_data
-            elif method in (3, 4, 5):
-                import os
-
-                from cryptography.hazmat.backends import default_backend
-                from cryptography.hazmat.primitives.ciphers import (
-                    Cipher,
-                    algorithms,
-                    modes,
-                )
-                from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
-                nonce = os.urandom(12)  # GCM استاندارد 12 بایت nonce می‌خواهد
-                aesgcm = AESGCM(key)
-                encrypted_data = aesgcm.encrypt(nonce, data, None)
-                return nonce + encrypted_data
-            else:
-                self.logger.error(f"Unknown encryption method: {method}")
-                return data
-        except Exception as e:
-            self.logger.error(f"Failed to encrypt data: {e}")
-            return b""
-
-    def data_decrypt(self, data: bytes, key: bytes = None, method: int = None) -> bytes:
-        """
-        Decrypt data based on the selected method.
-        Supported methods:
-            0: None, 1: XOR, 2: ChaCha20, 3: AES-128-GCM, 4: AES-192-GCM, 5: AES-256-GCM
-        """
-        try:
-            if key is None:
-                key = self.encryption_key
-            if method is None:
-                method = self.encryption_method
-
-            if method == 0:
-                return data
-            elif method == 1:
-                return self.xor_data(data, key)
-            elif method == 2:
-                from cryptography.hazmat.backends import default_backend
-                from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
-
-                nonce = data[:16]
-                encrypted_data = data[16:]
-                algorithm = algorithms.ChaCha20(key, nonce)
-                cipher = Cipher(algorithm, mode=None, backend=default_backend())
-                decryptor = cipher.decryptor()
-                decrypted_data = decryptor.update(encrypted_data)
-                return decrypted_data
-            elif method in (3, 4, 5):
-                from cryptography.hazmat.backends import default_backend
-                from cryptography.hazmat.primitives.ciphers import (
-                    Cipher,
-                    algorithms,
-                    modes,
-                )
-                from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
-                nonce = data[:12]
-                encrypted_data = data[12:]
-                aesgcm = AESGCM(key)
-                try:
-                    decrypted_data = aesgcm.decrypt(nonce, encrypted_data, None)
-                    return decrypted_data
-                except Exception as e:
-                    self.logger.error(
-                        "Authentication failed! Packet altered or wrong key."
-                    )
-                    return b""
-            else:
-                self.logger.error(f"Unknown decryption method: {method}")
-                return data
-        except Exception as e:
-            self.logger.error(
-                f"Failed to decrypt data <red>Maybe encryption key/method is wrong?</red>: {e}"
-            )
-            return b""
-
-    def codec_transform(self, data: bytes, encrypt: bool = True) -> bytes:
-        """Centralized encryption/decryption logic."""
-        if self.encryption_method == 0:
-            return data
-
-        if self.encryption_method == 1:
-            return self.xor_data(data, self.key)
-
-        return self.data_encrypt(data) if encrypt else self.data_decrypt(data)
-
-    async def build_request_dns_query(
+    def build_request_dns_query(
         self,
         domain: str,
         session_id: int,
@@ -634,8 +685,11 @@ class DnsPacketParser:
         fragment_id: int = 0,
         total_fragments: int = 0,
         total_data_length: int = 0,
-    ) -> bytes:
-        labels = self.generate_labels(
+    ) -> list[bytes]:
+        gen = self.generate_labels
+        sq = self.simple_question_packet
+
+        labels = gen(
             domain,
             session_id,
             packet_type,
@@ -648,13 +702,11 @@ class DnsPacketParser:
             total_fragments,
             total_data_length,
         )
-        if not labels or len(labels) == 0:
+
+        if not labels:
             return b""
-        packets = []
-        for label in labels:
-            packet = await self.simple_question_packet(label, qType)
-            packets.append(packet)
-        return packets
+
+        return [sq(label, qType) for label in labels]
 
     def generate_labels(
         self,
@@ -676,31 +728,59 @@ class DnsPacketParser:
             data_str = (
                 data.decode("utf-8", errors="ignore")
                 if isinstance(data, bytes)
-                else data
+                else (data or "")
             )
 
-        if not data_str:
-            data_str = ""
-
-        if len(data_str) == 0:
-            calculated_total_fragments = 1
-        else:
-            calculated_total_fragments = max(
-                1, (len(data_str) + mtu_chars - 1) // mtu_chars
-            )
+        data_len = len(data_str)
+        calculated_total_fragments = (
+            1 if data_len == 0 else (data_len + mtu_chars - 1) // mtu_chars
+        )
 
         if calculated_total_fragments > 255:
             self.logger.error("Data too large, exceeds maximum 255 fragments.")
             return []
 
-        data_labels = []
-        for frag_id in range(calculated_total_fragments):
-            if len(data_str) > 0:
-                chunk_str = data_str[frag_id * mtu_chars : (frag_id + 1) * mtu_chars]
-            else:
-                chunk_str = ""
+        # Localize hot-path functions
+        data_to_labels = self.data_to_labels
+        create_vpn_header = self.create_vpn_header
+        raw_data_len = len(data) if data else 0
 
-            header = self.create_vpn_header(
+        data_labels: list = []
+        append = data_labels.append
+
+        # Single fragment fast-path
+        if data_len <= mtu_chars:
+            header = create_vpn_header(
+                session_id=session_id,
+                packet_type=packet_type,
+                base36_encode=True,
+                stream_id=stream_id,
+                sequence_num=sequence_num,
+                fragment_id=0,
+                total_fragments=calculated_total_fragments,
+                total_data_length=raw_data_len,
+            )
+
+            if data_len:
+                if data_len <= 63:
+                    append(f"{data_str}.{header}.{domain}")
+                else:
+                    append(f"{data_to_labels(data_str)}.{header}.{domain}")
+            else:
+                append(f"{header}.{domain}")
+
+            return data_labels
+
+        # Multi-fragment path
+        for frag_id in range(calculated_total_fragments):
+            start = frag_id * mtu_chars
+            end = start + mtu_chars
+
+            chunk_str = ""
+            if start < data_len:
+                chunk_str = data_str[start:] if end >= data_len else data_str[start:end]
+
+            header = create_vpn_header(
                 session_id=session_id,
                 packet_type=packet_type,
                 base36_encode=True,
@@ -708,20 +788,20 @@ class DnsPacketParser:
                 sequence_num=sequence_num,
                 fragment_id=frag_id,
                 total_fragments=calculated_total_fragments,
-                total_data_length=len(data) if data else 0,
+                total_data_length=raw_data_len,
             )
 
             if chunk_str:
-                chunk_label = self.data_to_labels(chunk_str)
-                final_label = f"{chunk_label}.{header}.{domain}"
+                if len(chunk_str) <= 63:
+                    append(f"{chunk_str}.{header}.{domain}")
+                else:
+                    append(f"{data_to_labels(chunk_str)}.{header}.{domain}")
             else:
-                final_label = f"{header}.{domain}"
-
-            data_labels.append(final_label)
+                append(f"{header}.{domain}")
 
         return data_labels
 
-    async def generate_vpn_response_packet(
+    def generate_vpn_response_packet(
         self,
         domain: str,
         session_id: int,
@@ -736,7 +816,6 @@ class DnsPacketParser:
     ) -> bytes:
         MAX_ALLOWED_CHARS_PER_TXT = 191
 
-        # Create header with arguments
         header = self.create_vpn_header(
             session_id,
             packet_type,
@@ -747,104 +826,113 @@ class DnsPacketParser:
             total_fragments=total_fragments,
             total_data_length=total_data_length,
         )
+        # Localize and fast-path: encode the full data once (all chars are ASCII from base_encode)
+        base_enc = self.base_encode
+        simple_ans = self.simple_answer_packet
+        txt_type = DNS_Record_Type.TXT
+        in_class = DNS_QClass.IN
 
-        data_str = self.base_encode(data, lowerCaseOnly=False)
+        data_str = base_enc(data, lowerCaseOnly=False)
         answers = []
+        append = answers.append
 
         if not data_str:
-            full_chunk_str = f"{header}.0."
-            answer = {
-                "name": domain,
-                "type": DNS_Record_Type.TXT,
-                "class": DNS_QClass.IN,
-                "TTL": 0,
-                "rData": bytes([len(full_chunk_str)]) + full_chunk_str.encode("utf-8"),
-            }
-            answers.append(answer)
-        else:
-            answer_id = 0
-            current_data_idx = 0
-            while current_data_idx < len(data_str):
-                prefix = (header + ".") if answer_id == 0 else ""
-                prefix += str(answer_id) + "."
-                available_space = MAX_ALLOWED_CHARS_PER_TXT - len(prefix)
-
-                if available_space <= 0:
-                    break
-
-                chunk_payload = data_str[
-                    current_data_idx : current_data_idx + available_space
-                ]
-                full_chunk_str = prefix + chunk_payload
-
-                answer = {
+            # small response that contains only header + marker
+            full_chunk_str = header + ".0."
+            encoded = full_chunk_str.encode("ascii", errors="ignore")
+            append(
+                {
                     "name": domain,
-                    "type": DNS_Record_Type.TXT,
-                    "class": DNS_QClass.IN,
+                    "type": txt_type,
+                    "class": in_class,
                     "TTL": 0,
-                    "rData": bytes([len(full_chunk_str)])
-                    + full_chunk_str.encode("utf-8"),
+                    "rData": bytes((len(encoded),)) + encoded,
                 }
-                answers.append(answer)
-                current_data_idx += len(chunk_payload)
-                answer_id += 1
+            )
+            return simple_ans(answers, question_packet)
 
-        packet = await self.simple_answer_packet(answers, question_packet)
-        return packet
+        # Encode once to bytes to avoid repeated str->bytes conversions in loop
+        data_bytes = data_str.encode("ascii", errors="ignore")
+        data_len = len(data_bytes)
+
+        header_prefix_bytes = (header + ".").encode("ascii", errors="ignore")
+        _int_cache = self._int_bytes_cache
+
+        answer_id = 0
+        cur = 0
+
+        while cur < data_len:
+            id_bytes = _int_cache.get(answer_id)
+            if id_bytes is None:
+                id_bytes = (str(answer_id) + ".").encode("ascii", errors="ignore")
+                _int_cache[answer_id] = id_bytes
+
+            if answer_id == 0:
+                prefix_bytes = header_prefix_bytes + id_bytes
+            else:
+                prefix_bytes = id_bytes
+
+            available_space = MAX_ALLOWED_CHARS_PER_TXT - len(prefix_bytes)
+
+            next_idx = cur + available_space
+            chunk_payload = data_bytes[cur:next_idx]
+            full_chunk = prefix_bytes + chunk_payload
+
+            append(
+                {
+                    "name": domain,
+                    "type": txt_type,
+                    "class": in_class,
+                    "TTL": 0,
+                    "rData": bytes((len(full_chunk),)) + full_chunk,
+                }
+            )
+
+            cur = next_idx
+            answer_id += 1
+
+        return simple_ans(answers, question_packet)
 
     def extract_txt_from_rData(self, rData: bytes) -> str:
         """
         Extract the TXT string from the rData field of a DNS TXT record.
-        Args:
-            rData (bytes): The rData field from a DNS TXT record.
-        Returns:
-            str: The extracted TXT string.
         """
-        try:
-            if len(rData) == 0:
-                return ""
-            txt_length = rData[0]
-            txt_data = rData[1 : 1 + txt_length]
-            return txt_data.decode("utf-8", errors="ignore")
-        except Exception as e:
-            self.logger.error(f"Failed to extract TXT from rData: {e}")
+        if not rData:
             return ""
+
+        length = rData[0]
+        if length == 0:
+            return ""
+
+        return rData[1 : 1 + length].decode("utf-8", errors="ignore")
 
     def calculate_upload_mtu(self, domain: str, mtu: int = 0) -> int:
         """
         Calculate the maximum upload MTU based on the domain length and DNS constraints.
-        Args:
-            domain (str): The domain name used for DNS tunneling.
-            mtu (int): The desired MTU size. If 0, defaults to 512 bytes.
-        Returns:
-            int: Maximum upload MTU in bytes.
+        Returns (max_chars, max_bytes).
         """
-        # 1. Hard Limits of DNS Protocol
-        MAX_DNS_TOTAL = 253  # Max length of full domain name
-        MAX_LABEL_LEN = 63  # Max length between dots
+        MAX_DNS_TOTAL = 253
+        MAX_LABEL_LEN = 63
 
-        # 2. Prepare Header Overhead
-        # Create a dummy header to measure its exact encoded size
-        # We assume worst-case scenario (encryption adds size + max base36 expansion)
-        test_header = self.create_vpn_header(
-            session_id=255,
-            packet_type=Packet_Type.STREAM_DATA,
-            stream_id=65535,
-            sequence_num=0,
-            fragment_id=0,
-            total_fragments=255,
-            total_data_length=65535,
-        )
+        # Localize frequently used attrs to reduce attribute lookups
+        log2_36 = self.LOG2_36
+        _ceil = math.ceil
+        _len = len
 
-        # Header Overhead = Encoded Header + 1 dot separator
-        header_overhead_chars = len(test_header) + 1
+        # Determine header raw byte length for STREAM_DATA test-case
+        hb_len = 2
+        if Packet_Type.STREAM_DATA in self._PT_STREAM_EXT:
+            hb_len += 2
+        if Packet_Type.STREAM_DATA in self._PT_SEQ_EXT:
+            hb_len += 2
+        if Packet_Type.STREAM_DATA in self._PT_FRAG_EXT:
+            # frag byte + the special-case extra 3 bytes when seq==0 and frag==0
+            hb_len += 1 + 3
 
-        # 3. Domain Overhead
-        # Domain Overhead = length of domain + 1 dot separator (before domain)
-        domain_overhead_chars = len(domain) + 1
-
-        # 4. Calculate Remaining Space for Payload Characters
-        # We subtract 1 extra byte for safety/null terminator
+        # include marker byte added before base-encoding
+        bits = (hb_len + 1) * 8
+        header_overhead_chars = int(_ceil(bits / log2_36)) + 1
+        domain_overhead_chars = _len(domain) + 1
         total_overhead = header_overhead_chars + domain_overhead_chars + 1
         available_chars_space = MAX_DNS_TOTAL - total_overhead
 
@@ -852,30 +940,18 @@ class DnsPacketParser:
             self.logger.error(f"Domain {domain} is too long, no space for data.")
             return 0, 0
 
-        # 5. Calculate Max Usable Characters (accounting for forced dots)
-        # We need to find 'N' such that: N + dots_needed(N) <= available_chars_space
-        max_payload_chars = 0
-        for chars in range(available_chars_space, 0, -1):
-            # Calculate how many dots are needed for this many characters
-            # (One dot every 63 chars)
-            needed_dots = (chars - 1) // MAX_LABEL_LEN
-            total_len_needed = chars + needed_dots
+        max_payload_chars = (available_chars_space * MAX_LABEL_LEN) // (
+            MAX_LABEL_LEN + 1
+        )
+        if max_payload_chars <= 0:
+            return 0, 0
 
-            if total_len_needed <= available_chars_space:
-                max_payload_chars = chars
-                break
-
-        # 6. Convert Max Characters to Max Bytes (Base36 Logic)
-        # log2(36) ≈ 5.1699 bits per character
-        bits_capacity = max_payload_chars * math.log2(36)
-        # Add -1 for safety if needed
+        bits_capacity = max_payload_chars * self.LOG2_36
         safe_bytes_capacity = int(bits_capacity / 8)
 
-        # 7. Respect User's Requested MTU (if provided and smaller)
         if mtu > 0 and mtu < safe_bytes_capacity:
             final_mtu_bytes = mtu
-            # Recalculate chars for the report (approximation)
-            final_mtu_chars = int((mtu * 8) / math.log2(36))
+            final_mtu_chars = int((mtu * 8) / self.LOG2_36)
         else:
             final_mtu_bytes = safe_bytes_capacity
             final_mtu_chars = max_payload_chars
@@ -885,18 +961,16 @@ class DnsPacketParser:
     def data_to_labels(self, encoded_str: str) -> str:
         """
         Convert encoded string into DNS labels (max 63 chars each).
-
-        Args:
-            encoded_str (str): The base-encoded string to convert.
-
-        Returns:
-            str: The encoded string split into DNS labels separated by dots.
         """
-        MAX_LABEL_LEN = 63
-        labels = []
-        for i in range(0, len(encoded_str), MAX_LABEL_LEN):
-            labels.append(encoded_str[i : i + MAX_LABEL_LEN])
-        return ".".join(labels)
+        if not encoded_str:
+            return ""
+
+        n = len(encoded_str)
+        if n <= 63:
+            return encoded_str
+
+        # Very fast C-optimized inline chunking
+        return ".".join(encoded_str[i : i + 63] for i in range(0, n, 63))
 
     def extract_vpn_header_from_labels(self, labels: str) -> bytes:
         """
@@ -907,22 +981,19 @@ class DnsPacketParser:
         Returns:
             bytes: Decoded VPN header bytes.
         """
-
-        try:
-            if not labels or not isinstance(labels, str):
-                return b""
-            label_parts = labels.split(".")
-            if not label_parts:
-                return b""
-            header_encoded = label_parts[-1]
-            header_decrypted = self.decode_and_decrypt_data(
-                header_encoded, lowerCaseOnly=True
-            )
-
-            return self.parse_vpn_header_bytes(header_decrypted)
-        except Exception as e:
-            self.logger.error(f"Failed to extract VPN header: {e}")
+        if not labels or not isinstance(labels, str):
             return b""
+
+        # Avoid creating a list via split(); take the last label with rfind() and slice.
+        last_dot = labels.rfind(".")
+        header_encoded = labels if last_dot == -1 else labels[last_dot + 1 :]
+
+        # Local aliases reduce attribute lookups on the hot path.
+        _decode = self.decode_and_decrypt_data
+        _parse = self.parse_vpn_header_bytes
+
+        header_decrypted = _decode(header_encoded, lowerCaseOnly=True)
+        return _parse(header_decrypted)
 
     def decode_and_decrypt_data(self, encoded_str: str, lowerCaseOnly=True) -> bytes:
         """
@@ -933,15 +1004,22 @@ class DnsPacketParser:
         Returns:
             bytes: Decoded and decrypted VPN data bytes.
         """
-        try:
-            if not encoded_str:
-                return b""
-            data_encrypted = self.base_decode(encoded_str, lowerCaseOnly=lowerCaseOnly)
-            data_decrypted = self.codec_transform(data_encrypted, encrypt=False)
-            return data_decrypted
-        except Exception as e:
-            self.logger.error(f"Failed to decode and decrypt VPN data: {e}")
+        # Fast-path + minimal overhead: avoid try/except and reduce attribute lookups.
+        if not encoded_str:
             return b""
+
+        base_dec = self.base_decode
+
+        # If encryption is disabled, skip codec_transform entirely.
+        if self.encryption_method == 0:
+            return base_dec(encoded_str, lowerCaseOnly=lowerCaseOnly)
+
+        data_encrypted = base_dec(encoded_str, lowerCaseOnly=lowerCaseOnly)
+        if not data_encrypted:
+            return b""
+
+        codec = self.codec_transform
+        return codec(data_encrypted, encrypt=False)
 
     def encrypt_and_encode_data(self, data: bytes, lowerCaseOnly=True) -> str:
         """
@@ -953,15 +1031,17 @@ class DnsPacketParser:
             str: Encoded VPN data string.
         """
 
-        try:
-            if not data:
-                return ""
-            data_encrypted = self.codec_transform(data, encrypt=True)
-            data_encoded = self.base_encode(data_encrypted, lowerCaseOnly=lowerCaseOnly)
-            return data_encoded
-        except Exception as e:
-            self.logger.error(f"Failed to encrypt and encode VPN data: {e}")
+        if not data:
             return ""
+
+        base_enc = self.base_encode
+
+        if self.encryption_method == 0:
+            return base_enc(data, lowerCaseOnly=lowerCaseOnly)
+
+        codec = self.codec_transform
+        encrypted = codec(data, encrypt=True)
+        return base_enc(encrypted, lowerCaseOnly=lowerCaseOnly)
 
     def extract_vpn_data_from_labels(self, labels: str) -> bytes:
         """
@@ -972,19 +1052,21 @@ class DnsPacketParser:
         Returns:
             bytes: Decoded VPN data bytes.
         """
+        if not labels or not isinstance(labels, str):
+            return b""
+
+        last_dot = labels.rfind(".")
+        if last_dot <= 0:
+            return b""
+
+        left = labels[:last_dot]
+        if not left:
+            return b""
+
+        data_encoded = left.replace(".", "")
 
         try:
-            if not labels or not isinstance(labels, str):
-                return b""
-            label_parts = labels.split(".")
-            if len(label_parts) <= 1:
-                return b""
-            # all parts except last are data
-            data_encoded = "".join(label_parts[:-1])
-            data_decrypted = self.decode_and_decrypt_data(
-                data_encoded, lowerCaseOnly=True
-            )
-            return data_decrypted
+            return self.decode_and_decrypt_data(data_encoded, lowerCaseOnly=True)
         except Exception as e:
             self.logger.error(f"Failed to extract VPN data: {e}")
             return b""
@@ -996,74 +1078,46 @@ class DnsPacketParser:
         if not header_bytes or len(header_bytes) < 2:
             return None
 
-        header_data = {
-            "session_id": header_bytes[0],
-            "packet_type": header_bytes[1],
-        }
+        hb = header_bytes
+        ln = len(hb)
+        ptype = hb[1]
 
-        offset = 2
-        ptype = header_data["packet_type"]
+        header_data = {"session_id": hb[0], "packet_type": ptype}
 
-        try:
-            # Extract stream_id
-            if ptype in (
-                Packet_Type.STREAM_SYN,
-                Packet_Type.STREAM_SYN_ACK,
-                Packet_Type.STREAM_FIN,
-                Packet_Type.STREAM_DATA,
-                Packet_Type.STREAM_DATA_ACK,
-                Packet_Type.STREAM_RESEND,
-                Packet_Type.MTU_UP_REQ,
-                Packet_Type.MTU_DOWN_RES,
-            ):
-                if len(header_bytes) >= offset + 2:
-                    header_data["stream_id"] = int.from_bytes(
-                        header_bytes[offset : offset + 2], byteorder="big"
-                    )
-                    offset += 2
+        off = 2
+        PT_STREAM = self._PT_STREAM_EXT
+        PT_SEQ = self._PT_SEQ_EXT
+        PT_FRAG = self._PT_FRAG_EXT
 
-            # Extract sequence_num
-            if ptype in (
-                Packet_Type.STREAM_DATA_ACK,
-                Packet_Type.STREAM_DATA,
-                Packet_Type.STREAM_RESEND,
-                Packet_Type.MTU_UP_REQ,
-                Packet_Type.MTU_DOWN_RES,
-            ):
-                if len(header_bytes) >= offset + 2:
-                    header_data["sequence_num"] = int.from_bytes(
-                        header_bytes[offset : offset + 2], byteorder="big"
-                    )
-                    offset += 2
+        # STREAM: need 2 bytes
+        if ptype in PT_STREAM:
+            if ln < off + 2:
+                return None
+            header_data["stream_id"] = (hb[off] << 8) | hb[off + 1]
+            off += 2
 
-            # Extract fragment_id
-            if ptype in (
-                Packet_Type.STREAM_DATA,
-                Packet_Type.STREAM_RESEND,
-                Packet_Type.MTU_UP_REQ,
-                Packet_Type.MTU_DOWN_RES,
-            ):
-                if len(header_bytes) >= offset + 1:
-                    header_data["fragment_id"] = header_bytes[offset]
-                    offset += 1
+        # SEQ: need 2 bytes
+        if ptype in PT_SEQ:
+            if ln < off + 2:
+                return None
+            header_data["sequence_num"] = (hb[off] << 8) | hb[off + 1]
+            off += 2
 
-                    # Extract total_fragments and total_data_length
-                    if (
-                        header_data.get("sequence_num", -1) == 0
-                        and header_data.get("fragment_id", -1) == 0
-                    ):
-                        if len(header_bytes) >= offset + 3:
-                            header_data["total_fragments"] = header_bytes[offset]
-                            offset += 1
-                            header_data["total_data_length"] = int.from_bytes(
-                                header_bytes[offset : offset + 2], byteorder="big"
-                            )
-                            offset += 2
+        # FRAG: need 1 byte, and possibly extra 3 bytes when seq==0 and frag==0
+        if ptype in PT_FRAG:
+            if ln < off + 1:
+                return None
+            frag = hb[off]
+            header_data["fragment_id"] = frag
+            off += 1
 
-            return header_data
-        except Exception as e:
-            self.logger.error(f"Failed to parse dynamic VPN header bytes: {e}")
-            return None
+            if header_data.get("sequence_num") == 0 and frag == 0:
+                if ln < off + 3:
+                    return None
+                header_data["total_fragments"] = hb[off]
+                header_data["total_data_length"] = (hb[off + 1] << 8) | hb[off + 2]
+
+        return header_data
 
     #
     # Custom VPN Packet Header Structure (for data fragmentation over DNS)
@@ -1099,7 +1153,7 @@ class DnsPacketParser:
         fragment_id: int = 0,
         total_fragments: int = 0,
         total_data_length: int = 0,
-    ) -> bytes:
+    ) -> str:
         """
         Construct custom VPN header for a DNS packet.
 
@@ -1112,77 +1166,31 @@ class DnsPacketParser:
             fragment_id (int): Fragment ID for STREAM_DATA packets (0-255).
             total_fragments (int): Total fragments for the stream (0-255).
         Returns:
-            bytes: Encoded VPN header.
+            str: Encoded VPN header.
 
         Raises:
             ValueError: If arguments are out of valid range.
         """
-        # Input validation
-        if not (0 <= session_id <= 0xFF):
-            raise ValueError("session_id must be in 0-255.")
-        if not (0 <= packet_type <= 0xFF):
-            raise ValueError("packet_type must be in 0-255.")
+        h_list = [session_id, packet_type]
 
-        if not (0 <= stream_id <= 0xFFFF):
-            raise ValueError("stream_id must be in 0-65535.")
+        if packet_type in self._PT_STREAM_EXT:
+            h_list.extend([stream_id >> 8, stream_id & 0xFF])
 
-        if not (0 <= sequence_num <= 0xFFFF):
-            raise ValueError("sequence_num must be in 0-65535.")
+        if packet_type in self._PT_SEQ_EXT:
+            h_list.extend([sequence_num >> 8, sequence_num & 0xFF])
 
-        if not (0 <= fragment_id <= 0xFF):
-            raise ValueError("fragment_id must be in 0-255.")
-
-        if not (0 <= total_fragments <= 0xFF):
-            raise ValueError("total_fragments must be in 0-255.")
-
-        if not (0 <= total_data_length <= 0xFFFF):
-            raise ValueError("total_data_length must be in 0-65535.")
-
-        # Compose header
-        header = bytearray()
-        header.append(session_id)
-        header.append(packet_type)
-
-        if packet_type in (
-            Packet_Type.STREAM_SYN,
-            Packet_Type.STREAM_SYN_ACK,
-            Packet_Type.STREAM_FIN,
-            Packet_Type.STREAM_DATA,
-            Packet_Type.STREAM_DATA_ACK,
-            Packet_Type.STREAM_RESEND,
-            Packet_Type.MTU_UP_REQ,
-            Packet_Type.MTU_DOWN_RES,
-        ):
-            header += stream_id.to_bytes(2, byteorder="big")
-
-        if packet_type in (
-            Packet_Type.STREAM_DATA_ACK,
-            Packet_Type.STREAM_DATA,
-            Packet_Type.STREAM_RESEND,
-            Packet_Type.MTU_UP_REQ,
-            Packet_Type.MTU_DOWN_RES,
-        ):
-            header += sequence_num.to_bytes(2, byteorder="big")
-
-        if packet_type in (
-            Packet_Type.STREAM_DATA,
-            Packet_Type.STREAM_RESEND,
-            Packet_Type.MTU_UP_REQ,
-            Packet_Type.MTU_DOWN_RES,
-        ):
-            header.append(fragment_id)
+        if packet_type in self._PT_FRAG_EXT:
+            h_list.append(fragment_id)
             if sequence_num == 0 and fragment_id == 0:
-                header.append(total_fragments)
-                header += total_data_length.to_bytes(2, byteorder="big")
+                h_list.extend(
+                    [total_fragments, total_data_length >> 8, total_data_length & 0xFF]
+                )
 
-        if len(header) > 255:
-            raise ValueError(
-                "Header length exceeds 255 bytes, cannot encode in a single label."
-            )
+        raw_header = bytes(h_list)
 
-        encrypted_header = self.codec_transform(bytes(header), encrypt=True)
-
-        if base36_encode:
-            return self.base_encode(encrypted_header, lowerCaseOnly=True)
+        if self.encryption_method == 0:
+            encrypted_header = raw_header
         else:
-            return self.base_encode(encrypted_header, lowerCaseOnly=False)
+            encrypted_header = self.codec_transform(raw_header, encrypt=True)
+
+        return self.base_encode(encrypted_header, lowerCaseOnly=base36_encode)

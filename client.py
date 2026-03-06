@@ -213,7 +213,7 @@ class MasterDnsVPNClient:
         if not response_bytes:
             return None, b""
 
-        parsed = await self.dns_packet_parser.parse_dns_packet(response_bytes)
+        parsed = self.dns_packet_parser.parse_dns_packet(response_bytes)
         if addr and parsed and parsed.get("questions"):
             try:
                 qname = parsed["questions"][0].get("qName", "").lower()
@@ -360,7 +360,7 @@ class MasterDnsVPNClient:
             return False
 
         random_hex = generate_random_hex_text(mtu_char_len).lower()
-        dns_queries = await self.dns_packet_parser.build_request_dns_query(
+        dns_queries = self.dns_packet_parser.build_request_dns_query(
             domain=domain,
             session_id=random.randint(0, 255),
             packet_type=Packet_Type.MTU_UP_REQ,
@@ -404,7 +404,7 @@ class MasterDnsVPNClient:
             domain=domain, mtu=64
         )
 
-        dns_queries = await self.dns_packet_parser.build_request_dns_query(
+        dns_queries = self.dns_packet_parser.build_request_dns_query(
             domain=domain,
             session_id=random.randint(0, 255),
             packet_type=Packet_Type.MTU_DOWN_REQ,
@@ -588,7 +588,7 @@ class MasterDnsVPNClient:
             data_bytes, encrypt=True
         )
 
-        dns_queries = await self.dns_packet_parser.build_request_dns_query(
+        dns_queries = self.dns_packet_parser.build_request_dns_query(
             domain=domain,
             session_id=self.session_id,
             packet_type=Packet_Type.SET_MTU_REQ,
@@ -670,7 +670,7 @@ class MasterDnsVPNClient:
             init_token, encrypt=True
         )
 
-        dns_queries = await self.dns_packet_parser.build_request_dns_query(
+        dns_queries = self.dns_packet_parser.build_request_dns_query(
             domain=domain,
             session_id=0,
             packet_type=Packet_Type.SESSION_INIT,
@@ -1383,7 +1383,7 @@ class MasterDnsVPNClient:
 
             for conn in target_conns:
                 self.balancer.report_send(f"{conn['resolver']}:{conn['domain']}")
-                query_packets = await self.dns_packet_parser.build_request_dns_query(
+                query_packets = self.dns_packet_parser.build_request_dns_query(
                     domain=conn["domain"],
                     session_id=self.session_id,
                     packet_type=pkt_type,

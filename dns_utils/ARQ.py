@@ -11,6 +11,19 @@ import time
 class ARQStream:
     _active_tasks = set()
 
+    class _DummyLogger:
+        def debug(self, *args, **kwargs):
+            pass
+
+        def info(self, *args, **kwargs):
+            pass
+
+        def warning(self, *args, **kwargs):
+            pass
+
+        def error(self, *args, **kwargs):
+            pass
+
     def __init__(
         self,
         stream_id,
@@ -34,16 +47,15 @@ class ARQStream:
         self.snd_buf = {}
         self.rcv_buf = {}
 
-        self.last_activity = time.time()
+        self.last_activity = time.monotonic()
         self.rto = 1.0
         self.closed = False
         self.close_reason = "Unknown"
-        self.logger = logger
+        self.logger = logger or self._DummyLogger()
         self._fin_sent = False
-        self._write_lock = asyncio.Lock()
-        self._snd_lock = asyncio.Lock()
 
         self.window_size = window_size
+        self.limit = max(50, int(self.window_size * 0.8))
         self.window_not_full = asyncio.Event()
         self.window_not_full.set()
 
@@ -57,26 +69,29 @@ class ARQStream:
         try:
             loop = asyncio.get_running_loop()
             self.io_task = loop.create_task(self._io_loop())
+            self.rtx_task = loop.create_task(self._retransmit_loop())
+
             ARQStream._active_tasks.add(self.io_task)
+            ARQStream._active_tasks.add(self.rtx_task)
             self.io_task.add_done_callback(ARQStream._active_tasks.discard)
+            self.rtx_task.add_done_callback(ARQStream._active_tasks.discard)
         except RuntimeError:
             self.io_task = None
+            self.rtx_task = None
 
     async def _io_loop(self):
+        _read = self.reader.read
+        _enqueue = self.enqueue_tx
+        _monotonic = time.monotonic
+        _mtu = self.mtu
+        _limit = self.limit
+
         try:
             while not self.closed:
-                try:
-                    await asyncio.wait_for(self.window_not_full.wait(), timeout=0.2)
-                except asyncio.TimeoutError:
-                    await self.check_retransmits()
-                    continue
+                await self.window_not_full.wait()
 
                 try:
-                    raw_data = await asyncio.wait_for(
-                        self.reader.read(self.mtu), timeout=0.5
-                    )
-                except asyncio.TimeoutError:
-                    continue
+                    raw_data = await _read(_mtu)
                 except ConnectionResetError:
                     self.close_reason = "Local App Reset Connection (Dropped)"
                     break
@@ -88,41 +103,46 @@ class ARQStream:
                     self.close_reason = "Local App Closed Connection (EOF)"
                     break
 
-                limit = max(50, int(self.window_size * 0.8))
-                while len(self.snd_buf) > limit:
-                    await asyncio.sleep(0.05)
-                    if self.closed:
-                        return
-
-                self.last_activity = time.time()
+                self.last_activity = _monotonic()
                 sn = self.snd_nxt
-                self.snd_nxt = (self.snd_nxt + 1) % 65536
+                self.snd_nxt = (sn + 1) % 65536
 
-                async with self._snd_lock:
-                    self.snd_buf[sn] = {
-                        "data": raw_data,
-                        "time": time.time(),
-                        "retries": 0,
-                    }
+                self.snd_buf[sn] = {
+                    "data": raw_data,
+                    "time": self.last_activity,
+                    "retries": 0,
+                }
 
-                    if len(self.snd_buf) >= self.window_size:
-                        self.window_not_full.clear()
+                if len(self.snd_buf) >= _limit:
+                    self.window_not_full.clear()
 
-                await self.enqueue_tx(3, self.stream_id, sn, raw_data)
+                await _enqueue(3, self.stream_id, sn, raw_data)
+
         except asyncio.CancelledError:
             pass
         except Exception as e:
             self.logger.debug(f"Stream {self.stream_id} IO loop error: {e}")
         finally:
             if not self.closed:
-                loop = asyncio.get_running_loop()
-                loop.create_task(self.close(reason="IO Loop Exit"))
+                asyncio.create_task(self.close(reason="IO Loop Exit"))
+
+    async def _retransmit_loop(self):
+        """Separate lightweight task for RTO checks."""
+        _sleep = asyncio.sleep
+        try:
+            while not self.closed:
+                await _sleep(self.rto / 2.0)
+                if self.closed:
+                    break
+                await self.check_retransmits()
+        except asyncio.CancelledError:
+            pass
 
     async def receive_data(self, sn, data):
         if self.closed:
             return
 
-        self.last_activity = time.time()
+        self.last_activity = time.monotonic()
 
         diff = (sn - self.rcv_nxt) % 65536
         if diff >= 32768:
@@ -136,10 +156,12 @@ class ARQStream:
             self.rcv_buf[sn] = data
 
         has_written = False
+        _write = self.writer.write
+        _pop = self.rcv_buf.pop
+
         while self.rcv_nxt in self.rcv_buf:
-            ordered_data = self.rcv_buf.pop(self.rcv_nxt)
             try:
-                self.writer.write(ordered_data)
+                _write(_pop(self.rcv_nxt))
                 has_written = True
             except Exception as e:
                 await self.close(reason=f"Writer Error: {e}")
@@ -152,43 +174,39 @@ class ARQStream:
             except Exception:
                 pass
 
-        # ack last received sn
         await self.enqueue_tx(0, self.stream_id, sn, b"", is_ack=True)
 
     async def receive_ack(self, sn):
-        self.last_activity = time.time()
-        async with self._snd_lock:
-            if sn not in self.snd_buf:
-                return
-            self.snd_buf.pop(sn, None)
+        self.last_activity = time.monotonic()
 
-            if len(self.snd_buf) < self.window_size:
+        if self.snd_buf.pop(sn, None) is not None:
+            if len(self.snd_buf) < self.limit:
                 self.window_not_full.set()
 
     async def check_retransmits(self):
         if self.closed:
             return
 
-        now = time.time()
-        items_to_resend = []
-        stream_dead = False
+        now = time.monotonic()
 
-        if now - getattr(self, "last_activity", now) > 300.0:
-            stream_dead = True
-        else:
-            async with self._snd_lock:
-                for sn, info in self.snd_buf.items():
-                    if now - info["time"] >= self.rto:
-                        items_to_resend.append((sn, info["data"]))
-                        info["time"] = now
-                        info["retries"] += 1
-
-        if stream_dead:
+        if now - self.last_activity > 300.0:
             await self.close(reason="Stream Inactivity Timeout (Dead)")
             return
 
+        items_to_resend = []
+        _append = items_to_resend.append
+        _rto = self.rto
+
+        for sn, info in self.snd_buf.items():
+            if now - info["time"] >= _rto:
+                _append((sn, info["data"]))
+                info["time"] = now
+                info["retries"] += 1
+
+        _enqueue = self.enqueue_tx
+        _sid = self.stream_id
         for sn, data in items_to_resend:
-            await self.enqueue_tx(1, self.stream_id, sn, data, is_resend=True)
+            await _enqueue(1, _sid, sn, data, is_resend=True)
 
     async def close(self, reason="Unknown"):
         if self.closed:
@@ -196,7 +214,6 @@ class ARQStream:
 
         self.closed = True
         self.close_reason = reason
-        # self.logger.info(f"Stream {self.stream_id} closing. Reason: {reason}")
 
         if not self._fin_sent:
             self._fin_sent = True
@@ -206,11 +223,12 @@ class ARQStream:
                 pass
 
         current_task = asyncio.current_task()
-        if hasattr(self, "io_task") and self.io_task and not self.io_task.done():
-            if self.io_task is not current_task:
-                self.io_task.cancel()
+
+        for task in (getattr(self, "io_task", None), getattr(self, "rtx_task", None)):
+            if task and not task.done() and task is not current_task:
+                task.cancel()
                 try:
-                    await asyncio.wait_for(self.io_task, timeout=0.5)
+                    await asyncio.wait_for(task, timeout=0.2)
                 except Exception:
                     pass
 

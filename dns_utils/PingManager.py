@@ -10,33 +10,44 @@ import time
 class PingManager:
     def __init__(self, send_func):
         self.send_func = send_func
-        self.last_data_activity = time.time()
-        self.last_ping_time = time.time()
+        self.last_data_activity = time.monotonic()
+        self.last_ping_time = self.last_data_activity
         self.active_connections = 0
 
     def update_activity(self):
-        self.last_data_activity = time.time()
+        self.last_data_activity = time.monotonic()
 
     async def ping_loop(self):
-        while True:
-            await asyncio.sleep(0.18)  # Sleep briefly to prevent tight loop
+        _sleep = asyncio.sleep
+        _monotonic = time.monotonic
+        _send_func = self.send_func
 
-            idle_time = time.time() - self.last_data_activity
-            if idle_time >= 10.0:
+        while True:
+            now = _monotonic()
+            idle_time = now - self.last_data_activity
+
+            if self.active_connections == 0 and idle_time > 20.0:
+                ping_interval = 10.0
+                max_sleep = 1.0
+            elif idle_time >= 10.0:
                 ping_interval = 3.0
+                max_sleep = 0.5
             elif idle_time >= 5.0:
                 ping_interval = 1.0
+                max_sleep = 0.2
             else:
                 ping_interval = 0.2
+                max_sleep = 0.18
 
-            if (
-                self.active_connections == 0
-                and self.last_data_activity + 20 < time.time()
-            ):
-                ping_interval = 10.0
+            time_since_last_ping = now - self.last_ping_time
 
-            if time.time() - self.last_ping_time < ping_interval:
-                continue
+            if time_since_last_ping >= ping_interval:
+                await _send_func()
+                self.last_ping_time = _monotonic()
+                time_to_sleep = ping_interval
+            else:
+                time_to_sleep = ping_interval - time_since_last_ping
 
-            await self.send_func()
-            self.last_ping_time = time.time()
+            actual_sleep = time_to_sleep if time_to_sleep < max_sleep else max_sleep
+            if actual_sleep > 0:
+                await _sleep(actual_sleep)

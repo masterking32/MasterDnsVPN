@@ -137,11 +137,13 @@ def getLogger(
     logFile: str = None,
     max_log_size: int = 1,
     backup_count: int = 3,
+    is_server: bool = True,
 ):
     # ---------------------------------------------#
     # Logging configuration
     LOG_LEVEL = log_level.upper()
-    log_format = f"<cyan>[MasterDnsVPN]</cyan> <green>[{{time:HH:mm:ss}}]</green> <level>[{{level}}]</level> <white><b>{{message}}</b></white>"
+    appName = "MasterDnsVPN Server" if is_server else "MasterDnsVPN Client"
+    log_format = f"<cyan>[{appName}]</cyan> <green>[{{time:HH:mm:ss}}]</green> <level>[{{level}}]</level> <white><b>{{message}}</b></white>"
 
     logger.remove()
     logger.add(
@@ -152,7 +154,7 @@ def getLogger(
     )
 
     if logFile:
-        log_file_format = "[MasterDnsVPN] [{time:HH:mm:ss}] [{level}] {message}"
+        log_file_format = f"[{appName}] [{time:HH:mm:ss}] [{level}] {message}"
 
         logger.add(
             logFile,
