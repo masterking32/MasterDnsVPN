@@ -758,7 +758,7 @@ class MasterDnsVPNServer:
         session_streams = session.get("streams", {})
         stream_data = session_streams.get(stream_id)
 
-        if not stream_data or stream_data.get("status") == "CLOSING":
+        if not stream_data or stream_data.get("status") in ("CLOSING", "TIME_WAIT"):
             return
 
         stream_data["status"] = "CLOSING"
@@ -795,11 +795,10 @@ class MasterDnsVPNServer:
             stream_data["track_ack"].clear()
             stream_data["track_resend"].clear()
             stream_data["track_data"].clear()
-            stream_data["status"] = "CLOSED"
+            stream_data["status"] = "TIME_WAIT"
+            stream_data["close_time"] = time.monotonic()
         except Exception:
             pass
-
-        session_streams.pop(stream_id, None)
 
     async def _server_enqueue_tx(
         self,

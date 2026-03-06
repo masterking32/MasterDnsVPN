@@ -1425,7 +1425,7 @@ class MasterDnsVPNClient:
         """Safely and fully close a specific local stream and salvage pending FIN/ACKs."""
 
         stream_data = self.active_streams.get(stream_id)
-        if not stream_data or stream_data.get("status") == "CLOSING":
+        if not stream_data or stream_data.get("status") in ("CLOSING", "TIME_WAIT"):
             return
 
         stream_data["status"] = "CLOSING"
@@ -1458,7 +1458,7 @@ class MasterDnsVPNClient:
             stream_data.get("track_resend", set()).clear()
             stream_data.get("track_ack", set()).clear()
             stream_data["status"] = "TIME_WAIT"
-            stream_data["status"] = "CLOSED"
+            stream_data["close_time"] = time.monotonic()
         except Exception:
             pass
 
