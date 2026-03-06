@@ -139,12 +139,8 @@ class MasterDnsVPNServer:
                 "round_robin_index": 0,
                 "enqueue_seq": 0,
                 "count_ack": 0,
-                "count_fin": 0,
-                "count_syn_ack": 0,
                 "count_data": 0,
                 "count_resend": 0,
-                "count_syn": 0,
-                "count_ping": 0,
                 "track_ack": set(),
                 "track_resend": set(),
                 "track_types": set(),
@@ -214,28 +210,6 @@ class MasterDnsVPNServer:
         except Exception:
             pass
 
-    async def close_inactive_sessions(self, timeout: int = 300) -> None:
-        now = time.monotonic()
-        while self._session_expiry_heap and self._session_expiry_heap[0][0] <= now:
-            try:
-                expiry, session_id = heapq.heappop(self._session_expiry_heap)
-                session = self.sessions.get(session_id)
-                if not session:
-                    continue
-                if now - session.get("last_packet_time", 0) > timeout:
-                    try:
-                        await self._close_session(session_id)
-                        self.logger.info(
-                            f"<yellow>Closed inactive session with ID: <cyan>{session_id}</cyan></yellow>"
-                        )
-                    except Exception as e:
-                        self.logger.debug(
-                            f"<red>Error closing session <cyan>{session_id}</cyan>: {e}</red>"
-                        )
-                        continue
-            except Exception:
-                break
-
     async def _handle_session_init(
         self,
         data=None,
@@ -275,12 +249,12 @@ class MasterDnsVPNServer:
         return response_packet
 
     async def _session_cleanup_loop(self) -> None:
-        """Background task to periodically cleanup inactive sessions."""
-        try:
-            cleanup_interval = float(self.session_cleanup_interval)
-            timeout_limit = self.session_timeout
+        """Background task to periodically cleanup inactive sessions (Crash-Proof)."""
+        cleanup_interval = float(self.session_cleanup_interval)
+        timeout_limit = self.session_timeout
 
-            while not self.should_stop.is_set():
+        while not self.should_stop.is_set():
+            try:
                 await asyncio.sleep(cleanup_interval)
                 now = time.monotonic()
 
@@ -300,9 +274,11 @@ class MasterDnsVPNServer:
                         self.logger.debug(
                             f"<red>Error closing session <cyan>{sid}</cyan>: {e}</red>"
                         )
-
-        except asyncio.CancelledError:
-            pass
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.logger.error(f"Unexpected error in session cleanup loop: {e}")
+                await asyncio.sleep(1)
 
     # ---------------------------------------------------------
     # Network I/O & Packet Processing
@@ -386,7 +362,6 @@ class MasterDnsVPNServer:
             )
 
         now_mono = time.monotonic()
-
         self._touch_session(session_id)
 
         stream_id = extracted_header.get("stream_id", 0) if extracted_header else 0
@@ -437,7 +412,14 @@ class MasterDnsVPNServer:
         res_sn = 0
         res_ptype = Packet_Type.PONG
 
-        active_streams = [sid for sid, sdata in streams.items() if sdata["tx_queue"]]
+        target_queue = None
+        is_main = False
+        selected_stream_data = None
+
+        main_queue = session.get("main_queue")
+        active_streams = [
+            sid for sid, sdata in streams.items() if sdata.get("tx_queue")
+        ]
 
         if active_streams:
             num_active = len(active_streams)
@@ -446,48 +428,24 @@ class MasterDnsVPNServer:
                 rr_index = 0
 
             selected_sid = active_streams[rr_index]
-            stream_data = streams[selected_sid]
-            target_queue = stream_data["tx_queue"]
+            selected_stream_data = streams[selected_sid]
+            t_queue = selected_stream_data["tx_queue"]
 
-            session["round_robin_index"] = (rr_index + 1) % num_active
+            if main_queue and main_queue[0][0] < t_queue[0][0]:
+                target_queue = main_queue
+                is_main = True
+            else:
+                target_queue = t_queue
+                session["round_robin_index"] = (rr_index + 1) % num_active
+        elif main_queue:
+            target_queue = main_queue
+            is_main = True
 
+        if target_queue:
             item = heapq.heappop(target_queue)
-            q_ptype, q_stream_id, q_sn = item[3], item[4], item[5]
+            q_ptype, q_stream_id, q_sn = item[2], item[3], item[4]
 
-            if q_ptype == Packet_Type.STREAM_DATA:
-                stream_data["track_data"].discard(q_sn)
-                if stream_data["count_data"] > 0:
-                    stream_data["count_data"] -= 1
-            elif q_ptype == Packet_Type.STREAM_DATA_ACK:
-                stream_data["track_ack"].discard(q_sn)
-                if stream_data["count_ack"] > 0:
-                    stream_data["count_ack"] -= 1
-            elif q_ptype == Packet_Type.STREAM_RESEND:
-                stream_data["track_resend"].discard(q_sn)
-                if stream_data["count_resend"] > 0:
-                    stream_data["count_resend"] -= 1
-            elif q_ptype == Packet_Type.STREAM_FIN:
-                stream_data["track_fin"].discard(q_ptype)
-                if stream_data["count_fin"] > 0:
-                    stream_data["count_fin"] -= 1
-            elif q_ptype == Packet_Type.STREAM_SYN_ACK:
-                stream_data["track_syn_ack"].discard(q_ptype)
-                if stream_data["count_syn_ack"] > 0:
-                    stream_data["count_syn_ack"] -= 1
-
-            res_ptype, res_stream_id, res_sn, res_data = (
-                q_ptype,
-                q_stream_id,
-                q_sn,
-                item[6],
-            )
-
-        if res_ptype == Packet_Type.PONG:
-            main_queue = session.get("main_queue")
-            if main_queue:
-                item = heapq.heappop(main_queue)
-                q_ptype, q_stream_id, q_sn = item[3], item[4], item[5]
-
+            if is_main:
                 if q_ptype == Packet_Type.STREAM_DATA:
                     session["track_data"].discard(q_sn)
                     if session["count_data"] > 0:
@@ -506,13 +464,34 @@ class MasterDnsVPNServer:
                     Packet_Type.STREAM_SYN_ACK,
                 ):
                     session["track_types"].discard(q_ptype)
+            else:
+                if q_ptype == Packet_Type.STREAM_DATA:
+                    selected_stream_data["track_data"].discard(q_sn)
+                    if selected_stream_data["count_data"] > 0:
+                        selected_stream_data["count_data"] -= 1
+                elif q_ptype == Packet_Type.STREAM_DATA_ACK:
+                    selected_stream_data["track_ack"].discard(q_sn)
+                    if selected_stream_data["count_ack"] > 0:
+                        selected_stream_data["count_ack"] -= 1
+                elif q_ptype == Packet_Type.STREAM_RESEND:
+                    selected_stream_data["track_resend"].discard(q_sn)
+                    if selected_stream_data["count_resend"] > 0:
+                        selected_stream_data["count_resend"] -= 1
+                elif q_ptype == Packet_Type.STREAM_FIN:
+                    selected_stream_data["track_fin"].discard(q_ptype)
+                    if selected_stream_data["count_fin"] > 0:
+                        selected_stream_data["count_fin"] -= 1
+                elif q_ptype == Packet_Type.STREAM_SYN_ACK:
+                    selected_stream_data["track_syn_ack"].discard(q_ptype)
+                    if selected_stream_data["count_syn_ack"] > 0:
+                        selected_stream_data["count_syn_ack"] -= 1
 
-                res_ptype, res_stream_id, res_sn, res_data = (
-                    q_ptype,
-                    q_stream_id,
-                    q_sn,
-                    item[6],
-                )
+            res_ptype, res_stream_id, res_sn, res_data = (
+                q_ptype,
+                q_stream_id,
+                q_sn,
+                item[5],
+            )
 
         if res_ptype == Packet_Type.PONG:
             res_data = b"PO:" + os.urandom(4)
@@ -771,7 +750,7 @@ class MasterDnsVPNServer:
     async def close_stream(
         self, session_id: int, stream_id: int, reason: str = "Unknown"
     ) -> None:
-        """Safely and fully close a specific stream and free resources."""
+        """Safely and fully close a specific stream, salvage pending FIN/ACKs, and free resources."""
         session = self.sessions.get(session_id)
         if not session:
             return
@@ -799,11 +778,15 @@ class MasterDnsVPNServer:
             )
 
         try:
+            for item in stream_data["tx_queue"]:
+                heapq.heappush(session["main_queue"], item)
+
             stream_data["tx_queue"].clear()
             stream_data["status"] = "CLOSED"
         except Exception:
             pass
 
+        # ۳. پاک کردن امن استریم
         session_streams.pop(stream_id, None)
 
     async def _server_enqueue_tx(
@@ -838,10 +821,9 @@ class MasterDnsVPNServer:
             ptype = Packet_Type.STREAM_RESEND
             eff_priority = 1
 
-        now = time.time()
         session["enqueue_seq"] = (session.get("enqueue_seq", 0) + 1) & 0x7FFFFFFF
         seq = session["enqueue_seq"]
-        queue_item = (eff_priority, seq, now, ptype, stream_id, sn, data)
+        queue_item = (eff_priority, seq, ptype, stream_id, sn, data)
 
         if stream_id == 0:
             if is_resend:
@@ -935,7 +917,6 @@ class MasterDnsVPNServer:
             "status": "PENDING",
             "arq_obj": None,
             "tx_queue": [],  # heapq
-            "total_packets": 0,
             "count_ack": 0,
             "count_fin": 0,
             "count_syn_ack": 0,
@@ -988,32 +969,43 @@ class MasterDnsVPNServer:
             )
 
     async def _server_retransmit_loop(self):
-        """Background task to handle ARQ retransmissions for all active streams."""
+        """Background task to handle ARQ retransmissions for all active streams (Crash-Proof)."""
         while not self.should_stop.is_set():
-            await asyncio.sleep(0.5)
-            for session_id, session in list(self.sessions.items()):
-                streams = session.get("streams", {})
-                if not streams:
-                    continue
+            try:
+                await asyncio.sleep(0.5)
+                for session_id, session in list(self.sessions.items()):
+                    streams = session.get("streams", {})
+                    if not streams:
+                        continue
 
-                closed_ids = []
-                for sid, stream_data in streams.items():
-                    arq_obj = stream_data.get("arq_obj")
-                    if arq_obj and getattr(arq_obj, "closed", False):
-                        closed_ids.append(sid)
+                    closed_ids = []
+                    for sid, stream_data in streams.items():
+                        arq_obj = stream_data.get("arq_obj")
+                        if arq_obj and getattr(arq_obj, "closed", False):
+                            closed_ids.append(sid)
 
-                for sid in closed_ids:
-                    await self.close_stream(
-                        session_id, sid, reason="Marked Closed by ARQStream"
-                    )
-
-                for sid, stream_data in list(streams.items()):
-                    arq_obj = stream_data.get("arq_obj")
-                    if arq_obj:
+                    for sid in closed_ids:
                         try:
-                            await arq_obj.check_retransmits()
+                            await self.close_stream(
+                                session_id, sid, reason="Marked Closed by ARQStream"
+                            )
                         except Exception as e:
-                            self.logger.error(f"Error in retransmit sid {sid}: {e}")
+                            self.logger.debug(
+                                f"Error closing stream {sid} during retransmit check: {e}"
+                            )
+
+                    for sid, stream_data in list(streams.items()):
+                        arq_obj = stream_data.get("arq_obj")
+                        if arq_obj:
+                            try:
+                                await arq_obj.check_retransmits()
+                            except Exception as e:
+                                self.logger.error(f"Error in retransmit sid {sid}: {e}")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.logger.error(f"Unexpected error in retransmit loop: {e}")
+                await asyncio.sleep(0.5)
 
     # ---------------------------------------------------------
     # App Lifecycle
