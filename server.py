@@ -670,48 +670,39 @@ class MasterDnsVPNServer:
         extracted_header=None,
     ) -> Optional[bytes]:
         """Handle SET_MTU_REQ VPN packet and save it to the session."""
-
-        if session_id not in self.sessions:
+        session = self.sessions.get(session_id)
+        if not session:
             self.logger.warning(
                 f"SET_MTU_REQ received for invalid session_id: {session_id} from {addr}"
             )
             return None
 
-        # Extract and decrypt data directly from the labels
         extracted_data = self.dns_parser.extract_vpn_data_from_labels(labels)
 
         if not extracted_data or len(extracted_data) < 8:
             self.logger.warning(f"Invalid or missing SET_MTU_REQ data from {addr}")
             return None
 
-        # Unpack the 8 bytes (4 bytes UP, 4 bytes DOWN) and the rest is the sync token
-        upload_mtu = int.from_bytes(extracted_data[0:4], byteorder="big")
-        download_mtu = int.from_bytes(extracted_data[4:8], byteorder="big")
+        upload_mtu = int.from_bytes(extracted_data[:4], "big")
+        download_mtu = int.from_bytes(extracted_data[4:8], "big")
         sync_token = extracted_data[8:] if len(extracted_data) > 8 else b"OK"
 
-        # Save to session map
-        self.sessions[session_id]["upload_mtu"] = upload_mtu
-        self.sessions[session_id]["download_mtu"] = download_mtu
-        # update last activity using heap-based touch
+        session["upload_mtu"] = upload_mtu
+        session["download_mtu"] = download_mtu
+
         self._touch_session(session_id)
 
         self.logger.info(
             f"Session {session_id} MTU synced - UP: {upload_mtu}B, DOWN: {download_mtu}B"
         )
 
-        # Prepare response (Return the exact token received from the client)
-        response_data = sync_token
-        data_bytes = self.dns_parser.codec_transform(response_data, encrypt=True)
-
-        response_packet = self.dns_parser.generate_vpn_response_packet(
+        return self.dns_parser.generate_vpn_response_packet(
             domain=request_domain,
             session_id=session_id,
             packet_type=Packet_Type.SET_MTU_RES,
-            data=data_bytes,
+            data=self.dns_parser.codec_transform(sync_token, encrypt=True),
             question_packet=data,
         )
-
-        return response_packet
 
     async def _handle_mtu_down(
         self,
@@ -725,61 +716,50 @@ class MasterDnsVPNServer:
     ) -> Optional[bytes]:
         """Handle SERVER_UPLOAD_TEST VPN packet."""
 
-        if "." not in labels:
+        dot_idx = labels.find(".")
+        if dot_idx <= 0:
             self.logger.warning(
-                f"Invalid SERVER_DOWNLOAD_TEST packet format from {addr}: {labels}"
+                f"Invalid or empty SERVER_DOWNLOAD_TEST packet format from {addr}"
             )
             return None
 
-        first_part_of_data = labels.split(".")[0]
-        if not first_part_of_data:
-            self.logger.warning(
-                f"Empty data in SERVER_DOWNLOAD_TEST packet from {addr}"
-            )
-            return None
+        first_part_of_data = labels[:dot_idx]
 
         download_size_bytes = self.dns_parser.decode_and_decrypt_data(
             first_part_of_data, lowerCaseOnly=True
         )
 
-        if download_size_bytes is None:
+        if not download_size_bytes:
             self.logger.warning(
                 f"Failed to decode download size in SERVER_DOWNLOAD_TEST packet from {addr}"
             )
             return None
 
-        download_size = int.from_bytes(download_size_bytes, byteorder="big")
+        download_size = int.from_bytes(download_size_bytes, "big")
 
         if download_size < 29:
             self.logger.warning(
-                f"Download size too small in SERVER_DOWNLOAD_TEST packet from {addr}: {download_size}"
+                f"Download size too small in packet from {addr}: {download_size}"
             )
             return None
 
-        data_bytes = self.dns_parser.codec_transform(download_size_bytes, encrypt=True)
-        data_bytes = data_bytes + b":"
+        data_bytes = (
+            self.dns_parser.codec_transform(download_size_bytes, encrypt=True) + b":"
+        )
 
         padding_len = download_size - len(data_bytes)
         if padding_len > 0:
-            data_bytes += random.randbytes(padding_len)
-        elif padding_len < 0:
+            data_bytes += os.urandom(padding_len)
+        else:
             data_bytes = data_bytes[:download_size]
 
-        if len(data_bytes) != download_size:
-            self.logger.error(
-                f"Prepared download data size mismatch for packet from {addr}: expected {download_size}, got {len(data_bytes)}"
-            )
-            return None
-
-        response_packet = self.dns_parser.generate_vpn_response_packet(
+        return self.dns_parser.generate_vpn_response_packet(
             domain=request_domain,
             session_id=session_id if session_id is not None else 255,
             packet_type=Packet_Type.MTU_DOWN_RES,
             data=data_bytes,
             question_packet=data,
         )
-
-        return response_packet
 
     async def _handle_mtu_up(
         self,
@@ -792,19 +772,13 @@ class MasterDnsVPNServer:
         extracted_header=None,
     ) -> Optional[bytes]:
         """Handle SERVER_UPLOAD_TEST VPN packet."""
-
-        txt_str = "1"
-        data_bytes = self.dns_parser.codec_transform(txt_str.encode(), encrypt=True)
-
-        response_packet = self.dns_parser.generate_vpn_response_packet(
+        return self.dns_parser.generate_vpn_response_packet(
             domain=request_domain,
             session_id=session_id if session_id is not None else 255,
             packet_type=Packet_Type.MTU_UP_RES,
-            data=data_bytes,
+            data=self.dns_parser.codec_transform(b"1", encrypt=True),
             question_packet=data,
         )
-
-        return response_packet
 
     # ---------------------------------------------------------
     # TCP Forwarding Logic & Server Retransmits
