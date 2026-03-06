@@ -6,7 +6,7 @@
 
 import asyncio
 import ctypes
-import functools
+import heapq
 import os
 import random
 import signal
@@ -17,6 +17,7 @@ from ctypes import wintypes
 from typing import Optional, Tuple
 
 from dns_utils.ARQ import ARQStream
+from dns_utils.config_loader import get_config_path, load_config
 from dns_utils.DNS_ENUMS import DNS_Record_Type, Packet_Type
 from dns_utils.DNSBalancer import DNSBalancer
 from dns_utils.DnsPacketParser import DnsPacketParser
@@ -27,7 +28,6 @@ from dns_utils.utils import (
     generate_random_hex_text,
     getLogger,
 )
-from dns_utils.config_loader import load_config, get_config_path
 
 # Ensure UTF-8 output for consistent logging
 try:
@@ -66,6 +66,7 @@ class MasterDnsVPNClient:
         self.min_upload_mtu: int = self.config.get("MIN_UPLOAD_MTU", 0)
         self.min_download_mtu: int = self.config.get("MIN_DOWNLOAD_MTU", 0)
         self.encryption_method: int = self.config.get("DATA_ENCRYPTION_METHOD", 1)
+        self.success_mtu_checks: bool = False
 
         self.resolver_balancing_strategy: int = self.config.get(
             "RESOLVER_BALANCING_STRATEGY", 0
@@ -93,13 +94,12 @@ class MasterDnsVPNClient:
         self.synced_upload_mtu_chars = 0
         self.synced_download_mtu = 0
         self.buffer_size = 65507  # Max UDP payload size
-        self.last_stream_id = 0
-        self.packet_duplication = self.config.get("PACKET_DUPLICATION_COUNT", 1)
         self.balancer = DNSBalancer(
             resolvers=self.connections_map, strategy=self.resolver_balancing_strategy
         )
         self.ping_manager = PingManager(self._send_ping_packet)
         self._enqueue_seq = 0
+        self.packet_duplication_count = self.config.get("PACKET_DUPLICATION_COUNT", 1)
 
         self.logger.debug("<magenta>[INIT]</magenta> MasterDnsVPNClient initialized.")
 
@@ -108,21 +108,14 @@ class MasterDnsVPNClient:
     # ---------------------------------------------------------
     async def create_connection_map(self) -> None:
         """Create a map of all domain-resolver combinations."""
-        self.logger.debug("<magenta>[CONN]</magenta> Creating connection map...")
-        self.connections_map: list = []
-        self.resent_connection_selected = -1
-        self.connections_map = [
-            {"domain": domain, "resolver": resolver}
-            for domain in self.domains
-            for resolver in self.resolvers
-        ]
+        unique_domains = set(self.domains)
+        unique_resolvers = set(self.resolvers)
 
         self.connections_map = [
-            dict(t) for t in {tuple(d.items()) for d in self.connections_map}
+            {"domain": domain, "resolver": resolver}
+            for domain in unique_domains
+            for resolver in unique_resolvers
         ]
-        self.logger.debug(
-            f"<magenta>[CONN]</magenta> Total potential connections: {len(self.connections_map)}"
-        )
 
     # ---------------------------------------------------------
     # Network I/O & Packet Processing
@@ -136,15 +129,15 @@ class MasterDnsVPNClient:
         buffer_size: int = 0,
     ) -> Optional[bytes]:
         """Send a UDP packet and wait for the response."""
+        buf_size = buffer_size or self.buffer_size
+
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setblocking(False)
-        if buffer_size <= 0:
-            buffer_size = self.buffer_size
 
         try:
             await async_sendto(self.loop, sock, query_data, (resolver, port))
             response, _ = await asyncio.wait_for(
-                async_recvfrom(self.loop, sock, buffer_size), timeout=timeout
+                async_recvfrom(self.loop, sock, buf_size), timeout=timeout
             )
             return response
         except asyncio.TimeoutError:
@@ -155,52 +148,29 @@ class MasterDnsVPNClient:
             )
             return None
         finally:
-            try:
-                sock.close()
-            except Exception:
-                pass
+            sock.close()
 
     async def _send_ping_packet(self, payload=None):
-        """Unified function to queue PING/PULL packets with lowest priority (4) and max limit (3)."""
-        if not hasattr(self, "session_queue") or self.session_queue is None:
-            return
-
-        # use queue_meta counts if available to avoid iterating the internal deque
-        qmeta = self.queue_meta.get("session") if hasattr(self, "queue_meta") else None
-        ping_count = 0
-        try:
-            if qmeta and isinstance(qmeta.get("counts"), dict):
-                ping_count = qmeta["counts"].get(Packet_Type.PING, 0)
-            else:
-                ping_count = sum(
-                    1
-                    for item in self.session_queue._queue
-                    if len(item) > 3 and item[3] == Packet_Type.PING
-                )
-        except Exception:
-            ping_count = 0
-
-        if ping_count >= 3:
+        """Unified function to queue PING packets with lowest priority (4)."""
+        if self.count_ping >= 3:
             return
 
         if payload is None:
-            payload = f"P{int(time.time() % 60)}R{random.randint(100, 999)}".encode()
+            import os
+
+            payload = b"PO:" + os.urandom(4)
 
         try:
-            self._enqueue_seq = (getattr(self, "_enqueue_seq", 0) + 1) & 0x7FFFFFFF
-            self.session_queue.put_nowait(
-                (
-                    4,
-                    self._enqueue_seq,
-                    self.loop.time(),
-                    Packet_Type.PING,
-                    0,
-                    0,
-                    payload,
-                )
+            self.enqueue_seq = (self.enqueue_seq + 1) & 0x7FFFFFFF
+            import heapq
+
+            heapq.heappush(
+                self.main_queue,
+                (4, self.enqueue_seq, Packet_Type.PING, 0, 0, payload),
             )
+            self.count_ping += 1
             self.tx_event.set()
-        except asyncio.QueueFull:
+        except Exception:
             pass
 
     async def _process_received_packet(
@@ -301,50 +271,47 @@ class MasterDnsVPNClient:
         allowed_min_mtu: int = 0,
     ) -> int:
         """Generic binary search for finding the optimal MTU size."""
-        try:
-            if max_mtu <= 0:
-                return 0
-
-            self.logger.debug(
-                f"<cyan>[MTU]</cyan> Starting binary search for MTU. Range: {min_mtu}-{max_mtu}"
-            )
-
-            for _ in range(2):
-                if await test_callable(max_mtu):
-                    self.logger.debug(f"<cyan>[MTU]</cyan> Max MTU {max_mtu} is valid.")
-                    return max_mtu
-
-            low = min_mtu
-            high = max_mtu - 1
-            optimal = 0
-
-            while low <= high:
-                mid = (low + high) // 2
-                if mid < min_threshold or mid < allowed_min_mtu:
-                    break
-
-                ok = False
-
-                for _ in range(2):
-                    try:
-                        ok = await test_callable(mid)
-                        if ok:
-                            break
-                    except Exception as e:
-                        self.logger.debug(f"MTU test callable raised: {e}")
-                        ok = False
-
-                if ok:
-                    optimal = mid
-                    low = mid + 1
-                else:
-                    high = mid - 1
-
-            self.logger.debug(f"<cyan>[MTU]</cyan> Binary search result: {optimal}")
-            return optimal
-        except Exception as e:
-            self.logger.debug(f"Error in MTU binary search: {e}")
+        if max_mtu <= 0:
             return 0
+
+        self.logger.debug(
+            f"<cyan>[MTU]</cyan> Starting binary search for MTU. Range: {min_mtu}-{max_mtu}"
+        )
+
+        for _ in range(2):
+            if await test_callable(max_mtu):
+                self.logger.debug(f"<cyan>[MTU]</cyan> Max MTU {max_mtu} is valid.")
+                return max_mtu
+
+        low = min_mtu
+        high = max_mtu - 1
+        optimal = 0
+
+        min_allowed = max(min_threshold, allowed_min_mtu)
+
+        while low <= high:
+            mid = (low + high) // 2
+
+            if mid < min_allowed:
+                break
+
+            ok = False
+            for _ in range(2):
+                try:
+                    if await test_callable(mid):
+                        ok = True
+                        break
+                except Exception as e:
+                    self.logger.debug(f"MTU test callable raised: {e}")
+
+            if ok:
+                optimal = mid
+                low = mid + 1
+            else:
+                high = mid - 1
+
+        self.logger.debug(f"<cyan>[MTU]</cyan> Binary search result: {optimal}")
+        return optimal
 
     async def send_upload_mtu_test(
         self, domain: str, dns_server: str, dns_port: int, mtu_size: int
@@ -352,16 +319,13 @@ class MasterDnsVPNClient:
         mtu_char_len, mtu_bytes = self.dns_packet_parser.calculate_upload_mtu(
             domain=domain, mtu=mtu_size
         )
-        if mtu_size > mtu_bytes:
+        if mtu_size > mtu_bytes or mtu_char_len < 29:
             return False
 
-        if mtu_char_len < 29:
-            return False
-
-        random_hex = generate_random_hex_text(mtu_char_len).lower()
+        random_hex = generate_random_hex_text(mtu_char_len)
         dns_queries = self.dns_packet_parser.build_request_dns_query(
             domain=domain,
-            session_id=random.randint(0, 255),
+            session_id=os.urandom(1)[0],
             packet_type=Packet_Type.MTU_UP_REQ,
             data=random_hex,
             mtu_chars=mtu_char_len,
@@ -375,6 +339,9 @@ class MasterDnsVPNClient:
         response = await self._send_and_receive_dns(
             dns_queries[0], dns_server, dns_port, 1
         )
+
+        if not response:
+            return False
 
         parsed_header, _ = await self._process_received_packet(response)
         packet_type = parsed_header["packet_type"] if parsed_header else None
@@ -394,7 +361,7 @@ class MasterDnsVPNClient:
     async def send_download_mtu_test(
         self, domain: str, dns_server: str, dns_port: int, mtu_size: int
     ) -> bool:
-        data_bytes = mtu_size.to_bytes(4, byteorder="big")
+        data_bytes = mtu_size.to_bytes(4, "big")
         encrypted_data = self.dns_packet_parser.codec_transform(
             data_bytes, encrypt=True
         )
@@ -405,7 +372,7 @@ class MasterDnsVPNClient:
 
         dns_queries = self.dns_packet_parser.build_request_dns_query(
             domain=domain,
-            session_id=random.randint(0, 255),
+            session_id=os.urandom(1)[0],
             packet_type=Packet_Type.MTU_DOWN_REQ,
             data=encrypted_data,
             mtu_chars=mtu_char_len,
@@ -419,6 +386,10 @@ class MasterDnsVPNClient:
         response = await self._send_and_receive_dns(
             dns_queries[0], dns_server, dns_port, 1
         )
+
+        if not response:
+            return False
+
         parsed_header, returned_data = await self._process_received_packet(response)
         packet_type = parsed_header["packet_type"] if parsed_header else None
 
@@ -448,9 +419,9 @@ class MasterDnsVPNClient:
             if mtu_bytes > default_mtu:
                 mtu_bytes = default_mtu
 
-            test_fn = functools.partial(
-                self.send_upload_mtu_test, domain, dns_server, dns_port
-            )
+            async def test_fn(m):
+                return await self.send_upload_mtu_test(domain, dns_server, dns_port, m)
+
             actual_max_allowed = min(default_mtu if default_mtu > 0 else 512, mtu_bytes)
             optimal_mtu = await self._binary_search_mtu(
                 test_fn,
@@ -473,9 +444,12 @@ class MasterDnsVPNClient:
     ) -> tuple:
         try:
             self.logger.debug(f"<cyan>[MTU]</cyan> Testing download MTU for {domain}")
-            test_fn = functools.partial(
-                self.send_download_mtu_test, domain, dns_server, dns_port
-            )
+
+            async def test_fn(m):
+                return await self.send_download_mtu_test(
+                    domain, dns_server, dns_port, m
+                )
+
             optimal_mtu = await self._binary_search_mtu(
                 test_fn,
                 0,
@@ -496,6 +470,7 @@ class MasterDnsVPNClient:
 
         server_id = 0
         total_conns = len(self.connections_map)
+
         for connection in self.connections_map:
             if not connection or self.should_stop.is_set():
                 continue
@@ -561,92 +536,83 @@ class MasterDnsVPNClient:
         """Send the synced MTU values to the server for this session."""
         self.logger.info(f"Syncing MTU with server for session {self.session_id}...")
 
-        if self.should_stop.is_set() or max_attempts <= 0:
-            return False
-
-        selected_conn = self.balancer.get_best_server()
-        if not selected_conn:
-            return False
-
-        domain = selected_conn.get("domain")
-        resolver = selected_conn.get("resolver")
-
-        # Pack MTUs into 8 bytes (4 bytes UP, 4 bytes DOWN)
-        # Generate a random sync token
-        sync_token = (generate_random_hex_text(8) + str(int(time.time()))).encode()
-
-        # Pack MTUs into 8 bytes (4 bytes UP, 4 bytes DOWN) + Sync Token
-        data_bytes = (
-            self.synced_upload_mtu.to_bytes(4, byteorder="big")
-            + self.synced_download_mtu.to_bytes(4, byteorder="big")
-            + sync_token
-        )
-
-        # Encrypt the payload before sending
-        encrypted_data = self.dns_packet_parser.codec_transform(
-            data_bytes, encrypt=True
-        )
-
-        dns_queries = self.dns_packet_parser.build_request_dns_query(
-            domain=domain,
-            session_id=self.session_id,
-            packet_type=Packet_Type.SET_MTU_REQ,
-            data=encrypted_data,
-            mtu_chars=self.synced_upload_mtu_chars,
-            encode_data=True,
-            qType=DNS_Record_Type.TXT,
-        )
-
-        if not dns_queries:
-            self.logger.error(
-                f"Failed to sync MTU with server via {resolver} for {domain}, Retrying..."
-            )
-            await self._sleep(0.2)
-            return False
-
-        max_retries = 3
-        # base_delay = 1.0
-
-        for attempt in range(max_retries):
+        for overall_attempt in range(max_attempts):
             if self.should_stop.is_set():
-                break
+                return False
 
-            response = await self._send_and_receive_dns(
-                dns_queries[0], resolver, 53, self.timeout
+            selected_conn = self.balancer.get_best_server()
+            if not selected_conn:
+                await asyncio.sleep(0.5)
+                continue
+
+            domain = selected_conn.get("domain")
+            resolver = selected_conn.get("resolver")
+
+            sync_token = os.urandom(8)
+
+            data_bytes = (
+                self.synced_upload_mtu.to_bytes(4, byteorder="big")
+                + self.synced_download_mtu.to_bytes(4, byteorder="big")
+                + sync_token
             )
 
-            if response:
-                parsed_header, returned_data = await self._process_received_packet(
-                    response
+            encrypted_data = self.dns_packet_parser.codec_transform(
+                data_bytes, encrypt=True
+            )
+
+            dns_queries = self.dns_packet_parser.build_request_dns_query(
+                domain=domain,
+                session_id=self.session_id,
+                packet_type=Packet_Type.SET_MTU_REQ,
+                data=encrypted_data,
+                mtu_chars=self.synced_upload_mtu_chars,
+                encode_data=True,
+                qType=DNS_Record_Type.TXT,
+            )
+
+            if not dns_queries:
+                self.logger.error(
+                    f"<yellow>Failed to build MTU sync via <cyan>{resolver}</cyan> for <cyan>{domain}</cyan>, Retrying...</yellow>"
                 )
-                packet_type = parsed_header["packet_type"] if parsed_header else None
+                await asyncio.sleep(0.2)
+                continue
 
-                if packet_type == Packet_Type.SET_MTU_RES:
-                    # Validate the returned token
-                    if returned_data == sync_token:
-                        self.logger.success(
-                            "<g>MTU values successfully synced with the server!</g>"
-                        )
-                        return True
-                    else:
-                        self.logger.warning(
-                            "MTU Sync token mismatch! Ignoring response."
-                        )
+            for inner_attempt in range(3):
+                if self.should_stop.is_set():
+                    return False
 
-            if attempt < max_retries - 1:
-                # delay = min(base_delay * (1.5**attempt), 8.0)
-                delay = 0.5
-                self.logger.warning(
-                    f"MTU sync failed via {resolver} for {domain}. Retrying in {delay:.1f}s (Attempt {attempt + 1}/{max_retries})..."
+                response = await self._send_and_receive_dns(
+                    dns_queries[0], resolver, 53, self.timeout
                 )
-                await asyncio.sleep(delay)
 
-        self.logger.error(
-            f"Failed to build MTU sync via {resolver} for {domain}, Retrying..."
-        )
+                if response:
+                    parsed_header, returned_data = await self._process_received_packet(
+                        response
+                    )
+                    packet_type = (
+                        parsed_header["packet_type"] if parsed_header else None
+                    )
 
-        await self._sleep(0.2)
-        return await self._sync_mtu_with_server(max_attempts - 1)
+                    if packet_type == Packet_Type.SET_MTU_RES:
+                        if returned_data == sync_token:
+                            self.logger.success(
+                                "<green>MTU values successfully synced with the server!</green>"
+                            )
+                            return True
+                        else:
+                            self.logger.warning(
+                                "<red>MTU Sync token mismatch! Ignoring response.</red>"
+                            )
+
+                if inner_attempt < 2:
+                    await asyncio.sleep(0.5)
+
+            self.logger.warning(
+                f"<yellow>MTU sync failed via <cyan>{resolver}</cyan> for <cyan>{domain}</cyan>. Retrying overall process...</yellow>"
+            )
+            await asyncio.sleep(0.2)
+
+        return False
 
     # ---------------------------------------------------------
     # Core Loop & Session Setup
@@ -655,95 +621,93 @@ class MasterDnsVPNClient:
         """Initialize a new session with the server."""
         self.logger.info("Initializing session ...")
 
-        if self.should_stop.is_set() or max_attempts <= 0:
-            return False
-
-        selected_conn = self.balancer.get_best_server()
-        if not selected_conn:
-            return False
-
-        domain = selected_conn.get("domain")
-        resolver = selected_conn.get("resolver")
-        init_token = (generate_random_hex_text(8) + str(int(time.time()))).encode()
-        encrypted_token = self.dns_packet_parser.codec_transform(
-            init_token, encrypt=True
-        )
-
-        dns_queries = self.dns_packet_parser.build_request_dns_query(
-            domain=domain,
-            session_id=0,
-            packet_type=Packet_Type.SESSION_INIT,
-            data=encrypted_token,
-            mtu_chars=self.synced_upload_mtu_chars,
-            encode_data=True,
-            qType=DNS_Record_Type.TXT,
-        )
-
-        if not dns_queries:
-            self.logger.error(
-                f"Failed to build session init DNS query via {resolver} for {domain}, Retrying..."
-            )
-            await self._sleep(0.2)
-            return False
-
-        max_retries = 3
-        # base_delay = 1.0
-
-        for attempt in range(max_retries):
+        for overall_attempt in range(max_attempts):
             if self.should_stop.is_set():
-                break
+                return False
 
-            response = await self._send_and_receive_dns(
-                dns_queries[0], resolver, 53, self.timeout
+            selected_conn = self.balancer.get_best_server()
+            if not selected_conn:
+                await asyncio.sleep(0.5)
+                continue
+
+            domain = selected_conn.get("domain")
+            resolver = selected_conn.get("resolver")
+
+            init_token = os.urandom(8).hex().encode("ascii")
+
+            encrypted_token = self.dns_packet_parser.codec_transform(
+                init_token, encrypt=True
             )
 
-            if response:
-                parsed_header, returned_data = await self._process_received_packet(
-                    response
+            dns_queries = self.dns_packet_parser.build_request_dns_query(
+                domain=domain,
+                session_id=0,
+                packet_type=Packet_Type.SESSION_INIT,
+                data=encrypted_token,
+                mtu_chars=self.synced_upload_mtu_chars,
+                encode_data=True,
+                qType=DNS_Record_Type.TXT,
+            )
+
+            if not dns_queries:
+                self.logger.error(
+                    f"Failed to build session init DNS query via {resolver} for {domain}, Retrying..."
+                )
+                await asyncio.sleep(0.2)
+                continue
+
+            for inner_attempt in range(3):
+                if self.should_stop.is_set():
+                    return False
+
+                response = await self._send_and_receive_dns(
+                    dns_queries[0], resolver, 53, self.timeout
                 )
 
-                if (
-                    parsed_header
-                    and parsed_header["packet_type"] == Packet_Type.SESSION_ACCEPT
-                ):
-                    try:
-                        decoded_str = returned_data.decode("utf-8")
-                        if ":" in decoded_str:
-                            received_token, received_sid = decoded_str.split(":", 1)
-                            if received_token == init_token.decode():
-                                self.session_id = int(received_sid)
-                                self.logger.success(
-                                    f"<g>Validated Session ID: {self.session_id}</g>"
-                                )
-                                return True
-                            else:
-                                self.logger.warning(
-                                    "Token mismatch! Ignoring old session response."
-                                )
-                    except Exception as e:
-                        self.logger.error(f"Session parse error: {e}")
+                if response:
+                    parsed_header, returned_data = await self._process_received_packet(
+                        response
+                    )
 
-            if attempt < max_retries - 1:
-                # delay = min(base_delay * (1.5**attempt), 8.0)
-                delay = 0.5
-                self.logger.warning(
-                    f"Session init failed via {resolver} for {domain}. Retrying in {delay:.1f}s (Attempt {attempt + 1}/{max_retries})..."
-                )
-                await asyncio.sleep(delay)
+                    if (
+                        parsed_header
+                        and parsed_header["packet_type"] == Packet_Type.SESSION_ACCEPT
+                    ):
+                        try:
+                            decoded_str = returned_data.decode("utf-8", errors="ignore")
+                            if ":" in decoded_str:
+                                received_token, received_sid = decoded_str.split(":", 1)
+                                if received_token == init_token.decode("ascii"):
+                                    self.session_id = int(received_sid)
+                                    self.logger.success(
+                                        f"<g>Validated Session ID: {self.session_id}</g>"
+                                    )
+                                    return True
+                                else:
+                                    self.logger.warning(
+                                        "Token mismatch! Ignoring old session response."
+                                    )
+                        except Exception as e:
+                            self.logger.error(f"Session parse error: {e}")
 
-        self.logger.error(
-            f"Failed to build session init DNS query via {resolver} for {domain}, Retrying..."
-        )
+                if inner_attempt < 2:
+                    await asyncio.sleep(0.5)
 
-        await self._sleep(0.2)
-        return await self._init_session(max_attempts - 1)
+            self.logger.warning(
+                f"Session init failed via {resolver} for {domain}. Retrying overall process..."
+            )
+            await asyncio.sleep(0.2)
+
+        return False
 
     async def run_client(self) -> None:
         """Run the MasterDnsVPN Client main logic."""
         self.logger.info("Setting up connections...")
         all_resolvers = 0
+        self.count_ping = 0
         try:
             self.session_restart_event = asyncio.Event()
+
             if not self.success_mtu_checks or len(self.connections_map) <= 0:
                 await self.create_connection_map()
                 all_resolvers = len(self.connections_map)
@@ -756,12 +720,6 @@ class MasterDnsVPNClient:
 
                 if not valid_conns:
                     self.logger.error("No valid connections found after MTU testing!")
-                    return
-
-                if len(valid_conns) <= 0:
-                    self.logger.error(
-                        "No valid connections available after MTU testing!"
-                    )
                     return
 
                 self.balancer.set_balancers(valid_conns)
@@ -792,52 +750,6 @@ class MasterDnsVPNClient:
                 self.logger.info(
                     f"<cyan>[MTU RESULTS]</cyan> Selected Synced Upload MTU: <yellow>{self.synced_upload_mtu}</yellow> | Selected Synced Download MTU: <yellow>{self.synced_download_mtu}</yellow>"
                 )
-
-                self.logger.info(
-                    "<cyan>[EXPLANATION]</cyan> Max MTU values represent the best performance potential across all valid resolvers, while synced MTU values ensure compatibility with all resolvers by using the lowest common denominator."
-                )
-                self.logger.info(
-                    "<cyan>[EXPLANATION]</cyan> Synced MTU = minimum MTU across all valid resolvers (ensures compatibility with all)"
-                )
-
-                self.logger.warning(
-                    "<yellow>[OPTION 1 - RECOMMENDED]</yellow> <cyan>For Maximum Performance:</cyan>"
-                )
-                self.logger.warning(
-                    f"<yellow>  • Set <cyan>MIN_UPLOAD_MTU</cyan> and <cyan>MAX_UPLOAD_MTU</cyan> = <green>{max_founded_upload_mtu}</green></yellow>"
-                )
-                self.logger.warning(
-                    f"<yellow>  • Set <cyan>MIN_DOWNLOAD_MTU</cyan> and <cyan>MAX_DOWNLOAD_MTU</cyan> = <green>{max_founded_download_mtu}</green></yellow>"
-                )
-                self.logger.warning(
-                    "<yellow>  • Effect: Skips binary search, tests only with maximum MTU size directly</yellow>"
-                )
-                self.logger.warning(
-                    "<yellow>  • Trade-off: May exclude slower resolvers, but better performance on compatible ones</yellow>"
-                )
-                self.logger.warning(
-                    "<yellow>  • Best for: Users with many resolvers or prioritizing speed over compatibility</yellow>"
-                )
-
-                self.logger.warning(
-                    "<yellow>[OPTION 2 - BALANCED]</yellow> <cyan>For Compatibility:</cyan>"
-                )
-                self.logger.warning(
-                    f"<yellow>  • Set <cyan>MIN_UPLOAD_MTU</cyan> = <green>{self.synced_upload_mtu}</green> | <cyan>MAX_UPLOAD_MTU</cyan> = <green>{max_founded_upload_mtu}</green></yellow>"
-                )
-                self.logger.warning(
-                    f"<yellow>  • Set <cyan>MIN_DOWNLOAD_MTU</cyan> = <green>{self.synced_download_mtu}</green> | <cyan>MAX_DOWNLOAD_MTU</cyan> = <green>{max_founded_download_mtu}</green></yellow>"
-                )
-                self.logger.warning(
-                    "<yellow>  • Effect: Tests MTU sizes between synced and maximum values</yellow>"
-                )
-                self.logger.warning(
-                    "<yellow>  • Trade-off: Keeps all valid resolvers but uses lower MTU (less performance than Option 1)</yellow>"
-                )
-                self.logger.warning(
-                    "<yellow>  • Best for: Users wanting to keep all resolvers while improving test speed</yellow>"
-                )
-
                 self.logger.info("=" * 80)
                 self.logger.info(
                     f"<green>Global MTU Configuration -> Upload: <cyan>{self.synced_upload_mtu}B</cyan>, Download: <cyan>{self.synced_download_mtu}B</cyan></green>"
@@ -846,6 +758,7 @@ class MasterDnsVPNClient:
 
             selected_conn = self.balancer.get_best_server()
             if not selected_conn:
+                self.logger.error("No active servers available from Balancer.")
                 return
 
             if not await self._init_session():
@@ -861,6 +774,7 @@ class MasterDnsVPNClient:
                 return
 
             await self._main_tunnel_loop()
+
         except Exception as e:
             self.logger.error(f"Error setting up connections: {e}")
             return
@@ -872,15 +786,21 @@ class MasterDnsVPNClient:
         """Start local TCP server and main worker tasks."""
         self.logger.info("Entering VPN Tunnel Main Loop...")
         self.session_restart_event = asyncio.Event()
-        self.session_queue = asyncio.PriorityQueue()
-        # queue_meta maps queue_key -> {"types": set(), "acks": set(), "resends": set()}
-        self.queue_meta = {}
-        self.stream_queues = {}
+        self.main_queue = []
         self.round_robin_index = 0
         self.tx_event = asyncio.Event()
         self.active_streams = {}
-        self.pending_resends = set()
-        self.canceled_streams = set()
+        self.enqueue_seq = 0
+        self.last_stream_id = 0
+
+        self.count_ack = 0
+        self.count_data = 0
+        self.count_resend = 0
+        self.count_ping = 0
+        self.track_ack = set()
+        self.track_resend = set()
+        self.track_types = set()
+        self.track_data = set()
 
         self.tunnel_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
@@ -986,43 +906,23 @@ class MasterDnsVPNClient:
                 except Exception:
                     pass
 
-            if hasattr(self, "session_queue"):
-                while not self.session_queue.empty():
-                    try:
-                        self.session_queue.get_nowait()
-                    except Exception:
-                        break
-                # clear session queue meta
-                try:
-                    self.queue_meta.pop("session", None)
-                except Exception:
-                    pass
-            if hasattr(self, "stream_queues"):
-                for sq in self.stream_queues.values():
-                    while not sq.empty():
-                        try:
-                            sq.get_nowait()
-                        except Exception:
-                            break
-                self.stream_queues.clear()
-                # clear stream-related queue meta
-                try:
-                    keys = [
-                        k
-                        for k in list(self.queue_meta.keys())
-                        if k.startswith("stream:")
-                    ]
-                    for k in keys:
-                        self.queue_meta.pop(k, None)
-                except Exception:
-                    pass
+            try:
+                self.main_queue.clear()
+                self.track_ack.clear()
+                self.track_resend.clear()
+                self.track_types.clear()
+                self.track_data.clear()
+            except Exception:
+                pass
 
         if not stop_task.done():
             stop_task.cancel()
         if not restart_task.done():
             restart_task.cancel()
 
-        self.logger.info("Cleaning up old connections before reconnecting...")
+        self.logger.info(
+            "<yellow>Cleaning up old connections before reconnecting...</yellow>"
+        )
         self.active_streams.clear()
 
     async def _rx_worker(self):
@@ -1060,7 +960,9 @@ class MasterDnsVPNClient:
         stream_id = start
         wrapped = False
 
-        while not self.should_stop.is_set() and not self.session_restart_event.is_set():
+        while not self.should_stop.is_set() and not (
+            self.session_restart_event and self.session_restart_event.is_set()
+        ):
             if stream_id > 65535:
                 if wrapped:
                     return False, 0
@@ -1069,8 +971,6 @@ class MasterDnsVPNClient:
 
             if stream_id not in self.active_streams:
                 self.last_stream_id = stream_id
-                if hasattr(self, "canceled_streams"):
-                    self.canceled_streams.discard(stream_id)
                 return True, stream_id
 
             stream_id += 1
@@ -1092,50 +992,39 @@ class MasterDnsVPNClient:
 
         self.logger.info(f"New local connection, assigning Stream ID: {stream_id}")
 
-        now = self.loop.time()
-        try:
-            syn_data = (
-                f"PONG:{int(time.time()) % 10000}:{random.randint(1000, 9999)}".encode()
-            )
-            target_queue = self.stream_queues.setdefault(
-                stream_id, asyncio.PriorityQueue()
-            )
-            target_queue.put_nowait(
-                (0, 0, now, Packet_Type.STREAM_SYN, stream_id, 0, syn_data)
-            )
-            self.tx_event.set()
-        except asyncio.QueueFull:
-            self.logger.debug("Queue is full, dropping new connection.")
-            await self._close_writer_safely(writer)
-            return
+        now_mono = time.monotonic()
+
+        syn_data = b"SY:" + os.urandom(4)
 
         self.active_streams[stream_id] = {
             "reader": reader,
             "writer": writer,
-            "create_time": now,
-            "last_activity_time": now,
+            "create_time": now_mono,
+            "last_activity_time": now_mono,
             "status": "PENDING",
             "stream": None,
+            "stream_creating": False,
+            "tx_queue": [],
+            "count_ack": 0,
+            "count_data": 0,
+            "count_resend": 0,
+            "count_fin": 0,
+            "count_syn_ack": 0,
+            "track_ack": set(),
+            "track_resend": set(),
+            "track_fin": set(),
+            "track_syn_ack": set(),
+            "track_data": set(),
         }
 
-    async def _clear_stream_from_queue(self, stream_id: int):
-        """Marks a stream as canceled so the TX worker skips its packets instantly."""
-        if hasattr(self, "canceled_streams"):
-            self.canceled_streams.add(stream_id)
-            self.logger.debug(
-                f"Stream {stream_id} marked as canceled. TX worker will skip its pending packets."
-            )
+        self.enqueue_seq = (self.enqueue_seq + 1) & 0x7FFFFFFF
+        import heapq
 
-        # remove any queue_meta for this stream
-        try:
-            self.queue_meta.pop(f"stream:{stream_id}", None)
-        except Exception:
-            pass
-
-        if hasattr(self, "pending_resends"):
-            to_remove = [item for item in self.pending_resends if item[0] == stream_id]
-            for item in to_remove:
-                self.pending_resends.discard(item)
+        heapq.heappush(
+            self.active_streams[stream_id]["tx_queue"],
+            (0, self.enqueue_seq, Packet_Type.STREAM_SYN, stream_id, 0, syn_data),
+        )
+        self.tx_event.set()
 
     async def _client_enqueue_tx(
         self, priority, stream_id, sn, data, is_ack=False, is_fin=False, is_resend=False
@@ -1158,202 +1047,184 @@ class MasterDnsVPNClient:
             ptype = Packet_Type.STREAM_RESEND
             effective_priority = 1
 
-        if is_resend:
-            resend_key = (stream_id, sn)
-            if resend_key in self.pending_resends:
-                return
-            self.pending_resends.add(resend_key)
+        self.enqueue_seq = (self.enqueue_seq + 1) & 0x7FFFFFFF
+        queue_item = (effective_priority, self.enqueue_seq, ptype, stream_id, sn, data)
+
+        import heapq
 
         if stream_id == 0:
-            target_queue = self.session_queue
-        else:
-            target_queue = self.stream_queues.setdefault(
-                stream_id, asyncio.PriorityQueue()
-            )
+            if is_resend:
+                if sn in self.track_data:
+                    return
+                if sn in self.track_resend:
+                    return
+                self.track_resend.add(sn)
+                self.count_resend += 1
 
-        # maintain lightweight queue metadata to avoid scanning internal deque
-        qkey = "session" if stream_id == 0 else f"stream:{stream_id}"
-        qm = self.queue_meta.setdefault(
-            qkey, {"types": set(), "acks": set(), "resends": set(), "counts": {}}
-        )
+            elif ptype in (
+                Packet_Type.STREAM_FIN,
+                Packet_Type.STREAM_SYN,
+                Packet_Type.STREAM_SYN_ACK,
+            ):
+                if ptype in self.track_types:
+                    return
+                self.track_types.add(ptype)
 
-        if is_resend:
-            # already handled above by pending_resends
-            pass
+            elif ptype == Packet_Type.STREAM_DATA_ACK:
+                if sn in self.track_ack:
+                    return
+                self.track_ack.add(sn)
+                self.count_ack += 1
 
-        if ptype in (
-            Packet_Type.STREAM_FIN,
-            Packet_Type.STREAM_SYN,
-            Packet_Type.STREAM_SYN_ACK,
-        ):
-            if ptype in qm["types"]:
-                return
-        elif ptype == Packet_Type.STREAM_DATA_ACK:
-            if (ptype, sn) in qm["acks"]:
-                return
+            elif ptype == Packet_Type.STREAM_DATA:
+                if sn in self.track_data:
+                    return
+                self.track_data.add(sn)
+                self.count_data += 1
 
-        try:
-            self._enqueue_seq = (getattr(self, "_enqueue_seq", 0) + 1) & 0x7FFFFFFF
-            target_queue.put_nowait(
-                (
-                    effective_priority,
-                    self._enqueue_seq,
-                    self.loop.time(),
-                    ptype,
-                    stream_id,
-                    sn,
-                    data,
-                )
-            )
+            heapq.heappush(self.main_queue, queue_item)
             self.tx_event.set()
-        except asyncio.QueueFull:
-            pass
-        # update meta after enqueue
-        if ptype in (
-            Packet_Type.STREAM_FIN,
-            Packet_Type.STREAM_SYN,
-            Packet_Type.STREAM_SYN_ACK,
-        ):
-            qm["types"].add(ptype)
-        if ptype == Packet_Type.STREAM_DATA_ACK:
-            qm["acks"].add((ptype, sn))
-        if is_resend:
-            qm["resends"].add((stream_id, sn))
-        # increment counts
-        try:
-            qm["counts"][ptype] = qm["counts"].get(ptype, 0) + 1
-        except Exception:
-            pass
+
+        else:
+            stream_data = self.active_streams.get(stream_id)
+            if not stream_data:
+                return
+
+            if is_resend:
+                if sn in stream_data["track_data"]:
+                    return
+                if sn in stream_data["track_resend"]:
+                    return
+                stream_data["track_resend"].add(sn)
+                stream_data["count_resend"] += 1
+
+            elif ptype == Packet_Type.STREAM_FIN:
+                if ptype in stream_data["track_fin"]:
+                    return
+                stream_data["track_fin"].add(ptype)
+                stream_data["count_fin"] += 1
+
+            elif ptype == Packet_Type.STREAM_SYN_ACK:
+                if ptype in stream_data["track_syn_ack"]:
+                    return
+                stream_data["track_syn_ack"].add(ptype)
+                stream_data["count_syn_ack"] += 1
+
+            elif ptype == Packet_Type.STREAM_DATA_ACK:
+                if sn in stream_data["track_ack"]:
+                    return
+                stream_data["track_ack"].add(sn)
+                stream_data["count_ack"] += 1
+
+            elif ptype == Packet_Type.STREAM_DATA:
+                if sn in stream_data["track_data"]:
+                    return
+                stream_data["track_data"].add(sn)
+                stream_data["count_data"] += 1
+
+            heapq.heappush(stream_data["tx_queue"], queue_item)
+            self.tx_event.set()
 
     async def _tx_worker(self):
-        self.logger.debug("<magenta>[TX]</magenta> TX Worker started.")
         while not self.should_stop.is_set() and not self.session_restart_event.is_set():
             try:
                 await asyncio.wait_for(self.tx_event.wait(), timeout=0.2)
             except asyncio.TimeoutError:
                 continue
-            except Exception as e:
-                self.logger.error(f"TX wait error: {e}")
+            except Exception:
                 continue
 
             item = None
+            target_queue = None
+            is_main = False
+            selected_stream_data = None
 
-            canceled_streams = getattr(self, "canceled_streams", set())
-
-            for sid in list(self.stream_queues.keys()):
-                if self.stream_queues[sid].empty() and sid in canceled_streams:
-                    del self.stream_queues[sid]
-                    canceled_streams.discard(sid)
-
-            to_remove_canceled = [
-                sid for sid in canceled_streams if sid not in self.stream_queues
-            ]
-            for sid in to_remove_canceled:
-                canceled_streams.discard(sid)
-
-            active_streams = [
-                sid for sid, q in self.stream_queues.items() if not q.empty()
+            active_sids = [
+                sid for sid, s in self.active_streams.items() if s.get("tx_queue")
             ]
 
-            if active_streams:
-                if self.round_robin_index >= len(active_streams):
+            if active_sids:
+                num_active = len(active_sids)
+                if self.round_robin_index >= num_active:
                     self.round_robin_index = 0
 
-                selected_sid = active_streams[self.round_robin_index]
-                target_queue = self.stream_queues[selected_sid]
-                self.round_robin_index = (self.round_robin_index + 1) % len(
-                    active_streams
-                )
+                selected_sid = active_sids[self.round_robin_index]
+                selected_stream_data = self.active_streams[selected_sid]
+                t_queue = selected_stream_data["tx_queue"]
 
-                try:
-                    item = target_queue.get_nowait()
-                    # remove queue meta for this dequeued item
-                    try:
-                        qkey = f"stream:{selected_sid}"
-                        qmeta = self.queue_meta.get(qkey)
-                        if qmeta:
-                            q_ptype = item[3]
-                            q_sn = item[5]
-                            if q_ptype in (
-                                Packet_Type.STREAM_FIN,
-                                Packet_Type.STREAM_SYN,
-                                Packet_Type.STREAM_SYN_ACK,
-                            ):
-                                qmeta["types"].discard(q_ptype)
-                            if q_ptype == Packet_Type.STREAM_DATA_ACK:
-                                qmeta["acks"].discard((q_ptype, q_sn))
-                            if q_ptype == Packet_Type.STREAM_RESEND:
-                                qmeta["resends"].discard((item[4], q_sn))
-                            # decrement counts
-                            try:
-                                if (
-                                    "counts" in qmeta
-                                    and qmeta["counts"].get(q_ptype, 0) > 0
-                                ):
-                                    qmeta["counts"][q_ptype] -= 1
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
-
-            elif not self.session_queue.empty():
-                try:
-                    item = self.session_queue.get_nowait()
-                    # update session queue meta
-                    try:
-                        qmeta = self.queue_meta.get("session")
-                        if qmeta:
-                            q_ptype = item[3]
-                            q_sn = item[5]
-                            if q_ptype in (
-                                Packet_Type.STREAM_FIN,
-                                Packet_Type.STREAM_SYN,
-                                Packet_Type.STREAM_SYN_ACK,
-                            ):
-                                qmeta["types"].discard(q_ptype)
-                            if q_ptype == Packet_Type.STREAM_DATA_ACK:
-                                qmeta["acks"].discard((q_ptype, q_sn))
-                            if q_ptype == Packet_Type.STREAM_RESEND:
-                                qmeta["resends"].discard((item[4], q_sn))
-                            # decrement counts
-                            try:
-                                if (
-                                    "counts" in qmeta
-                                    and qmeta["counts"].get(q_ptype, 0) > 0
-                                ):
-                                    qmeta["counts"][q_ptype] -= 1
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
-
+                if self.main_queue and self.main_queue[0][0] < t_queue[0][0]:
+                    target_queue = self.main_queue
+                    is_main = True
+                else:
+                    target_queue = t_queue
+                    self.round_robin_index = (self.round_robin_index + 1) % num_active
+            elif self.main_queue:
+                target_queue = self.main_queue
+                is_main = True
             else:
                 self.tx_event.clear()
                 continue
+
+            if target_queue:
+                import heapq
+
+                item = heapq.heappop(target_queue)
+                q_ptype, q_stream_id, q_sn = item[2], item[3], item[4]
+
+                if is_main:
+                    if q_ptype == Packet_Type.STREAM_DATA:
+                        self.track_data.discard(q_sn)
+                        if self.count_data > 0:
+                            self.count_data -= 1
+                    elif q_ptype == Packet_Type.STREAM_DATA_ACK:
+                        self.track_ack.discard(q_sn)
+                        if self.count_ack > 0:
+                            self.count_ack -= 1
+                    elif q_ptype == Packet_Type.STREAM_RESEND:
+                        self.track_resend.discard(q_sn)
+                        if self.count_resend > 0:
+                            self.count_resend -= 1
+                    elif q_ptype in (
+                        Packet_Type.STREAM_FIN,
+                        Packet_Type.STREAM_SYN,
+                        Packet_Type.STREAM_SYN_ACK,
+                    ):
+                        self.track_types.discard(q_ptype)
+                    elif q_ptype == Packet_Type.PING:
+                        if self.count_ping > 0:
+                            self.count_ping -= 1
+                else:
+                    if q_ptype == Packet_Type.STREAM_DATA:
+                        selected_stream_data["track_data"].discard(q_sn)
+                        if selected_stream_data["count_data"] > 0:
+                            selected_stream_data["count_data"] -= 1
+                    elif q_ptype == Packet_Type.STREAM_DATA_ACK:
+                        selected_stream_data["track_ack"].discard(q_sn)
+                        if selected_stream_data["count_ack"] > 0:
+                            selected_stream_data["count_ack"] -= 1
+                    elif q_ptype == Packet_Type.STREAM_RESEND:
+                        selected_stream_data["track_resend"].discard(q_sn)
+                        if selected_stream_data["count_resend"] > 0:
+                            selected_stream_data["count_resend"] -= 1
+                    elif q_ptype == Packet_Type.STREAM_FIN:
+                        selected_stream_data["track_fin"].discard(q_ptype)
+                        if selected_stream_data["count_fin"] > 0:
+                            selected_stream_data["count_fin"] -= 1
+                    elif q_ptype == Packet_Type.STREAM_SYN_ACK:
+                        selected_stream_data["track_syn_ack"].discard(q_ptype)
+                        if selected_stream_data["count_syn_ack"] > 0:
+                            selected_stream_data["count_syn_ack"] -= 1
 
             if not item:
                 continue
 
             try:
-                q_ptype, q_stream_id, q_sn = item[3], item[4], item[5]
-
-                if q_ptype == Packet_Type.STREAM_RESEND:
-                    getattr(self, "pending_resends", set()).discard((q_stream_id, q_sn))
-
-                if q_stream_id in getattr(
-                    self, "canceled_streams", set()
-                ) and q_ptype not in (Packet_Type.STREAM_FIN, Packet_Type.STREAM_SYN):
-                    continue
-
+                q_ptype, q_stream_id, q_sn = item[2], item[3], item[4]
                 if q_ptype in (Packet_Type.STREAM_DATA, Packet_Type.STREAM_RESEND):
                     stream_data = self.active_streams.get(q_stream_id)
                     if stream_data and "stream" in stream_data:
                         arq = stream_data["stream"]
-                        if arq and q_sn not in arq.snd_buf:
+                        if arq and q_sn not in getattr(arq, "snd_buf", {}):
                             continue
 
                 await self._send_single_packet(item)
@@ -1363,13 +1234,13 @@ class MasterDnsVPNClient:
     async def _send_single_packet(self, item):
         self.ping_manager.active_connections = len(self.active_streams)
 
-        priority, rr_count, _, pkt_type, stream_id, sn, data = item
+        priority, rr_count, pkt_type, stream_id, sn, data = item
 
         self.ping_manager.update_activity()
 
         if stream_id in self.active_streams:
-            now = self.loop.time()
-            self.active_streams[stream_id]["last_activity_time"] = now
+            now_mono = time.monotonic()
+            self.active_streams[stream_id]["last_activity_time"] = now_mono
 
         try:
             data_encrypted = (
@@ -1378,7 +1249,9 @@ class MasterDnsVPNClient:
                 else b""
             )
 
-            target_conns = self.balancer.get_unique_servers(self.packet_duplication)
+            target_conns = self.balancer.get_unique_servers(
+                self.packet_duplication_count
+            )
 
             for conn in target_conns:
                 self.balancer.report_send(f"{conn['resolver']}:{conn['domain']}")
@@ -1409,10 +1282,6 @@ class MasterDnsVPNClient:
                         self.logger.debug(
                             f"Failed async_sendto to {conn['resolver']}: {e}"
                         )
-                        try:
-                            await asyncio.sleep(0.001)
-                        except Exception:
-                            pass
         except Exception as e:
             self.logger.debug(f"TX Worker error during packet building/sending: {e}")
 
@@ -1420,41 +1289,31 @@ class MasterDnsVPNClient:
         ptype = header["packet_type"]
         stream_id = header.get("stream_id", 0)
         sn = header.get("sequence_num", 0)
-        self.logger.debug(
-            f"<yellow>[RESP]</yellow> Server sent {ptype} for SID {stream_id} SN {sn}"
-        )
 
         stream_id_exists = False
         if stream_id > 0 and stream_id in self.active_streams:
             stream_id_exists = True
-            self.active_streams[stream_id]["last_activity_time"] = self.loop.time()
+            self.active_streams[stream_id]["last_activity_time"] = time.monotonic()
 
         if ptype == Packet_Type.STREAM_SYN_ACK and stream_id_exists:
-            if (
-                self.active_streams[stream_id].get("stream")
-                or self.active_streams[stream_id].get("status") == "ACTIVE"
-            ):
+            stream_data = self.active_streams[stream_id]
+
+            if stream_data.get("stream") or stream_data.get("status") == "ACTIVE":
                 return
 
-            if self.active_streams[stream_id].get("stream_creating"):
-                self.logger.debug(
-                    f"Stream {stream_id} creation in progress; ignoring duplicate SYN_ACK."
-                )
+            if stream_data.get("stream_creating"):
                 return
 
-            writer = self.active_streams[stream_id].get("writer")
+            writer = stream_data.get("writer")
             if not writer or writer.is_closing():
-                self.logger.debug(
-                    f"Stream {stream_id} local connection closed before SYN_ACK. Cleaning up."
-                )
                 self.active_streams.pop(stream_id, None)
+                return
 
-            self.active_streams[stream_id]["stream_creating"] = True
+            stream_data["stream_creating"] = True
 
             try:
-                self.active_streams[stream_id]["status"] = "ACTIVE"
-                reader = self.active_streams[stream_id]["reader"]
-                writer = self.active_streams[stream_id]["writer"]
+                stream_data["status"] = "ACTIVE"
+                reader = stream_data["reader"]
 
                 crypto_overhead = 0
                 if self.encryption_method == 2:
@@ -1477,10 +1336,13 @@ class MasterDnsVPNClient:
                     window_size=self.config.get("ARQ_WINDOW_SIZE", 600),
                 )
 
-                self.active_streams[stream_id]["stream"] = stream
-                self.logger.info(f"Stream {stream_id} Established with server.")
+                stream_data["stream"] = stream
+                self.logger.info(
+                    f"<green>Stream {stream_id} Established with server.</green>"
+                )
             finally:
-                self.active_streams[stream_id].pop("stream_creating", None)
+                stream_data.pop("stream_creating", None)
+
         elif (
             ptype in (Packet_Type.STREAM_DATA, Packet_Type.STREAM_RESEND)
             and stream_id_exists
@@ -1489,23 +1351,17 @@ class MasterDnsVPNClient:
             stream_obj = self.active_streams[stream_id].get("stream")
             if stream_obj:
                 await stream_obj.receive_data(sn, data)
-            # else:
-            #     self.logger.debug(f"Got data for SID {stream_id} but stream not ready.")
 
-            pull_count = 2
-            for _ in range(pull_count):
-                await self._send_ping_packet()
+            await self._send_ping_packet()
+            await self._send_ping_packet()
 
         elif ptype == Packet_Type.STREAM_DATA_ACK and stream_id_exists:
             stream_obj = self.active_streams[stream_id].get("stream")
             if stream_obj:
                 await stream_obj.receive_ack(sn)
-            # else:
-            #     self.logger.debug(f"Got ACK for SID {stream_id} but stream not ready.")
 
-            pull_count = 2
-            for _ in range(pull_count):
-                await self._send_ping_packet()
+            await self._send_ping_packet()
+            await self._send_ping_packet()
 
         elif ptype == Packet_Type.STREAM_FIN and stream_id_exists:
             await self.close_stream(stream_id, reason="Server sent FIN")
@@ -1518,71 +1374,91 @@ class MasterDnsVPNClient:
                 self.session_restart_event.set()
 
     async def close_stream(self, stream_id: int, reason: str = "Unknown") -> None:
-        """Safely and fully close a specific local stream."""
+        """Safely and fully close a specific local stream and salvage pending FIN/ACKs."""
         if stream_id not in self.active_streams:
             return
 
-        self.logger.info(f"<y>Closing Client Stream {stream_id}. Reason: {reason}</y>")
+        self.logger.info(
+            f"<yellow>Closing Client Stream <cyan>{stream_id}</cyan>. Reason: <red>{reason}</red></yellow>"
+        )
         stream_data = self.active_streams.pop(stream_id)
-
-        await self._clear_stream_from_queue(stream_id)
 
         stream_obj = stream_data.get("stream")
         if stream_obj:
-            await stream_obj.close(reason=reason)
+            try:
+                await stream_obj.close(reason=reason)
+            except Exception as e:
+                self.logger.debug(
+                    f"<red>Error closing ARQStream {stream_id}: {e}</red>"
+                )
         else:
-            fin_data = (
-                f"FIN:{int(time.time()) % 10000}:{random.randint(1000, 9999)}".encode()
-            )
+            fin_data = b"FIN:" + os.urandom(4)
             await self._client_enqueue_tx(1, stream_id, 0, fin_data, is_fin=True)
+
+        try:
+            for item in stream_data["tx_queue"]:
+                heapq.heappush(self.main_queue, item)
+
+            stream_data["tx_queue"].clear()
+            stream_data["status"] = "CLOSED"
+        except Exception:
+            pass
 
         writer = stream_data.get("writer")
         await self._close_writer_safely(writer)
 
     async def _retransmit_worker(self):
-        self.logger.debug("<magenta>[RETRANS]</magenta> Retransmit Worker started.")
         while not self.should_stop.is_set() and not self.session_restart_event.is_set():
-            await asyncio.sleep(0.5)
+            try:
+                await asyncio.sleep(0.5)
+                now = time.monotonic()
 
-            dead_streams = [
-                sid
-                for sid, s in self.active_streams.items()
-                if "stream" in s
-                and (
-                    (
-                        s["stream"] is not None
-                        and getattr(s["stream"], "closed", False)
-                        and s.get("status") == "ACTIVE"
-                    )
-                    or (
-                        s.get("status") == "PENDING"
-                        and self.loop.time() - s.get("create_time", 0) > 350.0
-                    )
-                )
-            ]
+                dead_streams = []
+                for sid, s in list(self.active_streams.items()):
+                    stream_obj = s.get("stream")
+                    status = s.get("status")
+                    create_time = s.get("create_time", 0)
 
-            for sid in dead_streams:
-                s = self.active_streams.get(sid, {})
-                if (
-                    s.get("status") == "PENDING"
-                    and self.loop.time() - s.get("create_time", 0) > 350.0
-                ):
-                    reason = "Handshake timeout (No SYN_ACK from server)"
-                else:
-                    arq = s.get("stream")
-                    reason = getattr(
-                        arq, "close_reason", "Closed locally or Inactivity Timeout"
-                    )
+                    if (
+                        stream_obj
+                        and getattr(stream_obj, "closed", False)
+                        and status == "ACTIVE"
+                    ):
+                        dead_streams.append(sid)
+                    elif status == "PENDING" and (now - create_time) > 350.0:
+                        dead_streams.append(sid)
 
-                await self.close_stream(sid, reason=reason)
-
-            for s in list(self.active_streams.values()):
-                arq = s.get("stream")
-                if arq and hasattr(arq, "check_retransmits"):
+                for sid in dead_streams:
                     try:
-                        await arq.check_retransmits()
-                    except Exception as _:
-                        pass
+                        s = self.active_streams.get(sid, {})
+                        if s.get("status") == "PENDING":
+                            reason = "Handshake timeout (No SYN_ACK from server)"
+                        else:
+                            arq = s.get("stream")
+                            reason = getattr(
+                                arq,
+                                "close_reason",
+                                "Closed locally or Inactivity Timeout",
+                            )
+                        await self.close_stream(sid, reason=reason)
+                    except Exception as e:
+                        self.logger.debug(
+                            f"Error closing stream {sid} in retransmit worker: {e}"
+                        )
+
+                for sid, s in list(self.active_streams.items()):
+                    arq = s.get("stream")
+                    if arq and hasattr(arq, "check_retransmits"):
+                        try:
+                            await arq.check_retransmits()
+                        except Exception as e:
+                            self.logger.debug(f"Error in retransmit sid {sid}: {e}")
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.logger.error(f"Unexpected error in retransmit worker: {e}")
+                await asyncio.sleep(0.5)
 
     # ---------------------------------------------------------
     # App Lifecycle
@@ -1590,24 +1466,22 @@ class MasterDnsVPNClient:
     async def start(self) -> None:
         try:
             self.loop = asyncio.get_running_loop()
-            self.logger.info("=" * 80)
-            self.logger.success("<g>Starting MasterDnsVPN Client...</g>")
+            self.logger.info("=" * 60)
+            self.logger.success("<magenta>Starting MasterDnsVPN Client...</magenta>")
             if not self.domains or not self.resolvers:
-                self.logger.error("Domains or Resolvers are missing in config.")
+                self.logger.error(
+                    "<red>Domains or Resolvers are missing in config.</red>"
+                )
                 return
 
             self.success_mtu_checks = False
             while not self.should_stop.is_set():
-                self.logger.info("=" * 80)
-                self.logger.info("<green>Running MasterDnsVPN Client...</green>")
+                self.logger.info("=" * 60)
                 self.packets_queue.clear()
 
                 await self.run_client()
 
                 if not self.should_stop.is_set():
-                    self.logger.info(
-                        "================================================================================"
-                    )
                     self.logger.warning(
                         "<yellow>Restarting Client workflow in 2 seconds...</yellow>"
                     )
