@@ -132,6 +132,8 @@ class MasterDnsVPNServer:
                 except Exception:
                     break
         stream_queues.clear()
+        # clear any queue metadata for this session
+        session.pop("queue_meta", None)
 
         del self.sessions[session_id]
         self.logger.info(f"Closed session with ID: {session_id}")
@@ -371,6 +373,32 @@ class MasterDnsVPNServer:
                         q_sn,
                         item[6],
                     )
+                    # update queue meta to reflect dequeue
+                    try:
+                        qkey = f"stream:{selected_sid}"
+                        qmeta = session.get("queue_meta", {}).get(qkey)
+                        if qmeta:
+                            if q_ptype in (
+                                Packet_Type.STREAM_FIN,
+                                Packet_Type.STREAM_SYN,
+                                Packet_Type.STREAM_SYN_ACK,
+                            ):
+                                qmeta["types"].discard(q_ptype)
+                            if q_ptype == Packet_Type.STREAM_DATA_ACK:
+                                qmeta["acks"].discard((q_ptype, q_sn))
+                            if q_ptype == Packet_Type.STREAM_RESEND:
+                                qmeta["resends"].discard((q_stream_id, q_sn))
+                            # decrement counts
+                            try:
+                                if (
+                                    "counts" in qmeta
+                                    and qmeta["counts"].get(q_ptype, 0) > 0
+                                ):
+                                    qmeta["counts"][q_ptype] -= 1
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
                     break
             except Exception:
                 pass
@@ -386,6 +414,31 @@ class MasterDnsVPNServer:
                         q_sn,
                         item[6],
                     )
+                    # update session queue meta
+                    try:
+                        qmeta = session.get("queue_meta", {}).get("session")
+                        if qmeta:
+                            if q_ptype in (
+                                Packet_Type.STREAM_FIN,
+                                Packet_Type.STREAM_SYN,
+                                Packet_Type.STREAM_SYN_ACK,
+                            ):
+                                qmeta["types"].discard(q_ptype)
+                            if q_ptype == Packet_Type.STREAM_DATA_ACK:
+                                qmeta["acks"].discard((q_ptype, q_sn))
+                            if q_ptype == Packet_Type.STREAM_RESEND:
+                                qmeta["resends"].discard((q_stream_id, q_sn))
+                            # decrement counts
+                            try:
+                                if (
+                                    "counts" in qmeta
+                                    and qmeta["counts"].get(q_ptype, 0) > 0
+                                ):
+                                    qmeta["counts"][q_ptype] -= 1
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
                     break
             except Exception:
                 pass
@@ -767,6 +820,12 @@ class MasterDnsVPNServer:
             target_queue = stream_queues.setdefault(stream_id, asyncio.PriorityQueue())
 
         pending_resends = session.setdefault("pending_resends", set())
+        # queue_meta maps queue_key -> {"types": set(), "acks": set(), "resends": set(), "counts": {}}
+        queue_meta = session.setdefault("queue_meta", {})
+        queue_key = "session" if stream_id == 0 else f"stream:{stream_id}"
+        qm = queue_meta.setdefault(
+            queue_key, {"types": set(), "acks": set(), "resends": set(), "counts": {}}
+        )
 
         ptype = Packet_Type.STREAM_DATA
         effective_priority = priority
@@ -786,23 +845,23 @@ class MasterDnsVPNServer:
 
         if is_resend:
             resend_key = (stream_id, sn)
-            if resend_key in pending_resends:
+            if resend_key in pending_resends or (stream_id, sn) in qm["resends"]:
                 return
             pending_resends.add(resend_key)
+            qm["resends"].add((stream_id, sn))
 
+        # Use metadata to avoid scanning the internal queue deque
         if ptype in (
             Packet_Type.STREAM_FIN,
             Packet_Type.STREAM_SYN,
             Packet_Type.STREAM_SYN_ACK,
         ):
-            for item in target_queue._queue:
-                if len(item) > 3 and item[3] == ptype:
-                    return
+            if ptype in qm["types"]:
+                return
 
         if ptype == Packet_Type.STREAM_DATA_ACK:
-            for item in target_queue._queue:
-                if len(item) > 5 and item[3] == ptype and item[5] == sn:
-                    return
+            if (ptype, sn) in qm["acks"]:
+                return
 
         session["enqueue_seq"] = (session.get("enqueue_seq", 0) + 1) & 0x7FFFFFFF
         seq = session["enqueue_seq"]
@@ -810,6 +869,20 @@ class MasterDnsVPNServer:
         await target_queue.put(
             (effective_priority, seq, time.time(), ptype, stream_id, sn, data)
         )
+        # update meta after enqueue
+        if ptype in (
+            Packet_Type.STREAM_FIN,
+            Packet_Type.STREAM_SYN,
+            Packet_Type.STREAM_SYN_ACK,
+        ):
+            qm["types"].add(ptype)
+        if ptype == Packet_Type.STREAM_DATA_ACK:
+            qm["acks"].add((ptype, sn))
+        # increment counts
+        try:
+            qm["counts"][ptype] = qm["counts"].get(ptype, 0) + 1
+        except Exception:
+            pass
 
     async def _handle_stream_syn(self, session_id, stream_id):
         if stream_id in self.sessions[session_id]["streams"]:
@@ -889,6 +962,11 @@ class MasterDnsVPNServer:
         to_remove = [item for item in pending_resends if item[0] == stream_id]
         for item in to_remove:
             pending_resends.discard(item)
+        # remove queue_meta for this stream
+        try:
+            session.get("queue_meta", {}).pop(f"stream:{stream_id}", None)
+        except Exception:
+            pass
 
     async def _server_retransmit_loop(self):
         while not self.should_stop.is_set():
@@ -901,6 +979,11 @@ class MasterDnsVPNServer:
                     if stream_queues[sid].empty() and sid in canceled:
                         del stream_queues[sid]
                         canceled.discard(sid)
+                        # remove any queue_meta for this stream
+                        try:
+                            session.get("queue_meta", {}).pop(f"stream:{sid}", None)
+                        except Exception:
+                            pass
 
                 to_remove_canceled = [
                     sid for sid in canceled if sid not in stream_queues

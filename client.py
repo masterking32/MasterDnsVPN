@@ -165,11 +165,20 @@ class MasterDnsVPNClient:
         if not hasattr(self, "session_queue") or self.session_queue is None:
             return
 
-        ping_count = sum(
-            1
-            for item in self.session_queue._queue
-            if len(item) > 3 and item[3] == Packet_Type.PING
-        )
+        # use queue_meta counts if available to avoid iterating the internal deque
+        qmeta = self.queue_meta.get("session") if hasattr(self, "queue_meta") else None
+        ping_count = 0
+        try:
+            if qmeta and isinstance(qmeta.get("counts"), dict):
+                ping_count = qmeta["counts"].get(Packet_Type.PING, 0)
+            else:
+                ping_count = sum(
+                    1
+                    for item in self.session_queue._queue
+                    if len(item) > 3 and item[3] == Packet_Type.PING
+                )
+        except Exception:
+            ping_count = 0
 
         if ping_count >= 3:
             return
@@ -865,6 +874,8 @@ class MasterDnsVPNClient:
         self.logger.info("Entering VPN Tunnel Main Loop...")
         self.session_restart_event = asyncio.Event()
         self.session_queue = asyncio.PriorityQueue()
+        # queue_meta maps queue_key -> {"types": set(), "acks": set(), "resends": set()}
+        self.queue_meta = {}
         self.stream_queues = {}
         self.round_robin_index = 0
         self.tx_event = asyncio.Event()
@@ -982,6 +993,11 @@ class MasterDnsVPNClient:
                         self.session_queue.get_nowait()
                     except Exception:
                         break
+                # clear session queue meta
+                try:
+                    self.queue_meta.pop("session", None)
+                except Exception:
+                    pass
             if hasattr(self, "stream_queues"):
                 for sq in self.stream_queues.values():
                     while not sq.empty():
@@ -990,6 +1006,17 @@ class MasterDnsVPNClient:
                         except Exception:
                             break
                 self.stream_queues.clear()
+                # clear stream-related queue meta
+                try:
+                    keys = [
+                        k
+                        for k in list(self.queue_meta.keys())
+                        if k.startswith("stream:")
+                    ]
+                    for k in keys:
+                        self.queue_meta.pop(k, None)
+                except Exception:
+                    pass
 
         if not stop_task.done():
             stop_task.cancel()
@@ -1100,6 +1127,12 @@ class MasterDnsVPNClient:
                 f"Stream {stream_id} marked as canceled. TX worker will skip its pending packets."
             )
 
+        # remove any queue_meta for this stream
+        try:
+            self.queue_meta.pop(f"stream:{stream_id}", None)
+        except Exception:
+            pass
+
         if hasattr(self, "pending_resends"):
             to_remove = [item for item in self.pending_resends if item[0] == stream_id]
             for item in to_remove:
@@ -1139,18 +1172,26 @@ class MasterDnsVPNClient:
                 stream_id, asyncio.PriorityQueue()
             )
 
+        # maintain lightweight queue metadata to avoid scanning internal deque
+        qkey = "session" if stream_id == 0 else f"stream:{stream_id}"
+        qm = self.queue_meta.setdefault(
+            qkey, {"types": set(), "acks": set(), "resends": set(), "counts": {}}
+        )
+
+        if is_resend:
+            # already handled above by pending_resends
+            pass
+
         if ptype in (
             Packet_Type.STREAM_FIN,
             Packet_Type.STREAM_SYN,
             Packet_Type.STREAM_SYN_ACK,
         ):
-            for item in target_queue._queue:
-                if len(item) > 3 and item[3] == ptype:
-                    return
+            if ptype in qm["types"]:
+                return
         elif ptype == Packet_Type.STREAM_DATA_ACK:
-            for item in target_queue._queue:
-                if len(item) > 5 and item[3] == ptype and item[5] == sn:
-                    return
+            if (ptype, sn) in qm["acks"]:
+                return
 
         try:
             self._enqueue_seq = (getattr(self, "_enqueue_seq", 0) + 1) & 0x7FFFFFFF
@@ -1167,6 +1208,22 @@ class MasterDnsVPNClient:
             )
             self.tx_event.set()
         except asyncio.QueueFull:
+            pass
+        # update meta after enqueue
+        if ptype in (
+            Packet_Type.STREAM_FIN,
+            Packet_Type.STREAM_SYN,
+            Packet_Type.STREAM_SYN_ACK,
+        ):
+            qm["types"].add(ptype)
+        if ptype == Packet_Type.STREAM_DATA_ACK:
+            qm["acks"].add((ptype, sn))
+        if is_resend:
+            qm["resends"].add((stream_id, sn))
+        # increment counts
+        try:
+            qm["counts"][ptype] = qm["counts"].get(ptype, 0) + 1
+        except Exception:
             pass
 
     async def _tx_worker(self):
@@ -1211,12 +1268,67 @@ class MasterDnsVPNClient:
 
                 try:
                     item = target_queue.get_nowait()
+                    # remove queue meta for this dequeued item
+                    try:
+                        qkey = f"stream:{selected_sid}"
+                        qmeta = self.queue_meta.get(qkey)
+                        if qmeta:
+                            q_ptype = item[3]
+                            q_sn = item[5]
+                            if q_ptype in (
+                                Packet_Type.STREAM_FIN,
+                                Packet_Type.STREAM_SYN,
+                                Packet_Type.STREAM_SYN_ACK,
+                            ):
+                                qmeta["types"].discard(q_ptype)
+                            if q_ptype == Packet_Type.STREAM_DATA_ACK:
+                                qmeta["acks"].discard((q_ptype, q_sn))
+                            if q_ptype == Packet_Type.STREAM_RESEND:
+                                qmeta["resends"].discard((item[4], q_sn))
+                            # decrement counts
+                            try:
+                                if (
+                                    "counts" in qmeta
+                                    and qmeta["counts"].get(q_ptype, 0) > 0
+                                ):
+                                    qmeta["counts"][q_ptype] -= 1
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
                 except Exception:
                     pass
 
             elif not self.session_queue.empty():
                 try:
                     item = self.session_queue.get_nowait()
+                    # update session queue meta
+                    try:
+                        qmeta = self.queue_meta.get("session")
+                        if qmeta:
+                            q_ptype = item[3]
+                            q_sn = item[5]
+                            if q_ptype in (
+                                Packet_Type.STREAM_FIN,
+                                Packet_Type.STREAM_SYN,
+                                Packet_Type.STREAM_SYN_ACK,
+                            ):
+                                qmeta["types"].discard(q_ptype)
+                            if q_ptype == Packet_Type.STREAM_DATA_ACK:
+                                qmeta["acks"].discard((q_ptype, q_sn))
+                            if q_ptype == Packet_Type.STREAM_RESEND:
+                                qmeta["resends"].discard((item[4], q_sn))
+                            # decrement counts
+                            try:
+                                if (
+                                    "counts" in qmeta
+                                    and qmeta["counts"].get(q_ptype, 0) > 0
+                                ):
+                                    qmeta["counts"][q_ptype] -= 1
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
                 except Exception:
                     pass
 
