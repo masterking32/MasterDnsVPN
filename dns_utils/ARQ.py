@@ -128,7 +128,11 @@ class ARQStream:
             self.logger.debug(f"Stream {self.stream_id} IO loop error: {e}")
         finally:
             if not self.closed:
-                asyncio.create_task(self.close(reason="IO Loop Exit"))
+                final_reason = getattr(self, "close_reason", "IO Loop Exit")
+                if final_reason == "Unknown":
+                    final_reason = "IO Loop Exit"
+
+                asyncio.create_task(self.close(reason=final_reason))
 
     async def _retransmit_loop(self):
         """Separate lightweight task for RTO checks."""

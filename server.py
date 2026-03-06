@@ -988,8 +988,16 @@ class MasterDnsVPNServer:
 
                     for sid in closed_ids:
                         try:
+                            stream_data = streams.get(sid, {})
+                            arq_obj = stream_data.get("arq_obj")
+                            real_reason = getattr(
+                                arq_obj, "close_reason", "Unknown ARQ Error"
+                            )
+
                             await self.close_stream(
-                                session_id, sid, reason="Marked Closed by ARQStream"
+                                session_id,
+                                sid,
+                                reason=f"Marked Closed by ARQStream ({real_reason})",
                             )
                         except Exception as e:
                             self.logger.debug(

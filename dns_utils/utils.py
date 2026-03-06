@@ -172,7 +172,7 @@ def getLogger(
     logFile: str = None,
     max_log_size: int = 1,
     backup_count: int = 3,
-    is_server: bool = True,
+    is_server: bool = False,
 ):
     # ---------------------------------------------#
     # Logging configuration
