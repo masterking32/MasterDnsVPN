@@ -154,7 +154,7 @@ def getLogger(
     )
 
     if logFile:
-        log_file_format = f"[{appName}] [{time:HH:mm:ss}] [{level}] {message}"
+        log_file_format = f"[{appName}] [{{time:HH:mm:ss}}] [{{level}}] {{message}}"
 
         logger.add(
             logFile,

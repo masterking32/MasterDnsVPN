@@ -352,7 +352,6 @@ class MasterDnsVPNClient:
         mtu_char_len, mtu_bytes = self.dns_packet_parser.calculate_upload_mtu(
             domain=domain, mtu=mtu_size
         )
-
         if mtu_size > mtu_bytes:
             return False
 
@@ -452,14 +451,14 @@ class MasterDnsVPNClient:
             test_fn = functools.partial(
                 self.send_upload_mtu_test, domain, dns_server, dns_port
             )
+            actual_max_allowed = min(default_mtu if default_mtu > 0 else 512, mtu_bytes)
             optimal_mtu = await self._binary_search_mtu(
                 test_fn,
                 0,
-                default_mtu,
+                actual_max_allowed,
                 min_threshold=30,
                 allowed_min_mtu=self.min_upload_mtu,
             )
-
             if optimal_mtu > 29:
                 mtu_char_len, mtu_bytes = self.dns_packet_parser.calculate_upload_mtu(
                     domain=domain, mtu=optimal_mtu
