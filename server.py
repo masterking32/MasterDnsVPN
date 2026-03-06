@@ -103,7 +103,7 @@ class MasterDnsVPNServer:
         )
 
         self.max_concurrent_requests = asyncio.Semaphore(
-            int(self.config.get("MAX_CONCURRENT_REQUESTS", 5000))
+            int(self.config.get("MAX_CONCURRENT_REQUESTS", 1000))
         )
 
         self._dns_task = None
@@ -158,7 +158,7 @@ class MasterDnsVPNServer:
             return None
 
     async def _close_session(self, session_id: int) -> None:
-        session = self.sessions.get(session_id)
+        session = self.sessions.pop(session_id, None)
         if not session:
             return
 
@@ -778,10 +778,10 @@ class MasterDnsVPNServer:
             )
 
         try:
-            for item in stream_data["tx_queue"]:
-                heapq.heappush(session["main_queue"], item)
-
             stream_data["tx_queue"].clear()
+            stream_data["track_ack"].clear()
+            stream_data["track_resend"].clear()
+            stream_data["track_data"].clear()
             stream_data["status"] = "CLOSED"
         except Exception:
             pass

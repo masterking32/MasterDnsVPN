@@ -770,7 +770,7 @@ class MasterDnsVPNClient:
                 )
                 self.logger.info("=" * 80)
                 self.logger.info(
-                    f"<green>Global MTU Configuration -> Upload: <cyan>{self.synced_upload_mtu}B</cyan>, Download: <cyan>{self.synced_download_mtu}B</cyan></green>"
+                    f"<green>Global MTU Configuration -> Upload: <cyan>{self.synced_upload_mtu}</cyan>, Download: <cyan>{self.synced_download_mtu}</cyan></green>"
                 )
                 self.success_mtu_checks = True
 
@@ -1423,10 +1423,10 @@ class MasterDnsVPNClient:
             await self._client_enqueue_tx(1, stream_id, 0, fin_data, is_fin=True)
 
         try:
-            for item in list(stream_data.get("tx_queue", [])):
-                heapq.heappush(self.main_queue, item)
-
             stream_data.get("tx_queue", []).clear()
+            stream_data.get("track_data", set()).clear()
+            stream_data.get("track_resend", set()).clear()
+            stream_data.get("track_ack", set()).clear()
             stream_data["status"] = "CLOSED"
         except Exception:
             pass

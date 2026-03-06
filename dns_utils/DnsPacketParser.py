@@ -869,7 +869,8 @@ class DnsPacketParser:
             id_bytes = _int_cache.get(answer_id)
             if id_bytes is None:
                 id_bytes = (str(answer_id) + ".").encode("ascii", errors="ignore")
-                _int_cache[answer_id] = id_bytes
+                if answer_id < 512:
+                    _int_cache[answer_id] = id_bytes
 
             if answer_id == 0:
                 prefix_bytes = header_prefix_bytes + id_bytes

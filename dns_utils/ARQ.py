@@ -134,7 +134,14 @@ class ARQStream:
                 await _sleep(self.rto / 2.0)
                 if self.closed:
                     break
-                await self.check_retransmits()
+
+                try:
+                    await self.check_retransmits()
+                except Exception as e:
+                    self.logger.debug(
+                        f"Retransmit check error on stream {self.stream_id}: {e}"
+                    )
+
         except asyncio.CancelledError:
             pass
 
@@ -197,7 +204,7 @@ class ARQStream:
         _append = items_to_resend.append
         _rto = self.rto
 
-        for sn, info in self.snd_buf.items():
+        for sn, info in list(self.snd_buf.items()):
             if now - info["time"] >= _rto:
                 _append((sn, info["data"]))
                 info["time"] = now
