@@ -14,6 +14,8 @@ import sys
 import time
 from ctypes import wintypes
 from typing import Any, Optional
+from collections import deque
+import heapq
 
 from dns_utils.ARQ import ARQStream
 from dns_utils.DNS_ENUMS import DNS_Record_Type, Packet_Type
@@ -57,9 +59,12 @@ class MasterDnsVPNServer:
             log_level=self.config.get("LOG_LEVEL", "INFO"), is_server=True
         )
         self.allowed_domains = self.config.get("DOMAIN", [])
+        self.allowed_domains_lower = tuple(d.lower() for d in self.allowed_domains)
         self.encryption_method: int = self.config.get("DATA_ENCRYPTION_METHOD", 1)
 
         self.sessions = {}
+        self._max_sessions = 255
+        self.free_session_ids = deque(range(1, self._max_sessions + 1))
 
         self.encrypt_key = get_encrypt_key(self.encryption_method)
         self.logger.warning(f"Using encryption key: <green>{self.encrypt_key}</green>")
@@ -73,31 +78,48 @@ class MasterDnsVPNServer:
         self._dns_task = None
         self._session_cleanup_task = None
         self._background_tasks = set()
+        self._session_expiry_heap = []
+        try:
+            self._valid_packet_types = set(
+                v for k, v in Packet_Type.__dict__.items() if not k.startswith("__")
+            )
+        except Exception:
+            self._valid_packet_types = set()
 
     # ---------------------------------------------------------
     # Session Management
     # ---------------------------------------------------------
-    async def new_session(self) -> int:
+    async def new_session(self) -> Optional[int]:
         """
         Create a new session and return its session ID.
         """
-        for session_id in range(1, 256):
-            if session_id not in self.sessions:
-                self.sessions[session_id] = {
-                    "last_packet_time": asyncio.get_event_loop().time(),
-                    "streams": {},
-                    "session_queue": asyncio.PriorityQueue(),
-                    "stream_queues": {},
-                    "round_robin_index": 0,
-                    "pending_resends": set(),
-                    "canceled_streams": set(),
-                    "enqueue_seq": 0,
-                }
-                self.logger.info(f"Created new session with ID: {session_id}")
-                return session_id
+        try:
+            if not self.free_session_ids:
+                self.logger.error("All 255 session slots are full!")
+                return None
 
-        self.logger.error("All 255 session slots are full!")
-        return None
+            session_id = self.free_session_ids.popleft()
+            now = time.monotonic()
+            self.sessions[session_id] = {
+                "last_packet_time": now,
+                "streams": {},
+                "session_queue": asyncio.PriorityQueue(),
+                "stream_queues": {},
+                "round_robin_index": 0,
+                "pending_resends": set(),
+                "canceled_streams": set(),
+                "enqueue_seq": 0,
+            }
+
+            session_timeout = int(self.config.get("SESSION_TIMEOUT", 300))
+            heapq.heappush(
+                self._session_expiry_heap, (now + session_timeout, session_id)
+            )
+            self.logger.info(f"Created new session with ID: {session_id}")
+            return session_id
+        except Exception as e:
+            self.logger.error(f"Error creating new session: {e}")
+            return None
 
     async def _close_session(self, session_id: int) -> None:
         session = self.sessions.get(session_id)
@@ -120,48 +142,62 @@ class MasterDnsVPNServer:
             except Exception:
                 pass
 
-        session_queue = session.get("session_queue")
-        if session_queue:
-            while not session_queue.empty():
-                try:
-                    session_queue.get_nowait()
-                except Exception:
-                    break
+        if "session_queue" in session:
+            session["session_queue"] = asyncio.PriorityQueue()
 
-        stream_queues = session.get("stream_queues", {})
-        for sq in stream_queues.values():
-            while not sq.empty():
-                try:
-                    sq.get_nowait()
-                except Exception:
-                    break
-        stream_queues.clear()
-        # clear any queue metadata for this session
+        if "stream_queues" in session:
+            session["stream_queues"] = {}
+
         session.pop("queue_meta", None)
+        session.setdefault("pending_resends", set()).clear()
+        session.setdefault("canceled_streams", set()).clear()
 
         del self.sessions[session_id]
+        try:
+            if 1 <= session_id <= getattr(self, "_max_sessions", 255):
+                self.free_session_ids.appendleft(session_id)
+        except Exception:
+            pass
+
         self.logger.info(f"Closed session with ID: {session_id}")
 
-    async def close_inactive_sessions(self, timeout: int = 300) -> None:
-        current_time = asyncio.get_event_loop().time()
-        inactive_sessions = [
-            session_id
-            for session_id, session_info in self.sessions.items()
-            if current_time - session_info["last_packet_time"] > timeout
-        ]
+    def _touch_session(self, session_id: int) -> None:
+        """
+        Update a session's last_packet_time and push a new expiry into the heap.
+        Using a heap avoids scanning all sessions in the cleanup pass.
+        """
+        try:
+            session = self.sessions.get(session_id)
+            if not session:
+                return
+            now = time.monotonic()
+            session["last_packet_time"] = now
+            session_timeout = int(self.config.get("SESSION_TIMEOUT", 300))
+            heapq.heappush(
+                self._session_expiry_heap, (now + session_timeout, session_id)
+            )
+        except Exception:
+            pass
 
-        for session_id in inactive_sessions:
+    async def close_inactive_sessions(self, timeout: int = 300) -> None:
+        now = time.monotonic()
+        while self._session_expiry_heap and self._session_expiry_heap[0][0] <= now:
             try:
+                expiry, session_id = heapq.heappop(self._session_expiry_heap)
                 session = self.sessions.get(session_id)
                 if not session:
                     continue
-
-                await self._close_session(session_id)
-            except Exception as e:
-                self.logger.debug(f"Error closing session {session_id}: {e}")
-                continue
-
-            self.logger.info(f"Closed inactive session with ID: {session_id}")
+                if now - session.get("last_packet_time", 0) > timeout:
+                    try:
+                        await self._close_session(session_id)
+                        self.logger.info(
+                            f"Closed inactive session with ID: {session_id}"
+                        )
+                    except Exception as e:
+                        self.logger.debug(f"Error closing session {session_id}: {e}")
+                        continue
+            except Exception:
+                break
 
     async def _handle_session_init(
         self,
@@ -176,24 +212,20 @@ class MasterDnsVPNServer:
         """Handle NEW_SESSION VPN packet."""
 
         client_token = self.dns_parser.extract_vpn_data_from_labels(labels)
-        token_str = (
-            client_token.decode("utf-8", errors="ignore") if client_token else "unknown"
-        )
-
-        if not token_str:
+        if not client_token:
             return None
 
         new_session_id = await self.new_session()
         if new_session_id is None:
-            self.logger.error(
+            self.logger.debug(
                 f"Failed to create new session for NEW_SESSION packet from {addr}"
             )
             return None
 
-        response_str = f"{token_str}:{new_session_id}"
-        data_bytes = self.dns_parser.codec_transform(
-            response_str.encode(), encrypt=True
+        response_bytes = (
+            client_token + b":" + str(new_session_id).encode("ascii", errors="ignore")
         )
+        data_bytes = self.dns_parser.codec_transform(response_bytes, encrypt=True)
 
         response_packet = self.dns_parser.generate_vpn_response_packet(
             domain=request_domain,
@@ -208,11 +240,25 @@ class MasterDnsVPNServer:
     async def _session_cleanup_loop(self) -> None:
         """Background task to periodically cleanup inactive sessions."""
         try:
-            session_cleanup_interval = self.config.get("SESSION_CLEANUP_INTERVAL", 30)
-            session_timeout = self.config.get("SESSION_TIMEOUT", 300)
+            session_cleanup_interval = float(
+                self.config.get("SESSION_CLEANUP_INTERVAL", 30)
+            )
+            session_timeout = int(self.config.get("SESSION_TIMEOUT", 300))
             while not self.should_stop.is_set():
                 try:
-                    await asyncio.sleep(session_cleanup_interval)
+                    now = time.monotonic()
+                    if self._session_expiry_heap:
+                        next_expiry = max(0.0, self._session_expiry_heap[0][0] - now)
+                        timeout = min(session_cleanup_interval, next_expiry)
+                    else:
+                        timeout = session_cleanup_interval
+
+                    try:
+                        await asyncio.wait_for(self.should_stop.wait(), timeout=timeout)
+                        break
+                    except asyncio.TimeoutError:
+                        pass
+
                     await self.close_inactive_sessions(session_timeout)
                 except asyncio.CancelledError:
                     break
@@ -228,18 +274,26 @@ class MasterDnsVPNServer:
         """Async send helper to write UDP response to addr using the server socket."""
         if not response or addr is None:
             return False
+
+        sock = self.udp_sock
+        if sock is None:
+            self.logger.error("UDP socket is not initialized for sending response.")
+            return False
+
+        loop = self.loop or asyncio.get_running_loop()
+
         try:
-            if self.udp_sock is None:
-                self.logger.error("UDP socket is not initialized for sending response.")
-                return False
-
-            if self.loop is None:
-                self.loop = asyncio.get_running_loop()
-
-            await async_sendto(self.loop, self.udp_sock, response, addr)
+            await async_sendto(loop, sock, response, addr)
             return True
-        except Exception as e:
-            self.logger.debug(f"Failed to send DNS response to {addr}: {e}")
+        except (BlockingIOError, OSError) as e:
+            try:
+                self.logger.debug(f"Failed to send DNS response to {addr}: {e}")
+            except Exception:
+                pass
+            return False
+        except asyncio.CancelledError:
+            raise
+        except Exception:
             return False
 
     async def handle_vpn_packet(
@@ -255,9 +309,7 @@ class MasterDnsVPNServer:
     ) -> Optional[bytes]:
 
         if session_id in self.sessions:
-            self.sessions[session_id]["last_packet_time"] = (
-                asyncio.get_event_loop().time()
-            )
+            self._touch_session(session_id)
 
         if packet_type == Packet_Type.MTU_UP_REQ:
             return await self._handle_mtu_up(
@@ -472,88 +524,6 @@ class MasterDnsVPNServer:
             sequence_num=res_sn,
         )
 
-    async def validate_vpn_packet(
-        self, data: bytes, parsed_packet: dict, addr
-    ) -> Optional[bytes]:
-        """
-        Handle VPN packet logic and return (is_vpn_packet, response_bytes).
-        """
-        try:
-            questions = parsed_packet.get("questions")
-            if not questions:
-                self.logger.info(f"No questions found in VPN packet from {addr}")
-                return None
-
-            request_domain = questions[0]["qName"]
-            packet_domain = questions[0]["qName"].lower()
-            packet_main_domain = next(
-                (
-                    domain
-                    for domain in self.allowed_domains
-                    if packet_domain.endswith(domain)
-                ),
-                "",
-            )
-
-            if questions[0]["qType"] != DNS_Record_Type.TXT:
-                self.logger.debug(
-                    f"Invalid DNS query type for VPN packet from {addr}: {questions[0]['qType']}"
-                )
-                return None
-
-            if not packet_main_domain:
-                self.logger.info(
-                    f"Domain {packet_domain} not allowed for VPN packets from {addr}"
-                )
-                return None
-
-            if packet_domain.count(".") < 3:
-                self.logger.info(
-                    f"Invalid domain format for VPN packet from {addr}: {packet_domain}"
-                )
-                return None
-
-            labels = packet_domain.replace("." + packet_main_domain, "")
-
-            extracted_header = self.dns_parser.extract_vpn_header_from_labels(labels)
-            if not extracted_header:
-                self.logger.info(
-                    f"Failed to extract VPN header from labels for packet from {addr}"
-                )
-                return None
-
-            packet_type = extracted_header["packet_type"]
-            session_id = extracted_header["session_id"]
-
-            valid_packet_types = [
-                v for k, v in Packet_Type.__dict__.items() if not k.startswith("__")
-            ]
-
-            if packet_type not in valid_packet_types:
-                self.logger.info(
-                    f"Invalid VPN packet type from labels for packet from {addr}: {packet_type}"
-                )
-                return None
-
-            response = await self.handle_vpn_packet(
-                packet_type=packet_type,
-                session_id=session_id,
-                data=data,
-                labels=labels,
-                parsed_packet=parsed_packet,
-                addr=addr,
-                request_domain=request_domain,
-                extracted_header=extracted_header,
-            )
-
-            if response:
-                return response
-
-        except Exception as e:
-            self.logger.error(f"Error handling VPN packet from {addr}: {e}")
-
-        return None
-
     async def handle_single_request(self, data, addr):
         """
         Handle a single DNS request in its own task.
@@ -562,19 +532,89 @@ class MasterDnsVPNServer:
             self.logger.debug("Invalid data or address in DNS request.")
             return
 
-        parsed_packet = self.dns_parser.parse_dns_packet(data)
+        dns_parser = self.dns_parser
+        loop = self.loop or asyncio.get_running_loop()
+        create_task = loop.create_task
+        bg_tasks = self._background_tasks
+        allowed_domains_lower = self.allowed_domains_lower
+        valid_packet_types = getattr(self, "_valid_packet_types", set())
 
-        # Check for VPN packet
-        vpn_response = await self.validate_vpn_packet(data, parsed_packet, addr)
-        if vpn_response:
-            await self.send_udp_response(vpn_response, addr)
+        parsed_packet = dns_parser.parse_dns_packet(data)
+        if not parsed_packet:
             return
-        else:
-            response = self.dns_parser.server_fail_response(data)
-            if not response:
-                return
 
-        await self.send_udp_response(response, addr)
+        questions = parsed_packet.get("questions")
+        if not questions:
+            return
+
+        q0 = questions[0]
+        request_domain = q0.get("qName")
+        if not request_domain:
+            return
+
+        packet_domain = request_domain.lower()
+
+        packet_main_domain = ""
+        for d in allowed_domains_lower:
+            if packet_domain.endswith(d):
+                packet_main_domain = d
+                break
+
+        vpn_response = None
+        if (
+            q0.get("qType") == DNS_Record_Type.TXT
+            and packet_main_domain
+            and packet_domain.count(".") >= 3
+        ):
+            labels = (
+                packet_domain[: -len("." + packet_main_domain)]
+                if packet_main_domain
+                else packet_domain
+            )
+            try:
+                extracted_header = dns_parser.extract_vpn_header_from_labels(labels)
+            except Exception:
+                extracted_header = None
+
+            if extracted_header:
+                packet_type = extracted_header.get("packet_type")
+                session_id = extracted_header.get("session_id")
+                if packet_type in valid_packet_types:
+                    try:
+                        vpn_response = await self.handle_vpn_packet(
+                            packet_type=packet_type,
+                            session_id=session_id,
+                            data=data,
+                            labels=labels,
+                            parsed_packet=parsed_packet,
+                            addr=addr,
+                            request_domain=request_domain,
+                            extracted_header=extracted_header,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        vpn_response = None
+
+        if vpn_response:
+            try:
+                t = create_task(self.send_udp_response(vpn_response, addr))
+                bg_tasks.add(t)
+                t.add_done_callback(bg_tasks.discard)
+            except Exception:
+                await self.send_udp_response(vpn_response, addr)
+            return
+
+        response = dns_parser.server_fail_response(data)
+        if not response:
+            return
+
+        try:
+            t = create_task(self.send_udp_response(response, addr))
+            bg_tasks.add(t)
+            t.add_done_callback(bg_tasks.discard)
+        except Exception:
+            await self.send_udp_response(response, addr)
 
     async def _bounded_handle_request(self, data, addr):
         async with self.max_concurrent_requests:
@@ -652,7 +692,8 @@ class MasterDnsVPNServer:
         # Save to session map
         self.sessions[session_id]["upload_mtu"] = upload_mtu
         self.sessions[session_id]["download_mtu"] = download_mtu
-        self.sessions[session_id]["last_packet_time"] = asyncio.get_event_loop().time()
+        # update last activity using heap-based touch
+        self._touch_session(session_id)
 
         self.logger.info(
             f"Session {session_id} MTU synced - UP: {upload_mtu}B, DOWN: {download_mtu}B"

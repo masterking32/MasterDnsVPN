@@ -64,15 +64,6 @@ DATA_ENCRYPTION_METHOD = 1
 # (all clients must then be updated with the new key).
 
 # ---------------------------------------------------------------------------
-# Session Management
-# ---------------------------------------------------------------------------
-# Duration of inactivity (seconds) after which a session is considered expired.
-SESSION_TIMEOUT = 300  # 5 minutes
-
-# Frequency (seconds) at which the server checks for and removes expired sessions.
-SESSION_CLEANUP_INTERVAL = 60  # 1 minute
-
-# ---------------------------------------------------------------------------
 # Traffic Forwarding
 # ---------------------------------------------------------------------------
 # IP address and port to which the server forwards decrypted traffic.
@@ -80,6 +71,15 @@ SESSION_CLEANUP_INTERVAL = 60  # 1 minute
 # Example: if you have a local SOCKS5 proxy on port 1080, set FORWARD_PORT = 1080.
 FORWARD_IP = "127.0.0.1"
 FORWARD_PORT = 8080
+
+# ---------------------------------------------------------------------------
+# Session Management
+# ---------------------------------------------------------------------------
+# Duration of inactivity (seconds) after which a session is considered expired.
+SESSION_TIMEOUT = 300  # 5 minutes
+
+# Frequency (seconds) at which the server checks for and removes expired sessions.
+SESSION_CLEANUP_INTERVAL = 60  # 1 minute
 
 # ---------------------------------------------------------------------------
 # ARQ (Automatic Repeat reQuest) Settings
