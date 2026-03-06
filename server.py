@@ -758,8 +758,15 @@ class MasterDnsVPNServer:
         session_streams = session.get("streams", {})
         stream_data = session_streams.get(stream_id)
 
-        if not stream_data:
+        if not stream_data or stream_data.get("status") == "CLOSING":
             return
+
+        stream_data["status"] = "CLOSING"
+
+        session.setdefault("closed_streams", {})[stream_id] = time.monotonic()
+
+        if len(session["closed_streams"]) > 1000:
+            session["closed_streams"].pop(next(iter(session["closed_streams"])))
 
         self.logger.info(
             f"<yellow>Closing Stream <cyan>{stream_id}</cyan> in Session <cyan>{session_id}</cyan>. Reason: <red>{reason}</red></yellow>"
@@ -777,6 +784,12 @@ class MasterDnsVPNServer:
                 session_id, 1, stream_id, 0, fin_data, is_fin=True
             )
 
+        pending_tx = stream_data.get("tx_queue", [])
+        if pending_tx:
+            main_q = session.setdefault("main_queue", [])
+            for item in pending_tx:
+                heapq.heappush(main_q, item)
+
         try:
             stream_data["tx_queue"].clear()
             stream_data["track_ack"].clear()
@@ -786,7 +799,6 @@ class MasterDnsVPNServer:
         except Exception:
             pass
 
-        # ۳. پاک کردن امن استریم
         session_streams.pop(stream_id, None)
 
     async def _server_enqueue_tx(
@@ -901,6 +913,9 @@ class MasterDnsVPNServer:
         if not session:
             return
 
+        if stream_id in session.get("closed_streams", {}):
+            return
+
         session_streams = session["streams"]
 
         if stream_id in session_streams:
@@ -927,6 +942,7 @@ class MasterDnsVPNServer:
             "track_syn_ack": set(),
             "track_data": set(),
             "track_resend": set(),
+            "closed_streams": {},
         }
 
         session_streams[stream_id] = stream_data

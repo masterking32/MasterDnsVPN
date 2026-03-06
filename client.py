@@ -1423,9 +1423,12 @@ class MasterDnsVPNClient:
 
     async def close_stream(self, stream_id: int, reason: str = "Unknown") -> None:
         """Safely and fully close a specific local stream and salvage pending FIN/ACKs."""
-        stream_data = self.active_streams.pop(stream_id, None)
-        if not stream_data:
+
+        stream_data = self.active_streams.get(stream_id)
+        if not stream_data or stream_data.get("status") == "CLOSING":
             return
+
+        stream_data["status"] = "CLOSING"
 
         self.logger.info(
             f"<yellow>Closing Client Stream <cyan>{stream_id}</cyan>. Reason: <red>{reason}</red></yellow>"
@@ -1443,6 +1446,12 @@ class MasterDnsVPNClient:
             fin_data = b"FIN:" + os.urandom(4)
             await self._client_enqueue_tx(1, stream_id, 0, fin_data, is_fin=True)
 
+        pending_tx = stream_data.get("tx_queue", [])
+        if pending_tx:
+            for item in pending_tx:
+                heapq.heappush(self.main_queue, item)
+            self.tx_event.set()
+
         try:
             stream_data.get("tx_queue", []).clear()
             stream_data.get("track_data", set()).clear()
@@ -1454,6 +1463,7 @@ class MasterDnsVPNClient:
 
         writer = stream_data.get("writer")
         await self._close_writer_safely(writer)
+        self.active_streams.pop(stream_id, None)
 
     async def _retransmit_worker(self):
         while not self.should_stop.is_set() and not self.session_restart_event.is_set():
