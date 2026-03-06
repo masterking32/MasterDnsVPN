@@ -991,15 +991,39 @@ class MasterDnsVPNServer:
         while not self.should_stop.is_set():
             try:
                 await asyncio.sleep(0.5)
+                now = time.monotonic()
                 for session_id, session in list(self.sessions.items()):
                     streams = session.get("streams", {})
                     if not streams:
                         continue
 
+                    for sid, stream_data in list(streams.items()):
+                        status = stream_data.get("status")
+                        last_act = stream_data.get("last_activity", now)
+                        close_time = stream_data.get("close_time", now)
+
+                        if status == "TIME_WAIT":
+                            if (now - close_time) > 15.0:
+                                streams.pop(sid, None)
+                            elif (now - last_act) > 2.0:
+                                stream_data["last_activity"] = now
+                                stream_data.get("track_fin", set()).discard(
+                                    Packet_Type.STREAM_FIN
+                                )
+                                fin_data = b"FIN:" + os.urandom(4)
+                                await self._server_enqueue_tx(
+                                    session_id, 1, sid, 0, fin_data, is_fin=True
+                                )
+
                     closed_ids = []
                     for sid, stream_data in streams.items():
                         arq_obj = stream_data.get("arq_obj")
-                        if arq_obj and getattr(arq_obj, "closed", False):
+                        if (
+                            arq_obj
+                            and getattr(arq_obj, "closed", False)
+                            and stream_data.get("status")
+                            not in ("TIME_WAIT", "CLOSING")
+                        ):
                             closed_ids.append(sid)
 
                     for sid in closed_ids:

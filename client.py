@@ -1457,19 +1457,41 @@ class MasterDnsVPNClient:
             stream_data.get("track_data", set()).clear()
             stream_data.get("track_resend", set()).clear()
             stream_data.get("track_ack", set()).clear()
+            stream_data["status"] = "TIME_WAIT"
             stream_data["status"] = "CLOSED"
         except Exception:
             pass
 
         writer = stream_data.get("writer")
         await self._close_writer_safely(writer)
-        self.active_streams.pop(stream_id, None)
 
     async def _retransmit_worker(self):
         while not self.should_stop.is_set() and not self.session_restart_event.is_set():
             try:
                 await asyncio.sleep(0.5)
                 now = time.monotonic()
+
+                for sid, s in list(self.active_streams.items()):
+                    status = s.get("status")
+                    last_act = s.get("last_activity_time", now)
+                    close_time = s.get("close_time", now)
+
+                    if status == "PENDING" and (now - last_act) > 1.5:
+                        s["last_activity_time"] = now
+                        self.track_types.discard(Packet_Type.STREAM_SYN)
+                        syn_data = b"SY:" + os.urandom(4)
+                        await self._client_enqueue_tx(0, sid, 0, syn_data)
+
+                    elif status == "TIME_WAIT":
+                        if (now - close_time) > 15.0:
+                            self.active_streams.pop(sid, None)
+                        elif (now - last_act) > 2.0:
+                            s["last_activity_time"] = now
+                            s.get("track_fin", set()).discard(Packet_Type.STREAM_FIN)
+                            fin_data = b"FIN:" + os.urandom(4)
+                            await self._client_enqueue_tx(
+                                1, sid, 0, fin_data, is_fin=True
+                            )
 
                 dead_streams = []
                 for sid, s in list(self.active_streams.items()):
