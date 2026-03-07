@@ -150,5 +150,5 @@ ARQ_MAX_RTO = 1.5
 # Batch Packet Size
 # ---------------------------------------------------------------------------
 # Maximum number of packets to batch together in a single DNS response.
-# Larger batches can improve efficiency but may increase latency and packet loss on unstable networks.
-MAX_PACKETS_PER_BATCH = 10
+# Larger batches can improve efficiency but may increase latency and packet loss on unstable networks. Default value for client is 2.
+MAX_PACKETS_PER_BATCH = 2
