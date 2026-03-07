@@ -38,13 +38,13 @@ RESOLVER_DNS_SERVERS = [
 # Minimum MTU thresholds for resolver selection.
 # If a resolver's upload or download MTU is below these values, it will be excluded.
 # Set to 0 to disable minimum MTU checks.
-MIN_UPLOAD_MTU = 40
-MIN_DOWNLOAD_MTU = 100
+MIN_UPLOAD_MTU = 70
+MIN_DOWNLOAD_MTU = 70
 
 # Maximum size of data packets sent to the server.
-MAX_UPLOAD_MTU = 220
+MAX_UPLOAD_MTU = 200
 # Maximum size of data packets received from the server.
-MAX_DOWNLOAD_MTU = 4000
+MAX_DOWNLOAD_MTU = 500
 
 # ---------------------------------------------------------------------------
 # Load Balancing
