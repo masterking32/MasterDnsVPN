@@ -27,20 +27,27 @@ class PingManager:
             idle_time = now - self.last_data_activity
 
             if self.active_connections == 0 and idle_time > 20.0:
-                await _sleep(1.0)
-                continue
+                ping_interval = 10.0
+                max_sleep = 1.0
             elif idle_time >= 10.0:
                 ping_interval = 3.0
+                max_sleep = 0.5
             elif idle_time >= 5.0:
                 ping_interval = 1.0
+                max_sleep = 0.2
             else:
                 ping_interval = 0.2
+                max_sleep = 0.18
 
             time_since_last_ping = now - self.last_ping_time
 
             if time_since_last_ping >= ping_interval:
-                await _send_func()
+                _send_func()
                 self.last_ping_time = _monotonic()
-                await _sleep(ping_interval)
+                time_to_sleep = ping_interval
             else:
-                await _sleep(0.1)
+                time_to_sleep = ping_interval - time_since_last_ping
+
+            actual_sleep = time_to_sleep if time_to_sleep < max_sleep else max_sleep
+            if actual_sleep > 0:
+                await _sleep(actual_sleep)

@@ -174,7 +174,6 @@ class MasterDnsVPNClient:
 
         try:
             self.enqueue_seq = (self.enqueue_seq + 1) & 0x7FFFFFFF
-
             heapq.heappush(
                 self.main_queue,
                 (4, self.enqueue_seq, Packet_Type.PING, 0, 0, payload),
@@ -1489,7 +1488,8 @@ class MasterDnsVPNClient:
         self.ping_manager.active_connections = len(self.active_streams)
         _, _, pkt_type, stream_id, sn, data = item
 
-        self.ping_manager.update_activity()
+        if pkt_type != Packet_Type.PING:
+            self.ping_manager.update_activity()
 
         if stream_id in self.active_streams:
             now_mono = time.monotonic()
