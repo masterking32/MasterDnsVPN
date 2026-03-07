@@ -1147,16 +1147,17 @@ class MasterDnsVPNServer:
 
             self.logger.debug("Binding UDP socket ...")
             self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            buffer_size = int(self.config.get("SOCKET_BUFFER_SIZE", 8388608))
             try:
-                buffer_size = int(self.config.get("SOCKET_BUFFER_SIZE", 8388608))
                 self.udp_sock.setsockopt(
                     socket.SOL_SOCKET, socket.SO_RCVBUF, buffer_size
                 )
                 self.udp_sock.setsockopt(
                     socket.SOL_SOCKET, socket.SO_SNDBUF, buffer_size
                 )
-            except Exception as e:
-                self.logger.debug(f"Failed to increase server socket buffer: {e}")
+            except OSError:
+                new_size = 65535
+                self.udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, new_size)
 
             try:
                 self.udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1252,7 +1253,7 @@ class MasterDnsVPNServer:
 def main():
     server = MasterDnsVPNServer()
     try:
-        if sys.platform == "win32":
+        if sys.platform != "win32" and sys.platform != "darwin":
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
         else:
             try:

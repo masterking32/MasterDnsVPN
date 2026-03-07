@@ -15,8 +15,22 @@ async def async_recvfrom(loop, sock: socket.socket, nbytes: int):
     if hasattr(loop, "sock_recvfrom"):
         try:
             return await loop.sock_recvfrom(sock, nbytes)
-        except NotImplementedError:
-            pass
+        except (AttributeError, NotImplementedError):
+            future = loop.create_future()
+
+            def cb():
+                try:
+                    data, addr = sock.recvfrom(nbytes)
+                    loop.remove_reader(sock.fileno())
+                    if not future.done():
+                        future.set_result((data, addr))
+                except Exception as e:
+                    loop.remove_reader(sock.fileno())
+                    if not future.done():
+                        future.set_exception(e)
+
+            loop.add_reader(sock.fileno(), cb)
+            return await future
 
     try:
         return sock.recvfrom(nbytes)

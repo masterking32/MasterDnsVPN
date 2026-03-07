@@ -980,12 +980,16 @@ class MasterDnsVPNClient:
         self.tunnel_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             buffer_size = int(self.config.get("SOCKET_BUFFER_SIZE", 8388608))
-            self.tunnel_sock.setsockopt(
-                socket.SOL_SOCKET, socket.SO_RCVBUF, buffer_size
-            )
-            self.tunnel_sock.setsockopt(
-                socket.SOL_SOCKET, socket.SO_SNDBUF, buffer_size
-            )
+            try:
+                self.udp_sock.setsockopt(
+                    socket.SOL_SOCKET, socket.SO_RCVBUF, buffer_size
+                )
+                self.udp_sock.setsockopt(
+                    socket.SOL_SOCKET, socket.SO_SNDBUF, buffer_size
+                )
+            except OSError:
+                new_size = 65535
+                self.udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, new_size)
         except Exception as e:
             self.logger.debug(f"Failed to increase socket buffer: {e}")
 
@@ -1809,7 +1813,7 @@ class MasterDnsVPNClient:
 def main():
     client = MasterDnsVPNClient()
     try:
-        if sys.platform == "win32":
+        if sys.platform != "win32" and sys.platform != "darwin":
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
         else:
             try:
