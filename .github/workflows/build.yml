@@ -58,11 +58,20 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Clean build environment
+      - name: Clean environment
+        if: ${{ matrix.os != 'windows-latest' }}
+        shell: bash
         run: |
-          find . -name "*.pyc" -delete
-          find . -name "__pycache__" -delete
-          rm -rf build/ dist/ *.spec
+          find . -name "*.pyc" -delete || true
+          find . -name "__pycache__" -delete || true
+          rm -rf build dist *.spec || true
+
+      - name: Clean windows environment
+        if: ${{ matrix.os == 'windows-latest' }}
+        shell: powershell
+        run: |
+          Remove-Item -Path build,dist -Recurse -Force -ErrorAction SilentlyContinue
+          Get-ChildItem -Path . -Include *.spec -Recurse -File | Remove-Item -Force -ErrorAction SilentlyContinue
 
       - name: Log Current SHA
         run: git rev-parse HEAD
