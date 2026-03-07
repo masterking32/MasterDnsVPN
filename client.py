@@ -549,6 +549,9 @@ class MasterDnsVPNClient:
             connection["download_mtu_bytes"] = 0
             connection["packet_loss"] = 100
 
+            self.logger.info(
+                f"<blue>Testing connection <yellow>{domain}</yellow> via <cyan>{resolver}</cyan>... <yellow>({server_id}/{total_conns})</yellow></blue>"
+            )
             # Step 1: Upload MTU
             up_valid, up_mtu_bytes, up_mtu_char = await self.test_upload_mtu_size(
                 domain, resolver, dns_port, self.max_upload_mtu
