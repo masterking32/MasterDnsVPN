@@ -55,26 +55,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Clean environment
-        if: ${{ matrix.os != 'windows-latest' }}
-        shell: bash
-        run: |
-          find . -name "*.pyc" -delete || true
-          find . -name "__pycache__" -delete || true
-          rm -rf build dist *.spec || true
-
-      - name: Clean windows environment
-        if: ${{ matrix.os == 'windows-latest' }}
-        shell: powershell
-        run: |
-          Remove-Item -Path build,dist -Recurse -Force -ErrorAction SilentlyContinue
-          Get-ChildItem -Path . -Include *.spec -Recurse -File | Remove-Item -Force -ErrorAction SilentlyContinue
-
-      - name: Log Current SHA
-        run: git rev-parse HEAD
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -85,29 +65,8 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install pyinstaller Cython setuptools
+          pip install pyinstaller
           pip install -r requirements.txt || true
-
-      - name: Compile utils with Cython
-        run: |
-          python build_setup.py build_ext --inplace
-
-      - name: Remove original Python files (Windows)
-        if: ${{ matrix.os == 'windows-latest' }}
-        shell: powershell
-        run: |
-          Remove-Item -Path "dns_utils\DnsPacketParser.py" -Force -ErrorAction SilentlyContinue
-          Remove-Item -Path "dns_utils\ARQ.py" -Force -ErrorAction SilentlyContinue
-          Remove-Item -Path "dns_utils\DNSBalancer.py" -Force -ErrorAction SilentlyContinue
-          Remove-Item -Path "dns_utils\PingManager.py" -Force -ErrorAction SilentlyContinue
-
-      - name: Remove original Python files (non-Windows)
-        if: ${{ matrix.os != 'windows-latest' }}
-        run: |
-          rm -f dns_utils/DnsPacketParser.py
-          rm -f dns_utils/ARQ.py
-          rm -f dns_utils/DNSBalancer.py
-          rm -f dns_utils/PingManager.py
 
       - name: Prepare build directory (Windows)
         if: ${{ matrix.os == 'windows-latest' }}
@@ -123,10 +82,12 @@ jobs:
           mkdir -p dist
 
       - name: Build client
-        run: pyinstaller --onefile --paths . --collect-submodules dns_utils --collect-binaries dns_utils --hidden-import dns_utils.ARQ --hidden-import dns_utils.DnsPacketParser --hidden-import dns_utils.DNSBalancer --hidden-import dns_utils.PingManager --name "MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}" client.py
+        run: |
+          pyinstaller --onefile --name "MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}" client.py
 
       - name: Build server
-        run: pyinstaller --onefile --paths . --collect-submodules dns_utils --collect-binaries dns_utils --hidden-import dns_utils.ARQ --hidden-import dns_utils.DnsPacketParser --hidden-import dns_utils.DNSBalancer --hidden-import dns_utils.PingManager --name "MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}" server.py
+        run: |
+          pyinstaller --onefile --name "MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}" server.py
 
       - name: Bundle config templates with executables
         shell: bash
@@ -221,6 +182,7 @@ jobs:
           if [ -f cert.pfx ]; then
             echo "Importing cert.pfx into login keychain (may require interactive access)"
             security import cert.pfx -k ~/Library/Keychains/login.keychain -P "${{ env.CODE_SIGN_CERT_PASSWORD }}" -T /usr/bin/codesign || true
+            # attempt to find an identity and codesign
             IDENTITY=$(security find-identity -v -p codesigning | head -n1 | awk -F '"' '{print $2}') || true
             if [ -n "$IDENTITY" ]; then
               echo "Found identity: $IDENTITY. Signing macOS binaries."
