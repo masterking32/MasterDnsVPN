@@ -279,35 +279,44 @@ class MasterDnsVPNClient:
         min_threshold: int = 30,
         allowed_min_mtu: int = 0,
     ) -> int:
-        """Generic binary search for finding the optimal MTU size."""
         if max_mtu <= 0:
             return 0
 
+        min_allowed = max(min_threshold, allowed_min_mtu)
+
+        if max_mtu < min_allowed:
+            self.logger.debug(
+                f"<cyan>[MTU]</cyan> Max MTU {max_mtu} is lower than allowed minimum {min_allowed}. Skipping."
+            )
+            return 0
+
         self.logger.debug(
-            f"<cyan>[MTU]</cyan> Starting binary search for MTU. Range: {min_mtu}-{max_mtu}"
+            f"<cyan>[MTU]</cyan> Starting binary search for MTU. Range: {min_allowed}-{max_mtu}"
         )
 
-        for _ in range(2):
-            if await test_callable(max_mtu):
+        for attempt in range(2):
+            if self.should_stop.is_set():
+                return 0
+            if await test_callable(max_mtu, is_retry=(attempt > 0)):
                 self.logger.debug(f"<cyan>[MTU]</cyan> Max MTU {max_mtu} is valid.")
                 return max_mtu
 
-        low = min_mtu
+        low = max(min_mtu, min_allowed)
         high = max_mtu - 1
         optimal = 0
 
-        min_allowed = max(min_threshold, allowed_min_mtu)
-
         while low <= high:
+            if self.should_stop.is_set():
+                return 0
+
             mid = (low + high) // 2
-
-            if mid < min_allowed:
-                break
-
             ok = False
-            for _ in range(2):
+
+            for attempt in range(2):
+                if self.should_stop.is_set():
+                    return 0
                 try:
-                    if await test_callable(mid):
+                    if await test_callable(mid, is_retry=(attempt > 0)):
                         ok = True
                         break
                 except Exception as e:
@@ -323,8 +332,18 @@ class MasterDnsVPNClient:
         return optimal
 
     async def send_upload_mtu_test(
-        self, domain: str, dns_server: str, dns_port: int, mtu_size: int
+        self,
+        domain: str,
+        dns_server: str,
+        dns_port: int,
+        mtu_size: int,
+        is_retry: bool = False,
     ) -> bool:
+        if not is_retry:
+            self.logger.debug(
+                f"<magenta>[MTU Probe]</magenta> Testing Upload MTU: <yellow>{mtu_size}</yellow> bytes via <cyan>{dns_server}</cyan>"
+            )
+
         mtu_char_len, mtu_bytes = self.dns_packet_parser.calculate_upload_mtu(
             domain=domain, mtu=mtu_size
         )
@@ -350,6 +369,10 @@ class MasterDnsVPNClient:
         )
 
         if not response:
+            if not is_retry:
+                self.logger.info(
+                    f"<yellow>[MTU Probe]</yellow> Upload MTU <yellow>{mtu_size}</yellow> Failed (No Response / Timeout)"
+                )
             return False
 
         parsed_header, _ = await self._process_received_packet(response)
@@ -361,15 +384,31 @@ class MasterDnsVPNClient:
             )
             return True
         elif packet_type == Packet_Type.ERROR_DROP:
-            self.logger.warning(
-                f"<yellow>Upload Test Dropped (Server MTU Limit): <yellow>{mtu_size}</yellow> via <cyan>{dns_server}</cyan> for <cyan>{domain}</cyan></yellow>"
-            )
+            if not is_retry:
+                self.logger.info(
+                    f"<yellow>[MTU Probe]</yellow> Upload MTU <yellow>{mtu_size}</yellow> Failed (Server MTU Limit / Dropped)"
+                )
             return False
+
+        if not is_retry:
+            self.logger.info(
+                f"<yellow>[MTU Probe]</yellow> Upload MTU <yellow>{mtu_size}</yellow> Failed (Invalid Response Type)"
+            )
         return False
 
     async def send_download_mtu_test(
-        self, domain: str, dns_server: str, dns_port: int, mtu_size: int
+        self,
+        domain: str,
+        dns_server: str,
+        dns_port: int,
+        mtu_size: int,
+        is_retry: bool = False,
     ) -> bool:
+        if not is_retry:
+            self.logger.debug(
+                f"<magenta>[MTU Probe]</magenta> Testing Download MTU: <yellow>{mtu_size}</yellow> bytes via <cyan>{dns_server}</cyan>"
+            )
+
         data_bytes = mtu_size.to_bytes(4, "big")
         encrypted_data = self.dns_packet_parser.codec_transform(
             data_bytes, encrypt=True
@@ -397,6 +436,10 @@ class MasterDnsVPNClient:
         )
 
         if not response:
+            if not is_retry:
+                self.logger.info(
+                    f"<yellow>[MTU Probe]</yellow> Download MTU <yellow>{mtu_size}</yellow> Failed (Dropped / Timeout)"
+                )
             return False
 
         parsed_header, returned_data = await self._process_received_packet(response)
@@ -409,10 +452,16 @@ class MasterDnsVPNClient:
                 )
                 return True
             else:
-                self.logger.warning(
-                    f"<yellow>Download Test Failed (Data Mismatch): <yellow>{mtu_size}</yellow> via <cyan>{dns_server}</cyan> for <cyan>{domain}</cyan></yellow>"
-                )
+                if not is_retry:
+                    self.logger.info(
+                        f"<yellow>[MTU Probe]</yellow> Download MTU <yellow>{mtu_size}</yellow> Failed (Data Mismatch)"
+                    )
                 return False
+
+        if not is_retry:
+            self.logger.info(
+                f"<yellow>[MTU Probe]</yellow> Download MTU <yellow>{mtu_size}</yellow> Failed (Invalid Response Type)"
+            )
         return False
 
     async def test_upload_mtu_size(
@@ -428,8 +477,10 @@ class MasterDnsVPNClient:
             if mtu_bytes > default_mtu:
                 mtu_bytes = default_mtu
 
-            async def test_fn(m):
-                return await self.send_upload_mtu_test(domain, dns_server, dns_port, m)
+            async def test_fn(m, is_retry=False):
+                return await self.send_upload_mtu_test(
+                    domain, dns_server, dns_port, m, is_retry
+                )
 
             actual_max_allowed = min(default_mtu if default_mtu > 0 else 512, mtu_bytes)
             optimal_mtu = await self._binary_search_mtu(
@@ -454,9 +505,9 @@ class MasterDnsVPNClient:
         try:
             self.logger.debug(f"<cyan>[MTU]</cyan> Testing download MTU for {domain}")
 
-            async def test_fn(m):
+            async def test_fn(m, is_retry=False):
                 return await self.send_download_mtu_test(
-                    domain, dns_server, dns_port, m
+                    domain, dns_server, dns_port, m, is_retry
                 )
 
             optimal_mtu = await self._binary_search_mtu(
@@ -481,8 +532,12 @@ class MasterDnsVPNClient:
         total_conns = len(self.connections_map)
 
         for connection in self.connections_map:
-            if not connection or self.should_stop.is_set():
+            if self.should_stop.is_set():
+                break
+
+            if not connection:
                 continue
+
             server_id += 1
             domain = connection.get("domain")
             resolver = connection.get("resolver")
