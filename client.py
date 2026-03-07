@@ -642,9 +642,9 @@ class MasterDnsVPNClient:
             connection["download_mtu_bytes"] = down_mtu_bytes
             connection["packet_loss"] = 0
 
-            self.logger.info(
-                f"<cyan>✅ Valid: {domain} via <green>{resolver}</green> | "
-                f"Upload MTU: <red>{up_mtu_bytes}</red> | Download MTU: <red>{down_mtu_bytes}</red> <yellow>({server_id}/{total_conns})</yellow></cyan>"
+            self.logger.success(
+                f"<green>✅ Valid: {domain} via <green>{resolver}</green> | "
+                f"Upload MTU: <cyan>{up_mtu_bytes}</cyan> | Download MTU: <cyan>{down_mtu_bytes}</cyan> <yellow>({server_id}/{total_conns})</yellow></green>"
             )
 
         valid_conns = [c for c in self.connections_map if c.get("is_valid")]
