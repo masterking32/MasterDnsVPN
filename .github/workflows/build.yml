@@ -103,28 +103,11 @@ jobs:
           mkdir -p dist
 
       - name: Build client
-        run: |
-          pyinstaller --onefile --paths . \
-          --collect-submodules dns_utils \
-          --collect-binaries dns_utils \
-          --hidden-import dns_utils.ARQ \
-          --hidden-import dns_utils.DnsPacketParser \
-          --hidden-import dns_utils.DNSBalancer \
-          --hidden-import dns_utils.PingManager \
-          --name "MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}" \
-          client.py
+        run: pyinstaller --onefile --paths . --collect-submodules dns_utils --collect-binaries dns_utils --hidden-import dns_utils.ARQ --hidden-import dns_utils.DnsPacketParser --hidden-import dns_utils.DNSBalancer --hidden-import dns_utils.PingManager --name "MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}" client.py
 
       - name: Build server
-        run: |
-          pyinstaller --onefile --paths . \
-            --collect-submodules dns_utils \
-            --collect-binaries dns_utils \
-            --hidden-import dns_utils.ARQ \
-            --hidden-import dns_utils.DnsPacketParser \
-            --hidden-import dns_utils.DNSBalancer \
-            --hidden-import dns_utils.PingManager \
-            --name "MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}" \
-            server.py
+        run: pyinstaller --onefile --paths . --collect-submodules dns_utils --collect-binaries dns_utils --hidden-import dns_utils.ARQ --hidden-import dns_utils.DnsPacketParser --hidden-import dns_utils.DNSBalancer --hidden-import dns_utils.PingManager --name "MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}" server.py
+
       - name: Bundle config templates with executables
         shell: bash
         run: |
