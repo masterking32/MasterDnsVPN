@@ -65,8 +65,23 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install pyinstaller
+          pip install pyinstaller Cython setuptools
           pip install -r requirements.txt || true
+
+      - name: Compile DnsPacketParser with Cython
+        run: |
+          python build_setup.py build_ext --inplace
+
+      - name: Remove original Python file (Windows)
+        if: ${{ matrix.os == 'windows-latest' }}
+        shell: powershell
+        run: |
+          Remove-Item -Path "dns_utils\DnsPacketParser.py" -Force -ErrorAction SilentlyContinue
+
+      - name: Remove original Python file (non-Windows)
+        if: ${{ matrix.os != 'windows-latest' }}
+        run: |
+          rm -f dns_utils/DnsPacketParser.py
 
       - name: Prepare build directory (Windows)
         if: ${{ matrix.os == 'windows-latest' }}
@@ -182,7 +197,6 @@ jobs:
           if [ -f cert.pfx ]; then
             echo "Importing cert.pfx into login keychain (may require interactive access)"
             security import cert.pfx -k ~/Library/Keychains/login.keychain -P "${{ env.CODE_SIGN_CERT_PASSWORD }}" -T /usr/bin/codesign || true
-            # attempt to find an identity and codesign
             IDENTITY=$(security find-identity -v -p codesigning | head -n1 | awk -F '"' '{print $2}') || true
             if [ -n "$IDENTITY" ]; then
               echo "Found identity: $IDENTITY. Signing macOS binaries."

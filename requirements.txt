@@ -1,4 +1,5 @@
 loguru
 cryptography
 tomli; python_version < "3.11"
+uvloop; sys_platform != "win32"
 
