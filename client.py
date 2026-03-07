@@ -16,12 +16,12 @@ import time
 from ctypes import wintypes
 from typing import Optional, Tuple
 
-from dns_utils.ARQ import ARQStream
+from dns_utils import ARQ
 from dns_utils.config_loader import get_config_path, load_config
 from dns_utils.DNS_ENUMS import DNS_Record_Type, Packet_Type
-from dns_utils.DNSBalancer import DNSBalancer
-from dns_utils.DnsPacketParser import DnsPacketParser
-from dns_utils.PingManager import PingManager
+from dns_utils import DNSBalancer
+from dns_utils import DnsPacketParser
+from dns_utils import PingManager
 from dns_utils.utils import (
     async_recvfrom,
     async_sendto,
@@ -1567,7 +1567,7 @@ class MasterDnsVPNClient:
                 stream_data["status"] = "ACTIVE"
                 reader = stream_data["reader"]
 
-                stream = ARQStream(
+                stream = ARQ(
                     stream_id=stream_id,
                     session_id=self.session_id,
                     enqueue_tx_cb=self._client_enqueue_tx,

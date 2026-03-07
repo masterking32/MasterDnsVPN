@@ -8,7 +8,7 @@ import socket
 import time
 
 
-class ARQStream:
+class ARQ:
     _active_tasks = set()
 
     class _DummyLogger:
@@ -75,10 +75,10 @@ class ARQStream:
             self.io_task = loop.create_task(self._io_loop())
             self.rtx_task = loop.create_task(self._retransmit_loop())
 
-            ARQStream._active_tasks.add(self.io_task)
-            ARQStream._active_tasks.add(self.rtx_task)
-            self.io_task.add_done_callback(ARQStream._active_tasks.discard)
-            self.rtx_task.add_done_callback(ARQStream._active_tasks.discard)
+            ARQ._active_tasks.add(self.io_task)
+            ARQ._active_tasks.add(self.rtx_task)
+            self.io_task.add_done_callback(ARQ._active_tasks.discard)
+            self.rtx_task.add_done_callback(ARQ._active_tasks.discard)
         except RuntimeError:
             self.io_task = None
             self.rtx_task = None

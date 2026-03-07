@@ -17,10 +17,10 @@ from collections import deque
 from ctypes import wintypes
 from typing import Any, Optional
 
-from dns_utils.ARQ import ARQStream
+from dns_utils import ARQ
 from dns_utils.config_loader import get_config_path, load_config
 from dns_utils.DNS_ENUMS import DNS_Record_Type, Packet_Type
-from dns_utils.DnsPacketParser import DnsPacketParser
+from dns_utils import DnsPacketParser
 from dns_utils.utils import async_recvfrom, async_sendto, get_encrypt_key, getLogger
 
 # Ensure UTF-8 output for consistent logging
@@ -1026,7 +1026,7 @@ class MasterDnsVPNServer:
                 self.forward_ip, self.forward_port
             )
 
-            stream = ARQStream(
+            stream = ARQ(
                 stream_id=stream_id,
                 session_id=session_id,
                 enqueue_tx_cb=lambda p, sid, sn, d, **kw: self._server_enqueue_tx(
