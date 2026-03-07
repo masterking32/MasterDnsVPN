@@ -1814,8 +1814,10 @@ class MasterDnsVPNClient:
 def main():
     client = MasterDnsVPNClient()
     try:
-        if sys.platform != "win32" and sys.platform != "darwin":
+        if sys.platform == "win32":
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        elif sys.platform == "darwin":
+            pass
         else:
             try:
                 import uvloop

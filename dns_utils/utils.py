@@ -12,25 +12,11 @@ import socket
 
 async def async_recvfrom(loop, sock: socket.socket, nbytes: int):
     """Backwards compatible async UDP receive for Python < 3.11 with uvloop fallback"""
-    if hasattr(loop, "sock_recvfrom"):
+    if hasattr(loop, "sock_recvfrom") and sys.version_info >= (3, 11):
         try:
             return await loop.sock_recvfrom(sock, nbytes)
         except (AttributeError, NotImplementedError):
-            future = loop.create_future()
-
-            def cb():
-                try:
-                    data, addr = sock.recvfrom(nbytes)
-                    loop.remove_reader(sock.fileno())
-                    if not future.done():
-                        future.set_result((data, addr))
-                except Exception as e:
-                    loop.remove_reader(sock.fileno())
-                    if not future.done():
-                        future.set_exception(e)
-
-            loop.add_reader(sock.fileno(), cb)
-            return await future
+            pass
 
     try:
         return sock.recvfrom(nbytes)
