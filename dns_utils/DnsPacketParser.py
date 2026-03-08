@@ -476,12 +476,12 @@ class DnsPacketParser:
         _extend = res.extend
 
         for p in parts:
-            l = len(p)
-            if l:
-                if l > 63:
+            label_len = len(p)
+            if label_len:
+                if label_len > 63:
                     self.logger.error("Label too long")
                     return b"\x00"
-                _append(l)
+                _append(label_len)
                 _extend(p)
 
         _append(0)

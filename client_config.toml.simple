@@ -47,16 +47,6 @@ MAX_UPLOAD_MTU = 200
 MAX_DOWNLOAD_MTU = 500
 
 # ---------------------------------------------------------------------------
-# Load Balancing
-# ---------------------------------------------------------------------------
-# Strategy to balance load across multiple DNS resolvers.
-# Options:
-#   1 - Random: Randomly select a resolver for each query.
-#   2 - Round Robin: Cycle through resolvers in order.
-#   3 - Least Loss: Prefer resolvers with the lowest observed packet-loss rate.
-RESOLVER_BALANCING_STRATEGY = 1
-
-# ---------------------------------------------------------------------------
 # Tunnel Domains
 # ---------------------------------------------------------------------------
 # Domains used for DNS tunneling.
@@ -88,31 +78,43 @@ DATA_ENCRYPTION_METHOD = 1
 ENCRYPTION_KEY = ""
 
 # ---------------------------------------------------------------------------
+# Load Balancing
+# ---------------------------------------------------------------------------
+# Strategy to balance load across multiple DNS resolvers.
+# Options:
+#   1 - Random: Randomly select a resolver for each query.
+#   2 - Round Robin: Cycle through resolvers in order.
+#   3 - Least Loss: Prefer resolvers with the lowest observed packet-loss rate.
+RESOLVER_BALANCING_STRATEGY = 1
+
+# ---------------------------------------------------------------------------
 # Connection Settings
 # ---------------------------------------------------------------------------
-# Maximum time (in seconds) the client waits for a DNS response.
-DNS_QUERY_TIMEOUT = 5
-
 # IP address and port on which the client listens for local connections.
 LISTEN_IP = "127.0.0.1"
 LISTEN_PORT = 1080
 
-# Number of concurrent DNS worker tasks.
-# Increase for high-traffic clients; start with 3 and adjust as needed.
-NUM_DNS_WORKERS = 3
-
 # Number of times each packet is duplicated before sending.
 # 1 = no duplication; higher values improve reliability at the cost of bandwidth.
 # Increase this if you experience packet loss, especially on unstable networks.
-# WARNING: Setting this too high can significantly increase bandwidth usage, Land and server load.
+# WARNING: Setting this too high can significantly increase bandwidth usage, LAN and server load.
 PACKET_DUPLICATION_COUNT = 3
 
-# ---------------------------------------------------------------------------
-# ARQ (Automatic Repeat reQuest) Settings
-# ---------------------------------------------------------------------------
-# ARQ window size (number of unacknowledged packets allowed in flight).
-# Larger window sizes can improve performance on high-latency connections but may increase memory usage.
-ARQ_WINDOW_SIZE = 600
+# Maximum number of packets to batch together in a single DNS response.
+# Larger batches can improve efficiency but may increase latency and packet loss on unstable networks. Default value for client is 3.
+MAX_PACKETS_PER_BATCH = 3
+
+# Initial Retransmission TimeOut (RTO) in seconds for lost packets.
+# - Lower values (e.g., 0.2 or 0.3) provide faster recovery on low-ping connections.
+# - Higher values (e.g., 0.5 to 0.8) are better for high-latency or unstable remote servers.
+ARQ_INITIAL_RTO = 0.8
+
+# Maximum Retransmission TimeOut in seconds.
+# This caps the exponential backoff algorithm to prevent the timeout from growing infinitely during severe network drops.
+ARQ_MAX_RTO = 1.5
+
+# Maximum time (in seconds) the client waits for a DNS response.
+DNS_QUERY_TIMEOUT = 5
 
 # ---------------------------------------------------------------------------
 # Advanced Connection & Retry Settings
@@ -129,26 +131,15 @@ MAX_CONNECTION_ATTEMPTS = 10
 # - Recommended to set between 2 and 4 to handle heavy incoming traffic smoothly.
 NUM_RX_WORKERS = 2
 
+# Number of concurrent DNS worker tasks.
+# Increase for high-traffic clients; start with 3 and adjust as needed.
+NUM_DNS_WORKERS = 3
+
 # UDP socket buffer size in bytes (Receive and Send).
 # The default is 8MB (8388608 bytes) to prevent packet loss at the OS level.
 # - Reduce this only if you are running the client on a weak device (like a low-end router or Raspberry Pi).
 SOCKET_BUFFER_SIZE = 8388608
 
-# ---------------------------------------------------------------------------
-# ARQ (Automatic Repeat reQuest) Advanced Settings
-# ---------------------------------------------------------------------------
-# Initial Retransmission TimeOut (RTO) in seconds for lost packets.
-# - Lower values (e.g., 0.2 or 0.3) provide faster recovery on low-ping connections.
-# - Higher values (e.g., 0.5 to 0.8) are better for high-latency or unstable remote servers.
-ARQ_INITIAL_RTO = 0.8
-
-# Maximum Retransmission TimeOut in seconds.
-# This caps the exponential backoff algorithm to prevent the timeout from growing infinitely during severe network drops.
-ARQ_MAX_RTO = 1.5
-
-# ---------------------------------------------------------------------------
-# Batch Packet Size
-# ---------------------------------------------------------------------------
-# Maximum number of packets to batch together in a single DNS response.
-# Larger batches can improve efficiency but may increase latency and packet loss on unstable networks. Default value for client is 3.
-MAX_PACKETS_PER_BATCH = 3
+# ARQ window size (number of unacknowledged packets allowed in flight).
+# Larger window sizes can improve performance on high-latency connections but may increase memory usage.
+ARQ_WINDOW_SIZE = 600

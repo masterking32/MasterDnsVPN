@@ -1145,7 +1145,7 @@ class MasterDnsVPNClient:
                 if getattr(e, "winerror", None) == 10054:
                     continue
                 await asyncio.sleep(0.01)
-            except Exception as e:
+            except Exception as _:
                 await asyncio.sleep(0.01)
 
     async def _process_and_route_incoming(self, data, addr):
@@ -1496,7 +1496,7 @@ class MasterDnsVPNClient:
                             continue
 
                 await self._send_single_packet(item)
-            except Exception as e:
+            except Exception as _:
                 pass
 
     async def _send_single_packet(self, item):
@@ -1546,7 +1546,7 @@ class MasterDnsVPNClient:
                             query_packet,
                             (conn["resolver"], 53),
                         )
-                    except Exception as e:
+                    except Exception as _:
                         pass
         except Exception as e:
             self.logger.debug(f"TX Worker error during packet building/sending: {e}")
@@ -1751,7 +1751,7 @@ class MasterDnsVPNClient:
                     if arq and hasattr(arq, "check_retransmits"):
                         try:
                             await arq.check_retransmits()
-                        except Exception as e:
+                        except Exception as _:
                             pass
 
             except asyncio.CancelledError:
