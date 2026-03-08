@@ -103,7 +103,7 @@ SOCKET_BUFFER_SIZE = 8388608
 LOG_LEVEL = "INFO"
 
 # ------------------------------------------------------------------------------
-# MTU TESTING SETTINGS (Accuracy vs Speed)
+# 6. MTU TESTING SETTINGS (Accuracy vs Speed)
 # ------------------------------------------------------------------------------
 
 # Number of times the client will retry an MTU test if it fails.

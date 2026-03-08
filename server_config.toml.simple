@@ -91,3 +91,12 @@ SOCKET_BUFFER_SIZE = 8388608
 
 # Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL
 LOG_LEVEL = "INFO"
+
+# ------------------------------------------------------------------------------
+# 5. SESSION MANAGEMENT
+# ------------------------------------------------------------------------------
+# Duration of inactivity (seconds) after which a session is considered expired.
+SESSION_TIMEOUT = 300  # 5 minutes
+
+# Frequency (seconds) at which the server checks for and removes expired sessions.
+SESSION_CLEANUP_INTERVAL = 60  # 1 minute
