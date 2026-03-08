@@ -1275,7 +1275,6 @@ class MasterDnsVPNClient:
                     self.logger.info(
                         f"<green>🔓 SOCKS5 Auth successful for user: <cyan>{uname.decode()}</cyan> from IP: <cyan>{client_IP}</cyan></green>"
                     )
-                    is_socks5 = True
                 else:
                     if 0x00 not in methods:  # 0x00 is No Auth
                         writer.write(b"\x05\xff")
@@ -1285,6 +1284,7 @@ class MasterDnsVPNClient:
                     writer.write(b"\x05\x00")
                     await writer.drain()
 
+                is_socks5 = True
                 # 2. Connection Request
                 req_header = await reader.readexactly(4)
                 # VER(1), CMD(1), RSV(1), ATYP(1)
