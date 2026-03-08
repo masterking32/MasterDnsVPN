@@ -69,7 +69,35 @@ PACKET_DUPLICATION_COUNT = 3
 MAX_PACKETS_PER_BATCH = 3
 
 # ------------------------------------------------------------------------------
-# 4. RELIABILITY & RETRY SETTINGS (ARQ)
+# 4. MTU TESTING SETTINGS (Accuracy vs Speed)
+# ------------------------------------------------------------------------------
+# Minimum MTU thresholds for resolver selection.
+# If a resolver's upload or download MTU is below these values, it will be excluded.
+# Set to 0 to disable minimum MTU checks.
+MIN_UPLOAD_MTU = 40
+MIN_DOWNLOAD_MTU = 100
+
+# Maximum size of data packets sent to the server.
+# This should be set to the largest MTU that your network can reliably handle without fragmentation.
+# Start with a conservative value (e.g., 220) and increase it if you have a stable connection and want better performance.
+MAX_UPLOAD_MTU = 220
+MAX_DOWNLOAD_MTU = 4000
+
+# Number of times the client will retry an MTU test if it fails.
+# - Default is 2. 
+# - Increase to 3 or 4 for highly filtered networks to prevent false negatives.
+# - WARNING: Increasing this value will make the initial startup and server
+#   testing phase significantly SLOWER, but much more ACCURATE.
+MTU_TEST_RETRIES = 2
+
+# The timeout in seconds to wait for a response during MTU testing.
+# - Default is 1.0. 
+# - Increase to 2.0 or 3.0 if you have high latency or heavy packet loss.
+# - WARNING: Higher timeout means slower startup times if packets are dropped.
+MTU_TEST_TIMEOUT = 1.0
+
+# ------------------------------------------------------------------------------
+# 5. RELIABILITY & RETRY SETTINGS (ARQ)
 # ------------------------------------------------------------------------------
 
 # Maximum attempts the client makes to establish a session.
@@ -88,7 +116,7 @@ ARQ_MAX_RTO = 1.5
 DNS_QUERY_TIMEOUT = 5.0
 
 # ------------------------------------------------------------------------------
-# 5. SYSTEM PERFORMANCE & WORKERS
+# 6. SYSTEM PERFORMANCE & WORKERS
 # ------------------------------------------------------------------------------
 
 # Number of asynchronous workers. 
@@ -101,20 +129,3 @@ SOCKET_BUFFER_SIZE = 8388608
 
 # Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL
 LOG_LEVEL = "INFO"
-
-# ------------------------------------------------------------------------------
-# 6. MTU TESTING SETTINGS (Accuracy vs Speed)
-# ------------------------------------------------------------------------------
-
-# Number of times the client will retry an MTU test if it fails.
-# - Default is 2. 
-# - Increase to 3 or 4 for highly filtered networks to prevent false negatives.
-# - WARNING: Increasing this value will make the initial startup and server
-#   testing phase significantly SLOWER, but much more ACCURATE.
-MTU_TEST_RETRIES = 2
-
-# The timeout in seconds to wait for a response during MTU testing.
-# - Default is 1.0. 
-# - Increase to 2.0 or 3.0 if you have high latency or heavy packet loss.
-# - WARNING: Higher timeout means slower startup times if packets are dropped.
-MTU_TEST_TIMEOUT = 1.0
