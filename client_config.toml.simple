@@ -32,7 +32,7 @@ DATA_ENCRYPTION_KEY = "YourSecretKeyHere"
 
 # The IP and Port where this client will listen for incoming local connections
 # (e.g., from your browser, Telegram, or other apps on your PC/Phone).
-LISTEN_IP = "127.0.0.1"
+LISTEN_IP = "0.0.0.0"
 LISTEN_PORT = 1080
 
 # LOCAL SOCKS5 AUTHENTICATION (Only applies if PROTOCOL_TYPE = "SOCKS5")
