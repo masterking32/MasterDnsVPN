@@ -121,6 +121,10 @@ class MasterDnsVPNClient:
         """Create a map of all domain-resolver combinations."""
         unique_domains = set(self.domains)
         unique_resolvers = set(self.resolvers)
+        unique_domains.discard("")
+        unique_resolvers.discard("")
+        unique_domains = list(set(d.lower() for d in unique_domains))
+        unique_resolvers = list(unique_resolvers)
 
         self.connections_map = [
             {"domain": domain, "resolver": resolver}
@@ -370,7 +374,7 @@ class MasterDnsVPNClient:
         if not response:
             if not is_retry:
                 self.logger.info(
-                    f"<yellow>[MTU Probe]</yellow> Upload MTU <yellow>{mtu_size}</yellow> Failed (No Response / Timeout)"
+                    f"<yellow>⚠️ Upload test failed: Upload MTU <cyan>{mtu_size}</cyan> bytes via <cyan>{dns_server}</cyan> for <cyan>{domain}</cyan></yellow>"
                 )
             return False
 
@@ -379,19 +383,19 @@ class MasterDnsVPNClient:
 
         if packet_type == Packet_Type.MTU_UP_RES:
             self.logger.success(
-                f"<yellow>Upload Test Success: <green>{mtu_size}</green> via <cyan>{dns_server}</cyan> for <cyan>{domain}</cyan></yellow>"
+                f"<yellow>🟢 Upload test passed: Upload MTU <green>{mtu_size}</green> bytes via <cyan>{dns_server}</cyan> for <cyan>{domain}</cyan></yellow>"
             )
             return True
         elif packet_type == Packet_Type.ERROR_DROP:
             if not is_retry:
                 self.logger.info(
-                    f"<yellow>[MTU Probe]</yellow> Upload MTU <yellow>{mtu_size}</yellow> Failed (Server MTU Limit / Dropped)"
+                    f"<yellow>⚠️ Upload test failed (Server Dropped Packet): Upload MTU <cyan>{mtu_size}</cyan> bytes via <cyan>{dns_server}</cyan> for <cyan>{domain}</cyan></yellow>"
                 )
             return False
 
         if not is_retry:
             self.logger.info(
-                f"<yellow>[MTU Probe]</yellow> Upload MTU <yellow>{mtu_size}</yellow> Failed (Invalid Response Type)"
+                f"<yellow>⚠️ Upload test failed: Upload MTU <cyan>{mtu_size}</cyan> bytes via <cyan>{dns_server}</cyan> for <cyan>{domain}</cyan></yellow>"
             )
         return False
 
@@ -437,7 +441,7 @@ class MasterDnsVPNClient:
         if not response:
             if not is_retry:
                 self.logger.info(
-                    f"<yellow>[MTU Probe]</yellow> Download MTU <yellow>{mtu_size}</yellow> Failed (Dropped / Timeout)"
+                    f"<yellow>⚠️ Download test failed: Download MTU <cyan>{mtu_size}</cyan> bytes via <cyan>{dns_server}</cyan> for <cyan>{domain}</cyan> (No Response)</yellow>"
                 )
             return False
 
@@ -447,19 +451,19 @@ class MasterDnsVPNClient:
         if packet_type == Packet_Type.MTU_DOWN_RES:
             if returned_data and len(returned_data) == mtu_size:
                 self.logger.success(
-                    f"<yellow>Download Test Success: <green>{mtu_size}</green> via <cyan>{dns_server}</cyan> for <cyan>{domain}</cyan></yellow>"
+                    f"<yellow>🟢 Download test passed: Download MTU <green>{mtu_size}</green> bytes via <cyan>{dns_server}</cyan> for <cyan>{domain}</cyan></yellow>"
                 )
                 return True
             else:
                 if not is_retry:
                     self.logger.info(
-                        f"<yellow>[MTU Probe]</yellow> Download MTU <yellow>{mtu_size}</yellow> Failed (Data Mismatch)"
+                        f"<yellow>⚠️ Download test failed: Download MTU <cyan>{mtu_size}</cyan> bytes via <cyan>{dns_server}</cyan> for <cyan>{domain}</cyan> (Data Size Mismatch)</yellow>"
                     )
                 return False
 
         if not is_retry:
             self.logger.info(
-                f"<yellow>[MTU Probe]</yellow> Download MTU <yellow>{mtu_size}</yellow> Failed (Invalid Response Type)"
+                f"<yellow>⚠️ Download test failed: Download MTU <cyan>{mtu_size}</cyan> bytes via <cyan>{dns_server}</cyan> for <cyan>{domain}</cyan> (Unexpected Packet Type)</yellow>"
             )
         return False
 
@@ -567,7 +571,6 @@ class MasterDnsVPNClient:
                     f"MAX_PACKETS_PER_BATCH = <green>3</green>"
                 )
 
-            # Note: you can test MTUs with more than this values
             self.logger.info(
                 "<red>   [Note]</red> The calculated optimal MTUs for stealth mode are quite low due to the heavy encryption overhead and DNS encoding. In real-world conditions with severe filtering, you may find that only very small MTUs succeed consistently. It's recommended to use these values as a baseline and adjust based on observed performance and reliability in your specific environment."
             )
@@ -606,19 +609,23 @@ class MasterDnsVPNClient:
             connection["download_mtu_bytes"] = 0
             connection["packet_loss"] = 100
 
+            valid_count = sum(1 for c in self.connections_map if c.get("is_valid"))
+            errors_count = server_id - valid_count
             self.logger.info(
-                f"<blue>Testing connection <yellow>{domain}</yellow> via <cyan>{resolver}</cyan>... <yellow>({server_id}/{total_conns})</yellow></blue>"
+                f"<blue>Testing connection <yellow>{domain}</yellow> via <cyan>{resolver}</cyan> (<green>V: {valid_count}</green>, <red>E: {errors_count}</red>, <yellow>{server_id} / {total_conns}</yellow>)...</blue>"
             )
             # Step 1: Upload MTU
             up_valid, up_mtu_bytes, up_mtu_char = await self.test_upload_mtu_size(
                 domain, resolver, dns_port, self.max_upload_mtu
             )
 
+            valid_count = sum(1 for c in self.connections_map if c.get("is_valid"))
+            errors_count = server_id - valid_count
             if not up_valid or (
                 self.min_upload_mtu > 0 and up_mtu_bytes < self.min_upload_mtu
             ):
                 self.logger.warning(
-                    f"<red>❌ Connection invalid for <yellow>{domain}</yellow> via <yellow>{resolver}</yellow>: Upload MTU failed. <yellow>({server_id}/{total_conns})</yellow></red>"
+                    f"<red>❌ Upload test failed: Upload MTU <cyan>{up_mtu_bytes}</cyan> bytes via <cyan>{resolver}</cyan> for <cyan>{domain}</cyan> - (<green>V: {valid_count}</green> valid, <red>E: {errors_count}</red>, <yellow>{server_id} / {total_conns}</yellow>)</red>"
                 )
                 continue
 
@@ -631,7 +638,7 @@ class MasterDnsVPNClient:
                 self.min_download_mtu > 0 and down_mtu_bytes < self.min_download_mtu
             ):
                 self.logger.warning(
-                    f"<red>❌ Connection invalid for <yellow>{domain}</yellow> via <yellow>{resolver}</yellow>: Download MTU failed. <yellow>({server_id}/{total_conns})</yellow></red>"
+                    f"<red>❌ Download test failed: Download MTU <cyan>{down_mtu_bytes}</cyan> bytes via <cyan>{resolver}</cyan> for <cyan>{domain}</cyan> - (<green>V: {valid_count}</green> valid, <red>E: {errors_count}</red>, <yellow>{server_id} / {total_conns}</yellow>)</red>"
                 )
                 continue
 
@@ -642,9 +649,11 @@ class MasterDnsVPNClient:
             connection["download_mtu_bytes"] = down_mtu_bytes
             connection["packet_loss"] = 0
 
+            valid_count = sum(1 for c in self.connections_map if c.get("is_valid"))
+            errors_count = server_id - valid_count
             self.logger.success(
                 f"<green>✅ Valid: {domain} via <green>{resolver}</green> | "
-                f"Upload MTU: <cyan>{up_mtu_bytes}</cyan> | Download MTU: <cyan>{down_mtu_bytes}</cyan> <yellow>({server_id}/{total_conns})</yellow></green>"
+                f"Upload MTU: <cyan>{up_mtu_bytes}</cyan> | Download MTU: <cyan>{down_mtu_bytes}</cyan> - (<green>V: {valid_count}</green> valid, <red>E: {errors_count}</red>, <yellow>{server_id} / {total_conns}</yellow>)</green>"
             )
 
         valid_conns = [c for c in self.connections_map if c.get("is_valid")]
