@@ -19,11 +19,11 @@
 PROTOCOL_TYPE = "SOCKS5"
 
 # The domain name registered and pointing to your MasterDnsVPN server's NS records.
-DOMAIN = ["v.domain.com"]
+DOMAINS = ["v.domain.com"]
 
 # Encryption Method: 0=None, 1=XOR, 2=ChaCha20, 3=AES-128-GCM, 4=AES-192-GCM, 5=AES-256-GCM
 DATA_ENCRYPTION_METHOD = 1
-DATA_ENCRYPTION_KEY = "YourSecretKeyHere"
+ENCRYPTION_KEY = "YourSecretKeyHere"
 
 
 # ------------------------------------------------------------------------------
@@ -67,6 +67,13 @@ PACKET_DUPLICATION_COUNT = 3
 # Increase this value to allow more packets to be sent together, up to the maximum allowed by the MTU settings.
 # 1: Disables batching.
 MAX_PACKETS_PER_BATCH = 3
+
+# Strategy to balance load across multiple DNS resolvers.
+# Options:
+#   1 - Random: Randomly select a resolver for each query.
+#   2 - Round Robin: Cycle through resolvers in order.
+#   3 - Least Loss: Prefer resolvers with the lowest observed packet-loss rate.
+RESOLVER_BALANCING_STRATEGY = 1
 
 # ------------------------------------------------------------------------------
 # 4. MTU TESTING SETTINGS (Accuracy vs Speed)
