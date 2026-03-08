@@ -63,14 +63,14 @@ SOCKS5_PASS = "123456"
 # ------------------------------------------------------------------------------
 
 # Initial Retransmission TimeOut (RTO) in seconds for lost packets.
-# Suggested: 0.3 for low ping, 0.8 to 1.2 for high latency / high packet loss.
-ARQ_INITIAL_RTO = 0.8
+# Suggested: 0.3 for low ping, 1.0 to 5.0 for high latency / high packet loss.
+ARQ_INITIAL_RTO = 1.0
 
 # Maximum RTO caps the exponential backoff algorithm to prevent infinite growth.
-ARQ_MAX_RTO = 1.5
+ARQ_MAX_RTO = 3.0
 
-# ARQ window size. Suggested: 600. Lower it to 300 if the server has very low RAM.
-ARQ_WINDOW_SIZE = 600
+# ARQ window size. Suggested: 3000. Lower it to 300 if the server has very low RAM.
+ARQ_WINDOW_SIZE = 3000
 
 
 # ------------------------------------------------------------------------------

@@ -182,7 +182,7 @@ class MasterDnsVPNClient:
 
     def _send_ping_packet(self, payload=None):
         """Unified function to queue PING packets with lowest priority (4)."""
-        if self.count_ping >= 50:
+        if self.count_ping >= 100:
             return
 
         if self.session_restart_event and self.session_restart_event.is_set():

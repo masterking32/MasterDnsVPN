@@ -774,10 +774,10 @@ class MasterDnsVPNServer:
 
             try:
                 reader, writer = await asyncio.wait_for(
-                    _connect_and_handshake(), timeout=15.0
+                    _connect_and_handshake(), timeout=45.0
                 )
             except asyncio.TimeoutError:
-                raise ValueError("Connection to target timed out after 15 seconds")
+                raise ValueError("Connection to target timed out after 45 seconds")
 
             if stream_data.get("status") in ("CLOSING", "TIME_WAIT"):
                 writer.close()

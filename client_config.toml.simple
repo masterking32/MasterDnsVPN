@@ -63,10 +63,10 @@ RESOLVER_DNS_SERVERS = [
 PACKET_DUPLICATION_COUNT = 3
 
 # Maximum number of packets to batch together in a single DNS response.
-# Larger batches can improve efficiency but may increase latency and packet loss on unstable networks. Default value for client is 3.
+# Larger batches can improve efficiency but may increase latency and packet loss on unstable networks. Default value for client is 1.
 # Increase this value to allow more packets to be sent together, up to the maximum allowed by the MTU settings.
 # 1: Disables batching.
-MAX_PACKETS_PER_BATCH = 3
+MAX_PACKETS_PER_BATCH = 1
 
 # Strategy to balance load across multiple DNS resolvers.
 # Options:
@@ -112,12 +112,12 @@ MTU_TEST_TIMEOUT = 1.0
 MAX_CONNECTION_ATTEMPTS = 10
 
 # ARQ window size (number of unacknowledged packets allowed in flight).
-# Suggested: 600. Lower it to 300 if experiencing heavy network congestion.
-ARQ_WINDOW_SIZE = 600
+# Suggested: 3000. Lower it to 300 if the client has very low RAM.
+ARQ_WINDOW_SIZE = 3000
 
 # Retransmission TimeOut settings (Seconds)
-ARQ_INITIAL_RTO = 0.8
-ARQ_MAX_RTO = 1.5
+ARQ_INITIAL_RTO = 1.0
+ARQ_MAX_RTO = 3.0
 
 # Time (seconds) to wait for a DNS query response before considering it lost and retransmitting.
 DNS_QUERY_TIMEOUT = 5.0
