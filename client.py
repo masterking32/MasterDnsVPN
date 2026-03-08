@@ -63,6 +63,10 @@ class MasterDnsVPNClient:
         self.max_download_mtu: int = self.config.get("MAX_DOWNLOAD_MTU", 1200)
         self.min_upload_mtu: int = self.config.get("MIN_UPLOAD_MTU", 0)
         self.min_download_mtu: int = self.config.get("MIN_DOWNLOAD_MTU", 0)
+
+        self.mtu_test_retries: int = self.config.get("MTU_TEST_RETRIES", 2)
+        self.mtu_test_timeout: float = float(self.config.get("MTU_TEST_TIMEOUT", 1.0))
+
         self.encryption_method: int = self.config.get("DATA_ENCRYPTION_METHOD", 1)
 
         self.protocol_type: str = self.config.get("PROTOCOL_TYPE", "SOCKS5").upper()
@@ -308,7 +312,7 @@ class MasterDnsVPNClient:
             f"<cyan>[MTU]</cyan> Starting binary search for MTU. Range: {min_allowed}-{max_mtu}"
         )
 
-        for attempt in range(2):
+        for attempt in range(self.mtu_test_retries):
             if self.should_stop.is_set():
                 return 0
             if await test_callable(max_mtu, is_retry=(attempt > 0)):
@@ -326,7 +330,7 @@ class MasterDnsVPNClient:
             mid = (low + high) // 2
             ok = False
 
-            for attempt in range(2):
+            for attempt in range(self.mtu_test_retries):
                 if self.should_stop.is_set():
                     return 0
                 try:
@@ -379,7 +383,7 @@ class MasterDnsVPNClient:
             return False
 
         response = await self._send_and_receive_dns(
-            dns_queries[0], dns_server, dns_port, 1
+            dns_queries[0], dns_server, dns_port, self.mtu_test_timeout
         )
 
         if not response:
@@ -446,7 +450,7 @@ class MasterDnsVPNClient:
             return False
 
         response = await self._send_and_receive_dns(
-            dns_queries[0], dns_server, dns_port, 1
+            dns_queries[0], dns_server, dns_port, self.mtu_test_timeout
         )
 
         if not response:
