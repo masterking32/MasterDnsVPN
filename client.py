@@ -640,7 +640,7 @@ class MasterDnsVPNClient:
                 self.min_upload_mtu > 0 and up_mtu_bytes < self.min_upload_mtu
             ):
                 self.logger.warning(
-                    f"<red>❌ Upload test failed: Upload MTU <cyan>{up_mtu_bytes}</cyan> bytes via <cyan>{resolver}</cyan> for <cyan>{domain}</cyan> - (<green>V: {valid_count}</green> valid, <red>E: {errors_count}</red>, <yellow>{server_id} / {total_conns}</yellow>)</red>"
+                    f"<red>❌ Upload test failed: Upload MTU <cyan>{up_mtu_bytes}</cyan> bytes via <cyan>{resolver}</cyan> for <cyan>{domain}</cyan> - (<green>V: {valid_count}</green>, <red>E: {errors_count}</red>, <yellow>{server_id} / {total_conns}</yellow>)</red>"
                 )
                 continue
 
@@ -653,7 +653,7 @@ class MasterDnsVPNClient:
                 self.min_download_mtu > 0 and down_mtu_bytes < self.min_download_mtu
             ):
                 self.logger.warning(
-                    f"<red>❌ Download test failed: Download MTU <cyan>{down_mtu_bytes}</cyan> bytes via <cyan>{resolver}</cyan> for <cyan>{domain}</cyan> - (<green>V: {valid_count}</green> valid, <red>E: {errors_count}</red>, <yellow>{server_id} / {total_conns}</yellow>)</red>"
+                    f"<red>❌ Download test failed: Download MTU <cyan>{down_mtu_bytes}</cyan> bytes via <cyan>{resolver}</cyan> for <cyan>{domain}</cyan> - (<green>V: {valid_count}</green>, <red>E: {errors_count}</red>, <yellow>{server_id} / {total_conns}</yellow>)</red>"
                 )
                 continue
 
@@ -668,7 +668,7 @@ class MasterDnsVPNClient:
             errors_count = server_id - valid_count
             self.logger.success(
                 f"<green>✅ Valid: {domain} via <green>{resolver}</green> | "
-                f"Upload MTU: <cyan>{up_mtu_bytes}</cyan> | Download MTU: <cyan>{down_mtu_bytes}</cyan> - (<green>V: {valid_count}</green> valid, <red>E: {errors_count}</red>, <yellow>{server_id} / {total_conns}</yellow>)</green>"
+                f"Upload MTU: <cyan>{up_mtu_bytes}</cyan> | Download MTU: <cyan>{down_mtu_bytes}</cyan> - (<green>V: {valid_count}</green>, <red>E: {errors_count}</red>, <yellow>{server_id} / {total_conns}</yellow>)</green>"
             )
 
         valid_conns = [c for c in self.connections_map if c.get("is_valid")]
