@@ -61,6 +61,19 @@ class MasterDnsVPNServer:
         self.allowed_domains_lower = tuple(d.lower() for d in self.allowed_domains)
         self.encryption_method: int = self.config.get("DATA_ENCRYPTION_METHOD", 1)
 
+        self.protocol_type: str = self.config.get("PROTOCOL_TYPE", "TCP").upper()
+        self.use_external_socks5: bool = self.config.get("USE_EXTERNAL_SOCKS5", False)
+        self.socks5_auth: bool = self.config.get("SOCKS5_AUTH", False)
+        self.socks5_user: str = str(self.config.get("SOCKS5_USER", ""))
+        self.socks5_pass: str = str(self.config.get("SOCKS5_PASS", ""))
+
+        if self.protocol_type not in ("SOCKS5", "TCP"):
+            self.logger.error(
+                f"Invalid PROTOCOL_TYPE '{self.protocol_type}' in config. Must be 'SOCKS5' or 'TCP'."
+            )
+            input("Press Enter to exit...")
+            sys.exit(1)
+
         self.sessions = {}
         self._max_sessions = 255
         self.free_session_ids = deque(range(1, self._max_sessions + 1))
@@ -407,7 +420,89 @@ class MasterDnsVPNServer:
 
         elif packet_type == Packet_Type.STREAM_SYN:
             await self._handle_stream_syn(session_id, stream_id)
+        elif packet_type == Packet_Type.SOCKS5_SYN:
+            if stream_id in session.get("closed_streams", {}):
+                await self._server_enqueue_tx(
+                    session_id, 1, stream_id, 0, b"", is_fin=True
+                )
+            else:
+                stream_data = streams.get(stream_id)
+                if not stream_data:
+                    now = time.monotonic()
+                    stream_data = {
+                        "stream_id": stream_id,
+                        "created_at": now,
+                        "last_activity": now,
+                        "status": "SOCKS_HANDSHAKE",
+                        "arq_obj": None,
+                        "tx_queue": [],
+                        "count_ack": 0,
+                        "count_fin": 0,
+                        "count_syn_ack": 0,
+                        "count_data": 0,
+                        "count_resend": 0,
+                        "track_ack": set(),
+                        "track_fin": set(),
+                        "track_syn_ack": set(),
+                        "track_data": set(),
+                        "track_resend": set(),
+                        "socks_chunks": {},
+                    }
+                    streams[stream_id] = stream_data
 
+                stream_data["last_activity"] = now_mono
+
+                if stream_data["status"] == "CONNECTED":
+                    await self._server_enqueue_tx(
+                        session_id, 1, stream_id, sn, b"", is_ack=True
+                    )
+                    await self._server_enqueue_tx(
+                        session_id, 2, stream_id, 0, b"", is_socks_syn_ack=True
+                    )
+
+                elif stream_data["status"] == "SOCKS_CONNECTING":
+                    await self._server_enqueue_tx(
+                        session_id, 1, stream_id, sn, b"", is_ack=True
+                    )
+
+                elif stream_data["status"] == "SOCKS_HANDSHAKE":
+                    extracted_data = self.dns_parser.extract_vpn_data_from_labels(
+                        labels
+                    )
+                    if extracted_data:
+                        stream_data["socks_chunks"][sn] = extracted_data
+
+                    await self._server_enqueue_tx(
+                        session_id, 1, stream_id, sn, b"", is_ack=True
+                    )
+
+                    chunks = stream_data["socks_chunks"]
+
+                    parts = []
+                    for i in range(len(chunks)):
+                        if i in chunks:
+                            parts.append(chunks[i])
+                        else:
+                            break
+                    assembled = b"".join(parts)
+
+                    if len(assembled) >= 1:
+                        atyp = assembled[0]
+                        expected_len = -1
+                        if atyp == 0x01:
+                            expected_len = 1 + 4 + 2  # IPv4
+                        elif atyp == 0x03 and len(assembled) >= 2:
+                            expected_len = 1 + 1 + assembled[1] + 2  # Domain
+                        elif atyp == 0x04:
+                            expected_len = 1 + 16 + 2  # IPv6
+
+                        if expected_len != -1 and len(assembled) >= expected_len:
+                            stream_data["status"] = "SOCKS_CONNECTING"
+                            self.loop.create_task(
+                                self._process_socks5_target(
+                                    session_id, stream_id, assembled[:expected_len]
+                                )
+                            )
         elif packet_type == Packet_Type.STREAM_FIN:
             stream_data = streams.get(stream_id)
             if stream_data:
@@ -417,12 +512,11 @@ class MasterDnsVPNServer:
         elif packet_type == Packet_Type.PACKED_CONTROL_BLOCKS:
             extracted_data = self.dns_parser.extract_vpn_data_from_labels(labels)
             if extracted_data:
+                _unpack_from = struct.unpack_from
                 for i in range(0, len(extracted_data), 5):
                     if i + 5 > len(extracted_data):
                         break
-                    b_ptype, b_stream_id, b_sn = struct.unpack(
-                        ">BHH", extracted_data[i : i + 5]
-                    )
+                    b_ptype, b_stream_id, b_sn = _unpack_from(">BHH", extracted_data, i)
                     if b_ptype == Packet_Type.STREAM_DATA_ACK:
                         stream_data = streams.get(b_stream_id)
                         if stream_data and stream_data.get("status") == "CONNECTED":
@@ -441,9 +535,11 @@ class MasterDnsVPNServer:
         selected_stream_data = None
 
         main_queue = session.get("main_queue")
-        active_streams = [
-            sid for sid, sdata in streams.items() if sdata.get("tx_queue")
-        ]
+
+        active_streams = []
+        for sid in list(streams.keys()):
+            if streams[sid].get("tx_queue"):
+                active_streams.append(sid)
 
         if active_streams:
             num_active = len(active_streams)
@@ -518,7 +614,7 @@ class MasterDnsVPNServer:
             )
 
             if (
-                res_ptype == Packet_Type.STREAM_DATA_ACK
+                res_ptype in (Packet_Type.STREAM_DATA_ACK, Packet_Type.SOCKS5_SYN_ACK)
                 and session.get("max_packed_blocks", 1) > 1
             ):
                 _pack = struct.pack
@@ -535,19 +631,25 @@ class MasterDnsVPNServer:
                     for offset in range(num_active):
                         if blocks >= max_blocks:
                             break
-
                         idx = (start_idx + offset) % num_active
                         sid = active_streams[idx]
                         sdata = streams[sid]
                         t_queue = sdata["tx_queue"]
 
-                        while (
-                            sdata["count_ack"] > 0 and t_queue and blocks < max_blocks
-                        ):
-                            if t_queue[0][2] == Packet_Type.STREAM_DATA_ACK:
+                        while sdata["count_syn_ack"] > 0 or sdata["count_ack"] > 0:
+                            if not t_queue or blocks >= max_blocks:
+                                break
+                            if t_queue[0][2] in (
+                                Packet_Type.STREAM_DATA_ACK,
+                                Packet_Type.SOCKS5_SYN_ACK,
+                            ):
                                 popped = heapq.heappop(t_queue)
-                                sdata["track_ack"].discard(popped[4])
-                                sdata["count_ack"] -= 1
+                                if popped[2] == Packet_Type.STREAM_DATA_ACK:
+                                    sdata["track_ack"].discard(popped[4])
+                                    sdata["count_ack"] -= 1
+                                else:
+                                    sdata["track_syn_ack"].discard(popped[2])
+                                    sdata["count_syn_ack"] -= 1
                                 packed_buffer.extend(
                                     _pack(">BHH", popped[2], popped[3], popped[4])
                                 )
@@ -576,6 +678,146 @@ class MasterDnsVPNServer:
             stream_id=res_stream_id,
             sequence_num=res_sn,
         )
+
+    async def _process_socks5_target(self, session_id, stream_id, target_payload):
+        session = self.sessions.get(session_id)
+        if not session:
+            return
+        stream_data = session.get("streams", {}).get(stream_id)
+        if not stream_data:
+            return
+
+        try:
+            atyp = target_payload[0]
+            offset = 1
+            if atyp == 0x01:
+                target_ip = socket.inet_ntoa(target_payload[offset : offset + 4])
+                offset += 4
+            elif atyp == 0x03:
+                dlen = target_payload[offset]
+                offset += 1
+                target_ip = target_payload[offset : offset + dlen].decode("utf-8")
+                offset += dlen
+            elif atyp == 0x04:
+                target_ip = socket.inet_ntop(
+                    socket.AF_INET6, target_payload[offset : offset + 16]
+                )
+                offset += 16
+
+            target_port = struct.unpack(">H", target_payload[offset : offset + 2])[0]
+
+            async def _connect_and_handshake():
+                if getattr(self, "use_external_socks5", False):
+                    self.logger.info(
+                        f"<green>Forwarding to External SOCKS5 <blue>{self.forward_ip}:{self.forward_port}</blue> for target <cyan>{target_ip}:{target_port}</cyan> (Stream {stream_id})</green>"
+                    )
+                    c_reader, c_writer = await asyncio.open_connection(
+                        self.forward_ip, self.forward_port
+                    )
+
+                    if self.socks5_auth:
+                        c_writer.write(b"\x05\x01\x02")
+                    else:
+                        c_writer.write(b"\x05\x01\x00")
+                    await c_writer.drain()
+
+                    greeting_res = await c_reader.readexactly(2)
+                    if greeting_res[0] != 0x05:
+                        raise ValueError("Upstream proxy is not a valid SOCKS5 server")
+
+                    if self.socks5_auth and greeting_res[1] == 0x02:
+                        u_bytes = self.socks5_user.encode("utf-8")
+                        p_bytes = self.socks5_pass.encode("utf-8")
+                        auth_req = (
+                            b"\x01"
+                            + bytes([len(u_bytes)])
+                            + u_bytes
+                            + bytes([len(p_bytes)])
+                            + p_bytes
+                        )
+                        c_writer.write(auth_req)
+                        await c_writer.drain()
+
+                        auth_res = await c_reader.readexactly(2)
+                        if auth_res[1] != 0x00:
+                            raise ValueError("External SOCKS5 Authentication failed!")
+                    elif greeting_res[1] != 0x00:
+                        raise ValueError(
+                            "External SOCKS5 requires unsupported authentication method"
+                        )
+
+                    conn_req = b"\x05\x01\x00" + target_payload
+                    c_writer.write(conn_req)
+                    await c_writer.drain()
+
+                    resp_header = await c_reader.readexactly(4)
+                    if resp_header[0] != 0x05 or resp_header[1] != 0x00:
+                        raise ValueError(
+                            f"External SOCKS5 failed to connect to target. Code: {resp_header[1]}"
+                        )
+
+                    bnd_atyp = resp_header[3]
+                    if bnd_atyp == 0x01:
+                        await c_reader.readexactly(6)
+                    elif bnd_atyp == 0x03:
+                        dlen = await c_reader.readexactly(1)
+                        await c_reader.readexactly(dlen[0] + 2)
+                    elif bnd_atyp == 0x04:
+                        await c_reader.readexactly(18)
+
+                    return c_reader, c_writer
+                else:
+                    self.logger.info(
+                        f"<green>SOCKS5 Fast-Connecting directly to <blue>{target_ip}:{target_port}</blue> for stream <cyan>{stream_id}</cyan></green>"
+                    )
+                    return await asyncio.open_connection(target_ip, target_port)
+
+            try:
+                reader, writer = await asyncio.wait_for(
+                    _connect_and_handshake(), timeout=15.0
+                )
+            except asyncio.TimeoutError:
+                raise ValueError("Connection to target timed out after 15 seconds")
+
+            if stream_data.get("status") in ("CLOSING", "TIME_WAIT"):
+                writer.close()
+                await writer.wait_closed()
+                self.logger.debug(
+                    f"<yellow>Stream {stream_id} was closed by client during connection phase. Aborting to prevent zombies.</yellow>"
+                )
+                return
+
+            arq = ARQ(
+                stream_id=stream_id,
+                session_id=session_id,
+                enqueue_tx_cb=lambda p, sid, sn, d, **kw: self._server_enqueue_tx(
+                    session_id, p, sid, sn, d, **kw
+                ),
+                reader=reader,
+                writer=writer,
+                mtu=session.get("download_mtu", 50),
+                logger=self.logger,
+                window_size=self.arq_window_size,
+                rto=float(self.config.get("ARQ_INITIAL_RTO", 0.8)),
+                max_rto=float(self.config.get("ARQ_MAX_RTO", 1.5)),
+            )
+
+            arq.rcv_nxt = max(stream_data["socks_chunks"].keys()) + 1
+
+            stream_data["arq_obj"] = arq
+            stream_data["status"] = "CONNECTED"
+
+            await self._server_enqueue_tx(
+                session_id, 2, stream_id, 0, b"", is_socks_syn_ack=True
+            )
+
+        except Exception as e:
+            self.logger.error(
+                f"<red>SOCKS5 target connection failed for stream {stream_id}: {e}</red>"
+            )
+            await self.close_stream(
+                session_id, stream_id, reason=f"SOCKS target unreachable: {e}"
+            )
 
     async def handle_single_request(self, data, addr):
         """Handle a single DNS request efficiently."""
@@ -885,6 +1127,7 @@ class MasterDnsVPNServer:
         is_ack=False,
         is_fin=False,
         is_syn_ack=False,
+        is_socks_syn_ack=False,
         is_resend=False,
     ):
         session = self.sessions.get(session_id)
@@ -903,6 +1146,9 @@ class MasterDnsVPNServer:
         elif is_syn_ack:
             ptype = Packet_Type.STREAM_SYN_ACK
             eff_priority = 0
+        elif is_socks_syn_ack:
+            ptype = Packet_Type.SOCKS5_SYN_ACK
+            eff_priority = 0
         elif is_resend:
             ptype = Packet_Type.STREAM_RESEND
             eff_priority = 1
@@ -919,35 +1165,30 @@ class MasterDnsVPNServer:
                     return
                 session["track_resend"].add(sn)
                 session["count_resend"] += 1
-
             elif ptype in (
                 Packet_Type.STREAM_FIN,
                 Packet_Type.STREAM_SYN,
                 Packet_Type.STREAM_SYN_ACK,
+                Packet_Type.SOCKS5_SYN_ACK,
             ):
                 if ptype in session["track_types"]:
                     return
                 session["track_types"].add(ptype)
-
             elif ptype == Packet_Type.STREAM_DATA_ACK:
                 if sn in session["track_ack"]:
                     return
                 session["track_ack"].add(sn)
                 session["count_ack"] += 1
-
             elif ptype == Packet_Type.STREAM_DATA:
                 if sn in session.setdefault("track_data", set()):
                     return
                 session["track_data"].add(sn)
                 session["count_data"] += 1
-
             heapq.heappush(session["main_queue"], queue_item)
-
         else:
             stream_data = session.get("streams", {}).get(stream_id)
             if not stream_data:
                 return
-
             if is_resend:
                 if sn in stream_data["track_data"]:
                     return
@@ -955,25 +1196,21 @@ class MasterDnsVPNServer:
                     return
                 stream_data["track_resend"].add(sn)
                 stream_data["count_resend"] += 1
-
             elif ptype == Packet_Type.STREAM_FIN:
                 if ptype in stream_data["track_fin"]:
                     return
                 stream_data["track_fin"].add(ptype)
                 stream_data["count_fin"] += 1
-
-            elif ptype == Packet_Type.STREAM_SYN_ACK:
+            elif ptype in (Packet_Type.STREAM_SYN_ACK, Packet_Type.SOCKS5_SYN_ACK):
                 if ptype in stream_data["track_syn_ack"]:
                     return
                 stream_data["track_syn_ack"].add(ptype)
                 stream_data["count_syn_ack"] += 1
-
             elif ptype == Packet_Type.STREAM_DATA_ACK:
                 if sn in stream_data["track_ack"]:
                     return
                 stream_data["track_ack"].add(sn)
                 stream_data["count_ack"] += 1
-
             elif ptype == Packet_Type.STREAM_DATA:
                 if sn in stream_data["track_data"]:
                     return
@@ -1050,14 +1287,16 @@ class MasterDnsVPNServer:
                 session_id, 2, stream_id, 0, syn_data, is_syn_ack=True
             )
             self.logger.info(
-                f"<green>Stream <cyan>{stream_id}</cyan> connected to Forward Target: <blue>{self.forward_ip}:{self.forward_port}</blue></green>"
+                f"<green>Stream <cyan>{stream_id}</cyan> connected to Forward Target: <blue>{self.forward_ip}:{self.forward_port}</blue> for Session <cyan>{session_id}</cyan></green>"
             )
         except Exception as e:
             self.logger.error(
-                f"<red>Failed to connect to forward target for stream <cyan>{stream_id}</cyan>: {e}</red>"
+                f"<red>Failed to connect to forward target for stream <cyan>{stream_id}</cyan> for Session <cyan>{session_id}</cyan>: {e}</red>"
             )
             await self.close_stream(
-                session_id, stream_id, reason=f"Connection Error: {e}"
+                session_id,
+                stream_id,
+                reason=f"Connection Error: {e}, Session {session_id}, Stream {stream_id}",
             )
 
     async def _server_retransmit_loop(self):
@@ -1071,7 +1310,10 @@ class MasterDnsVPNServer:
                     if not streams:
                         continue
 
-                    for sid, stream_data in list(streams.items()):
+                    for sid in list(streams.keys()):
+                        stream_data = streams.get(sid)
+                        if not stream_data:
+                            continue
                         status = stream_data.get("status")
                         last_act = stream_data.get("last_activity", now)
                         close_time = stream_data.get("close_time", now)
@@ -1092,7 +1334,10 @@ class MasterDnsVPNServer:
                                 )
 
                     closed_ids = []
-                    for sid, stream_data in streams.items():
+                    for sid in list(streams.keys()):
+                        stream_data = streams.get(sid)
+                        if not stream_data:
+                            continue
                         arq_obj = stream_data.get("arq_obj")
                         if (
                             arq_obj
@@ -1120,7 +1365,10 @@ class MasterDnsVPNServer:
                                 f"Error closing stream {sid} during retransmit check: {e}"
                             )
 
-                    for sid, stream_data in list(streams.items()):
+                    for sid in list(streams.keys()):
+                        stream_data = streams.get(sid)
+                        if not stream_data:
+                            continue
                         arq_obj = stream_data.get("arq_obj")
                         if arq_obj:
                             try:

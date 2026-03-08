@@ -29,6 +29,8 @@ class Packet_Type:
     PACKED_CONTROL_BLOCKS = (
         0x11  # Client/Server sends multiple control blocks in one DNS response
     )
+    SOCKS5_SYN = 0x12  # Client initiates SOCKS5 handshake
+    SOCKS5_SYN_ACK = 0x13  # Server acknowledges SOCKS5 handshake
     ERROR_DROP = 0xFF  # Invalid/Drop signal
 
 

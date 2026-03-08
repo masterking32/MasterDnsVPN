@@ -1,145 +1,103 @@
+# ==============================================================================
 # MasterDnsVPN Client Configuration File
-# ----------------------------------------
-# Author: MasterkinG32
-# Github: https://github.com/masterking32
+# Author: MasterkinG32 (Github: https://github.com/masterking32)
 # Year: 2026
-#
-# Place this file in the same directory as the client executable.
-# After modifying this file, restart the client to apply changes.
+# ==============================================================================
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-# Logging level for client output.
+# ------------------------------------------------------------------------------
+# 1. CORE TUNNEL & PROTOCOL SETTINGS (MOST IMPORTANT)
+# ------------------------------------------------------------------------------
+
+# PROTOCOL_TYPE defines the language between the client and the server.
 # Options:
-#   DEBUG    - Detailed information, useful for debugging.
-#   INFO     - General operational messages.
-#   WARNING  - Indications of possible issues.
-#   ERROR    - Errors that prevent some operations.
-#   CRITICAL - Severe errors causing shutdown.
-LOG_LEVEL = "INFO"
+#   "SOCKS5" - Highly Recommended! Uses our heavily optimized, 0-RTT custom implementation.
+#              It drops the SOCKS5 overhead, drastically saves bandwidth, and reduces latency.
+#              Best for normal web browsing, Telegram, and general proxy usage.
+#   "TCP"    - Blindly forwards raw TCP data without touching it. Use this ONLY if you 
+#              want to tunnel other protocols like VLESS, VMess, Shadowsocks, OpenVPN, 
+#              or SSH directly over the DNS tunnel.
+PROTOCOL_TYPE = "SOCKS5"
 
-# ---------------------------------------------------------------------------
-# DNS Resolver Servers
-# ---------------------------------------------------------------------------
-# DNS servers that client queries will be forwarded to.
-# Recommendations:
-#   - Use fast, reliable public DNS servers (e.g., Google, Cloudflare) or your own.
-#   - Check upload/download MTU values in client logs after the first run.
-#   - Remove resolvers that show poor performance or high latency.
-RESOLVER_DNS_SERVERS = [
-    "8.8.8.8",
-    # "1.1.1.1",
-]
+# The domain name registered and pointing to your MasterDnsVPN server's NS records.
+DOMAIN = ["v.domain.com"]
 
-# ---------------------------------------------------------------------------
-# MTU Settings
-# ---------------------------------------------------------------------------
-# Minimum MTU thresholds for resolver selection.
-# If a resolver's upload or download MTU is below these values, it will be excluded.
-# Set to 0 to disable minimum MTU checks.
-MIN_UPLOAD_MTU = 70
-MIN_DOWNLOAD_MTU = 70
-
-# Maximum size of data packets sent to the server.
-MAX_UPLOAD_MTU = 200
-# Maximum size of data packets received from the server.
-MAX_DOWNLOAD_MTU = 500
-
-# ---------------------------------------------------------------------------
-# Tunnel Domains
-# ---------------------------------------------------------------------------
-# Domains used for DNS tunneling.
-# These domains must be controlled by you and configured to point to this server.
-# Add multiple domains for redundancy or load balancing.
-DOMAINS = [
-    "t.example.com",
-    # "b.example.com",
-]
-
-# ---------------------------------------------------------------------------
-# Encryption
-# ---------------------------------------------------------------------------
-# Data encryption method.
-# IMPORTANT: This MUST match the server's DATA_ENCRYPTION_METHOD!
-# Options:
-#   0 - No encryption (NOT recommended)
-#   1 - XOR encryption (default, fast, basic security)
-#   2 - ChaCha20 encryption (stronger, slower, larger packets)
-#   3 - AES-128-GCM encryption (strong, slower, larger packets)
-#   4 - AES-192-GCM encryption (strong, slower, larger packets)
-#   5 - AES-256-GCM encryption (strongest, slowest, largest packets)
+# Encryption Method: 0=None, 1=XOR, 2=ChaCha20, 3=AES-128-GCM, 4=AES-192-GCM, 5=AES-256-GCM
 DATA_ENCRYPTION_METHOD = 1
+DATA_ENCRYPTION_KEY = "YourSecretKeyHere"
 
-# Encryption key used to encrypt and decrypt all tunneled data.
-# - Run the server first; it will generate and display the key in the logs.
-# - Copy that key here to ensure the client and server use the same key.
-# - If you change this key, the server config must also be updated.
-ENCRYPTION_KEY = ""
 
-# ---------------------------------------------------------------------------
-# Load Balancing
-# ---------------------------------------------------------------------------
-# Strategy to balance load across multiple DNS resolvers.
-# Options:
-#   1 - Random: Randomly select a resolver for each query.
-#   2 - Round Robin: Cycle through resolvers in order.
-#   3 - Least Loss: Prefer resolvers with the lowest observed packet-loss rate.
-RESOLVER_BALANCING_STRATEGY = 1
+# ------------------------------------------------------------------------------
+# 2. LOCAL LISTENER & AUTHENTICATION (Client-Side Proxy)
+# ------------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# Connection Settings
-# ---------------------------------------------------------------------------
-# IP address and port on which the client listens for local connections.
+# The IP and Port where this client will listen for incoming local connections
+# (e.g., from your browser, Telegram, or other apps on your PC/Phone).
 LISTEN_IP = "127.0.0.1"
 LISTEN_PORT = 1080
 
-# Number of times each packet is duplicated before sending.
-# 1 = no duplication; higher values improve reliability at the cost of bandwidth.
-# Increase this if you experience packet loss, especially on unstable networks.
-# WARNING: Setting this too high can significantly increase bandwidth usage, LAN and server load.
+# LOCAL SOCKS5 AUTHENTICATION (Only applies if PROTOCOL_TYPE = "SOCKS5")
+# IMPORTANT: This authentication is STRICTLY LOCAL! It has absolutely nothing to do 
+# with the remote server. Enable this ONLY if you are sharing this proxy on your 
+# local network (LAN) and want to restrict who can connect to your local client.
+SOCKS5_AUTH = true
+SOCKS5_USER = "master_dns_vpn"
+SOCKS5_PASS = "master_dns_vpn"
+
+
+# ------------------------------------------------------------------------------
+# 3. DNS RESOLVER SETTINGS
+# ------------------------------------------------------------------------------
+
+# DNS servers that client queries will be forwarded to.
+# Recommendations:
+#   - Stable connection: Use Cloudflare ["1.1.1.1"] or Google ["8.8.8.8"]
+#   - Highly filtered networks: Try local ISP DNS servers or lesser-known ones.
+RESOLVER_DNS_SERVERS = [
+    "8.8.8.8",
+    "1.1.1.1"
+]
+
+# Maximum number of packets to duplicate and send for each DNS query to improve reliability on unstable networks.
+# Increase this value to improve reliability on highly unstable networks, but be aware it will increase bandwidth usage.
+# For example, setting PACKET_DUPLICATION_COUNT = 5 means each packet will be sent 5 times in a row to 5 different DNS resolvers, and the server will accept the first valid response it receives, ignoring duplicates.
 PACKET_DUPLICATION_COUNT = 3
 
 # Maximum number of packets to batch together in a single DNS response.
 # Larger batches can improve efficiency but may increase latency and packet loss on unstable networks. Default value for client is 3.
+# Increase this value to allow more packets to be sent together, up to the maximum allowed by the MTU settings.
+# 1: Disables batching.
 MAX_PACKETS_PER_BATCH = 3
 
-# Initial Retransmission TimeOut (RTO) in seconds for lost packets.
-# - Lower values (e.g., 0.2 or 0.3) provide faster recovery on low-ping connections.
-# - Higher values (e.g., 0.5 to 0.8) are better for high-latency or unstable remote servers.
-ARQ_INITIAL_RTO = 0.8
+# ------------------------------------------------------------------------------
+# 4. RELIABILITY & RETRY SETTINGS (ARQ)
+# ------------------------------------------------------------------------------
 
-# Maximum Retransmission TimeOut in seconds.
-# This caps the exponential backoff algorithm to prevent the timeout from growing infinitely during severe network drops.
-ARQ_MAX_RTO = 1.5
-
-# Maximum time (in seconds) the client waits for a DNS response.
-DNS_QUERY_TIMEOUT = 5
-
-# ---------------------------------------------------------------------------
-# Advanced Connection & Retry Settings
-# ---------------------------------------------------------------------------
-# Maximum number of attempts the client will make to establish a session and sync MTU.
-# - Increase this value to 20 or 30 if your internet connection is highly unstable or heavily filtered.
+# Maximum attempts the client makes to establish a session.
+# Suggested: 10 for normal use, 20-30 for extreme packet loss (90%+ drop rate).
 MAX_CONNECTION_ATTEMPTS = 10
 
-# ---------------------------------------------------------------------------
-# Performance & Worker Settings
-# ---------------------------------------------------------------------------
-# Number of asynchronous workers dedicated to receiving incoming packets (RX).
-# - Setting this to 1 might create a bottleneck on high-speed connections.
-# - Recommended to set between 2 and 4 to handle heavy incoming traffic smoothly.
-NUM_RX_WORKERS = 2
+# ARQ window size (number of unacknowledged packets allowed in flight).
+# Suggested: 600. Lower it to 300 if experiencing heavy network congestion.
+ARQ_WINDOW_SIZE = 600
 
-# Number of concurrent DNS worker tasks.
-# Increase for high-traffic clients; start with 3 and adjust as needed.
+# Retransmission TimeOut settings (Seconds)
+ARQ_INITIAL_RTO = 0.8
+ARQ_MAX_RTO = 1.5
+
+# Time (seconds) to wait for a DNS query response before considering it lost and retransmitting.
+DNS_QUERY_TIMEOUT = 5.0
+
+# ------------------------------------------------------------------------------
+# 5. SYSTEM PERFORMANCE & WORKERS
+# ------------------------------------------------------------------------------
+
+# Number of asynchronous workers. 
+# Recommended: RX=2, DNS=3. Increase for high-speed connections.
+NUM_RX_WORKERS = 2
 NUM_DNS_WORKERS = 3
 
-# UDP socket buffer size in bytes (Receive and Send).
-# The default is 8MB (8388608 bytes) to prevent packet loss at the OS level.
-# - Reduce this only if you are running the client on a weak device (like a low-end router or Raspberry Pi).
+# UDP socket buffer size. Default: 8MB (8388608). Prevents OS-level packet drops.
 SOCKET_BUFFER_SIZE = 8388608
 
-# ARQ window size (number of unacknowledged packets allowed in flight).
-# Larger window sizes can improve performance on high-latency connections but may increase memory usage.
-ARQ_WINDOW_SIZE = 600
+# Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+LOG_LEVEL = "INFO"

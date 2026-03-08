@@ -29,6 +29,8 @@ class DnsPacketParser:
             Packet_Type.STREAM_RESEND,
             Packet_Type.MTU_UP_REQ,
             Packet_Type.MTU_DOWN_RES,
+            Packet_Type.SOCKS5_SYN,
+            Packet_Type.SOCKS5_SYN_ACK,
         }
     )
     _PT_SEQ_EXT = frozenset(
@@ -38,6 +40,7 @@ class DnsPacketParser:
             Packet_Type.STREAM_RESEND,
             Packet_Type.MTU_UP_REQ,
             Packet_Type.MTU_DOWN_RES,
+            Packet_Type.SOCKS5_SYN,
         }
     )
     _PT_FRAG_EXT = frozenset(
@@ -46,6 +49,7 @@ class DnsPacketParser:
             Packet_Type.STREAM_RESEND,
             Packet_Type.MTU_UP_REQ,
             Packet_Type.MTU_DOWN_RES,
+            Packet_Type.SOCKS5_SYN,
         }
     )
 

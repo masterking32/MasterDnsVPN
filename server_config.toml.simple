@@ -1,121 +1,93 @@
+# ==============================================================================
 # MasterDnsVPN Server Configuration File
-# ----------------------------------------
-# Author: MasterkinG32
-# Github: https://github.com/masterking32
+# Author: MasterkinG32 (Github: https://github.com/masterking32)
 # Year: 2026
-#
-# Place this file in the same directory as the server executable.
-# Changes to this file require a server restart to take effect.
+# ==============================================================================
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-# Logging level for server output.
-# Options:
-#   DEBUG    - Detailed information, useful for debugging.
-#   INFO     - General operational messages.
-#   WARNING  - Indications of possible issues.
-#   ERROR    - Errors that prevent some operations.
-#   CRITICAL - Severe errors causing shutdown.
-LOG_LEVEL = "INFO"
+# ------------------------------------------------------------------------------
+# 1. CORE SERVER SETTINGS & DNS LISTENER
+# ------------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# Network
-# ---------------------------------------------------------------------------
-# UDP server listening address.
-# Set to "0.0.0.0" to listen on all interfaces, or specify a particular IP.
-UDP_HOST = "0.0.0.0"
+# The interface and port where the VPN server listens for incoming DNS queries.
+# Note: For production, the port MUST be 53.
+LISTEN_IP = "0.0.0.0"
+LISTEN_PORT = 53
 
-# UDP server listening port.
-# Standard DNS port is 53. Change if running as non-root or for testing.
-UDP_PORT = 53
+# The domain names that this server handles (Must match the NS records).
+DOMAIN = ["v.domain.com"]
 
-# ---------------------------------------------------------------------------
-# Tunnel Domains
-# ---------------------------------------------------------------------------
-# Domains used for DNS tunneling.
-# Configure these domains to resolve (via NS record) to this server's IP address.
-# Shorter domain names leave more room for data payloads in each DNS packet.
-DOMAIN = [
-    "t.example.com",
-    # "b.example.com",
-]
-
-# ---------------------------------------------------------------------------
-# Encryption
-# ---------------------------------------------------------------------------
-# Data encryption method.
+# Encryption Method: 0=None, 1=XOR, 2=ChaCha20, 3=AES-128-GCM, 4=AES-192-GCM, 5=AES-256-GCM
 # IMPORTANT: This MUST match the client's DATA_ENCRYPTION_METHOD!
-# Options:
-#   0 - No encryption (not recommended)
-#   1 - XOR encryption (default, fast, basic security)
-#   2 - ChaCha20 encryption (stronger, slower, larger packets)
-#   3 - AES-128-GCM encryption (strong, slower, larger packets)
-#   4 - AES-192-GCM encryption (strong, slower, larger packets)
-#   5 - AES-256-GCM encryption (strongest, slowest, largest packets)
+# Choose a method based on your security needs and performance requirements. 
+# XOR is fast but weak (RECOMMENDED for most users). AES-256-GCM is very secure but may increase latency and CPU usage.
 DATA_ENCRYPTION_METHOD = 1
+DATA_ENCRYPTION_KEY = "YourSecretKeyHere"
 
-# Encryption Key
-# The server auto-generates a random key on first run and saves it to
-# "encrypt_key.txt" in the same directory as the server executable.
-# The key is also printed in the server log at startup.
-# Copy this key into the client's ENCRYPTION_KEY setting.
-# To rotate the key, delete "encrypt_key.txt" and restart the server
-# (all clients must then be updated with the new key).
 
-# ---------------------------------------------------------------------------
-# Traffic Forwarding
-# ---------------------------------------------------------------------------
-# IP address and port to which the server forwards decrypted traffic.
-# Set this to your local proxy or service that handles the tunneled traffic.
-# Example: if you have a local SOCKS5 proxy on port 1080, set FORWARD_PORT = 1080.
+# ------------------------------------------------------------------------------
+# 2. PROTOCOL & PROXY CHAINING SETTINGS
+# ------------------------------------------------------------------------------
+
+# Must match the client's PROTOCOL_TYPE! ("SOCKS5" or "TCP")
+# SOCKS5 is optimized (RECOMMENDED for most users)
+# TCP is used for blind forwarding (e.g., tunneling VLESS/SSH). 
+PROTOCOL_TYPE = "SOCKS5"
+
+# USE_EXTERNAL_SOCKS5 controls the exit-node behavior when PROTOCOL_TYPE="SOCKS5":
+# 
+#   - false (Internal SOCKS): The python server acts as the proxy itself. It dynamically 
+#     connects directly to the target requested by the client (Fastest, Zero-Overhead).
+#     * IMPORTANT: If false, FORWARD_IP, FORWARD_PORT, and SOCKS5_AUTH are completely IGNORED!
+#
+#   - true (External SOCKS): Proxy Chaining! The server connects to an external proxy 
+#     (like Xray, Tor, or Dante) running on FORWARD_IP:FORWARD_PORT, and authenticates
+#     using SOCKS5_USER and SOCKS5_PASS if SOCKS5_AUTH is true.
+#
+#    * Recommended Setup: For best performance and compatibility, set PROTOCOL_TYPE="SOCKS5" and USE_EXTERNAL_SOCKS5=false.
+USE_EXTERNAL_SOCKS5 = false
+
+# IP and Port of the Upstream Proxy (Used ONLY if USE_EXTERNAL_SOCKS5=true OR PROTOCOL_TYPE="TCP")
+# Usually points to a local Xray/V2ray or Dante server on the same machine.
 FORWARD_IP = "127.0.0.1"
-FORWARD_PORT = 8080
+FORWARD_PORT = 1080
 
-# ---------------------------------------------------------------------------
-# Session Management
-# ---------------------------------------------------------------------------
-# Duration of inactivity (seconds) after which a session is considered expired.
-SESSION_TIMEOUT = 300  # 5 minutes
+# External SOCKS5 Authentication (Used ONLY if USE_EXTERNAL_SOCKS5=true)
+# Provide credentials if your upstream proxy requires authentication.
+SOCKS5_AUTH = false
+SOCKS5_USER = "admin"
+SOCKS5_PASS = "123456"
 
-# Frequency (seconds) at which the server checks for and removes expired sessions.
-SESSION_CLEANUP_INTERVAL = 60  # 1 minute
 
-# ---------------------------------------------------------------------------
-# ARQ (Automatic Repeat reQuest) Settings
-# ---------------------------------------------------------------------------
-# ARQ window size (number of unacknowledged packets allowed in flight).
-# Larger window sizes can improve performance on high-latency connections but may increase memory usage.
-ARQ_WINDOW_SIZE = 600
+# ------------------------------------------------------------------------------
+# 3. ADVANCED ARQ & TIMEOUT SETTINGS
+# ------------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# Performance & Resource Management
-# ---------------------------------------------------------------------------
-# Maximum number of concurrent DNS requests the server will process simultaneously.
-# - If your server has strong CPU and RAM (e.g., Dedicated Server), you can increase this to 5000.
-# - If you are using a cheap or Micro VPS, keep this between 500 and 1000 to prevent memory exhaustion.
-MAX_CONCURRENT_REQUESTS = 1000
-
-# UDP socket buffer size in bytes (Receive and Send).
-# The default is 8MB (8388608 bytes), which is excellent for preventing packet drops under heavy load.
-# - Reduce this to 2MB (2097152) or 4MB (4194304) only if your server has extremely low RAM.
-SOCKET_BUFFER_SIZE = 8388608
-
-# ---------------------------------------------------------------------------
-# ARQ (Automatic Repeat reQuest) Advanced Settings
-# ---------------------------------------------------------------------------
 # Initial Retransmission TimeOut (RTO) in seconds for lost packets.
-# - Lower values (e.g., 0.2 or 0.3) provide faster recovery on low-ping connections.
-# - Higher values (e.g., 0.5 to 0.8) are better for high-latency or unstable remote servers.
+# Suggested: 0.3 for low ping, 0.8 to 1.2 for high latency / high packet loss.
 ARQ_INITIAL_RTO = 0.8
 
-# Maximum Retransmission TimeOut in seconds.
-# This caps the exponential backoff algorithm to prevent the timeout from growing infinitely during severe network drops.
+# Maximum RTO caps the exponential backoff algorithm to prevent infinite growth.
 ARQ_MAX_RTO = 1.5
 
-# ---------------------------------------------------------------------------
-# Batch Packet Size
-# ---------------------------------------------------------------------------
-# Maximum number of packets to batch together in a single DNS response.
-# Larger batches can improve efficiency but may increase latency and packet loss on unstable networks. Default value for server is 20.
+# ARQ window size. Suggested: 600. Lower it to 300 if the server has very low RAM.
+ARQ_WINDOW_SIZE = 600
+
+
+# ------------------------------------------------------------------------------
+# 4. SYSTEM LIMITS & PERFORMANCE
+# ------------------------------------------------------------------------------
+
+# Maximum concurrent DNS requests the server will process simultaneously.
+# Suggested: 5000 for strong servers, 1000 for Micro VPS to prevent memory exhaustion.
+MAX_CONCURRENT_REQUESTS = 1000
+
+# Maximum packets processed per batch in the background loop.
+# Suggested: 10 to 20. Balances CPU usage vs processing latency.
+# 1: Disables batching.
 MAX_PACKETS_PER_BATCH = 20
+
+# UDP socket buffer size. Default: 8MB (8388608). Prevents packet drops under load.
+SOCKET_BUFFER_SIZE = 8388608
+
+# Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+LOG_LEVEL = "INFO"

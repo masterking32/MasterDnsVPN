@@ -1,8 +1,7 @@
-# MasterDnsVPN Server
+# MasterDnsVPN Client
 # Author: MasterkinG32
 # Github: https://github.com/masterking32
 # Year: 2026
-
 
 import asyncio
 import ctypes
@@ -16,7 +15,7 @@ import time
 from ctypes import wintypes
 from typing import Optional, Tuple
 
-from dns_utils import ARQ
+from dns_utils import ARQ, PrependReader
 from dns_utils.config_loader import get_config_path, load_config
 from dns_utils.DNS_ENUMS import DNS_Record_Type, Packet_Type
 from dns_utils import DNSBalancer
@@ -65,6 +64,18 @@ class MasterDnsVPNClient:
         self.min_upload_mtu: int = self.config.get("MIN_UPLOAD_MTU", 0)
         self.min_download_mtu: int = self.config.get("MIN_DOWNLOAD_MTU", 0)
         self.encryption_method: int = self.config.get("DATA_ENCRYPTION_METHOD", 1)
+
+        self.protocol_type: str = self.config.get("PROTOCOL_TYPE", "SOCKS5").upper()
+        self.socks5_auth: bool = self.config.get("SOCKS5_AUTH", False)
+        self.socks5_user: str = str(self.config.get("SOCKS5_USER", ""))
+        self.socks5_pass: str = str(self.config.get("SOCKS5_PASS", ""))
+
+        if self.protocol_type not in ("SOCKS5", "TCP"):
+            self.logger.error(
+                f"Invalid PROTOCOL_TYPE '{self.protocol_type}' in config. Must be 'SOCKS5' or 'TCP'."
+            )
+            input("Press Enter to exit...")
+            sys.exit(1)
 
         self.crypto_overhead = 0
         if self.encryption_method == 2:
@@ -568,7 +579,7 @@ class MasterDnsVPNClient:
                     f"   Domain: <yellow>{d}</yellow> -> "
                     f"MIN and MAX_UPLOAD_MTU = <green>{optimal_up_mtu}</green> | "
                     f"MIN and MAX_DOWNLOAD_MTU = <green>{optimal_down_mtu}</green> | "
-                    f"MAX_PACKETS_PER_BATCH = <green>3</green>"
+                    f"MAX_PACKETS_PER_BATCH = <green>{self.max_packets_per_batch}</green>"
                 )
 
             self.logger.info(
@@ -846,7 +857,6 @@ class MasterDnsVPNClient:
         self.main_queue = []
         self.tx_event = asyncio.Event()
         self.round_robin_index = 0
-        self.enqueue_seq = 0
         self.last_stream_id = 0
 
         self.count_ack = 0
@@ -896,7 +906,7 @@ class MasterDnsVPNClient:
                     1,
                     min(
                         remaining_mtu_space // 5,
-                        self.config.get("MAX_PACKETS_PER_BATCH", 10),
+                        self.config.get("MAX_PACKETS_PER_BATCH", 3),
                     ),
                 )  # Each block is 5 bytes (1 byte type + 2 bytes stream ID + 2 bytes seq num)
 
@@ -1192,6 +1202,140 @@ class MasterDnsVPNClient:
             await self._close_writer_safely(writer)
             return
 
+        target_payload = b""
+        is_socks5 = False
+
+        # -------------------------------------------------------------------
+        # SOCKS5 HANDSHAKE LOGIC
+        # -------------------------------------------------------------------
+        if self.protocol_type == "SOCKS5":
+            try:
+                # 1. Greeting
+                try:
+                    greeting = await asyncio.wait_for(
+                        reader.readexactly(2), timeout=3.0
+                    )
+                except asyncio.TimeoutError:
+                    await self._close_writer_safely(writer)
+                    return
+
+                if greeting[0] != 0x05:
+                    await self._close_writer_safely(writer)
+                    return
+                num_methods = greeting[1]
+                methods = await reader.readexactly(num_methods)
+                client_IP = "Unknown"
+                try:
+                    client_IP = writer.get_extra_info("peername")[0]
+                except Exception:
+                    pass
+                # Auth Negotiation
+                if getattr(self, "socks5_auth", False):
+                    if 0x02 not in methods:  # 0x02 is Username/Password
+                        self.logger.warning(
+                            f"<yellow>🔒 SOCKS5 Client does not support required Username/Password authentication method. Rejecting connection. IP: <cyan>{client_IP}</cyan></yellow>"
+                        )
+                        writer.write(b"\x05\xff")  # No acceptable methods
+                        await writer.drain()
+                        await self._close_writer_safely(writer)
+                        return
+                    writer.write(b"\x05\x02")
+                    await writer.drain()
+
+                    # Read Auth Request
+                    auth_version = await reader.readexactly(1)
+                    if auth_version[0] != 0x01:
+                        await self._close_writer_safely(writer)
+                        return
+
+                    ulast = await reader.readexactly(1)
+                    uname = await reader.readexactly(ulast[0])
+
+                    plast = await reader.readexactly(1)
+                    passwd = await reader.readexactly(plast[0])
+
+                    if (
+                        uname.decode() != self.socks5_user
+                        or passwd.decode() != self.socks5_pass
+                    ):
+                        writer.write(b"\x01\x01")  # Auth failed
+                        await writer.drain()
+                        self.logger.warning(
+                            f"<yellow>🔒 SOCKS5 Auth failed for user: <cyan>{uname.decode()}</cyan> from IP: <cyan>{client_IP}</cyan></yellow>"
+                        )
+                        await self._close_writer_safely(writer)
+                        return
+
+                    writer.write(b"\x01\x00")  # Auth success
+                    await writer.drain()
+                    self.logger.info(
+                        f"<green>🔓 SOCKS5 Auth successful for user: <cyan>{uname.decode()}</cyan> from IP: <cyan>{client_IP}</cyan></green>"
+                    )
+                    is_socks5 = True
+                else:
+                    if 0x00 not in methods:  # 0x00 is No Auth
+                        writer.write(b"\x05\xff")
+                        await writer.drain()
+                        await self._close_writer_safely(writer)
+                        return
+                    writer.write(b"\x05\x00")
+                    await writer.drain()
+
+                # 2. Connection Request
+                req_header = await reader.readexactly(4)
+                # VER(1), CMD(1), RSV(1), ATYP(1)
+                if req_header[0] != 0x05:
+                    await self._close_writer_safely(writer)
+                    return
+
+                cmd = req_header[1]
+                # We only support TCP CONNECT (0x01)
+                if cmd != 0x01:
+                    if cmd == 0x03:
+                        self.logger.debug(
+                            "<yellow>SOCKS5 UDP Associate requested. Rejecting gracefully (Not Supported).</yellow>"
+                        )
+                    writer.write(
+                        b"\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00"
+                    )  # Command not supported
+                    await writer.drain()
+                    await self._close_writer_safely(writer)
+                    return
+
+                atyp = req_header[3]
+                target_addr_bytes = b""
+                if atyp == 0x01:  # IPv4
+                    target_addr_bytes = await reader.readexactly(4)
+                elif atyp == 0x03:  # Domain
+                    dlen = await reader.readexactly(1)
+                    target_addr_bytes = dlen + await reader.readexactly(dlen[0])
+                elif atyp == 0x04:  # IPv6
+                    target_addr_bytes = await reader.readexactly(16)
+                else:
+                    await self._close_writer_safely(writer)
+                    return
+
+                target_port_bytes = await reader.readexactly(2)
+
+                # Format:  [ATYP] [ADDR_BYTES] [PORT_BYTES]
+                target_payload = bytes([atyp]) + target_addr_bytes + target_port_bytes
+
+                # Send SOCKS5 Success Reply
+                reply = b"\x05\x00\x00"  # VER, REP=0(success), RSV
+                if atyp == 0x01:  # IPv4
+                    reply += b"\x01" + target_addr_bytes + target_port_bytes
+                elif atyp == 0x03:  # Domain
+                    reply += b"\x03" + target_addr_bytes + target_port_bytes
+                elif atyp == 0x04:  # IPv6
+                    reply += b"\x04" + target_addr_bytes + target_port_bytes
+                writer.write(reply)
+                await writer.drain()
+
+            except Exception as e:
+                self.logger.debug(f"SOCKS5 Handshake error: {e}")
+                await self._close_writer_safely(writer)
+                return
+
         stream_id_status, stream_id = self._new_get_stream_id()
         if not stream_id_status:
             self.logger.error(
@@ -1205,7 +1349,6 @@ class MasterDnsVPNClient:
         )
 
         now_mono = time.monotonic()
-
         syn_data = b"SY:" + os.urandom(4)
 
         self.active_streams[stream_id] = {
@@ -1217,6 +1360,7 @@ class MasterDnsVPNClient:
             "stream": None,
             "stream_creating": False,
             "tx_queue": [],
+            "initial_payload": target_payload,
             "count_ack": 0,
             "count_data": 0,
             "count_resend": 0,
@@ -1229,16 +1373,53 @@ class MasterDnsVPNClient:
             "track_data": set(),
         }
 
-        self.enqueue_seq = (self.enqueue_seq + 1) & 0x7FFFFFFF
+        if not is_socks5:
+            self.enqueue_seq = (self.enqueue_seq + 1) & 0x7FFFFFFF
 
-        heapq.heappush(
-            self.active_streams[stream_id]["tx_queue"],
-            (0, self.enqueue_seq, Packet_Type.STREAM_SYN, stream_id, 0, syn_data),
+            heapq.heappush(
+                self.active_streams[stream_id]["tx_queue"],
+                (0, self.enqueue_seq, Packet_Type.STREAM_SYN, stream_id, 0, syn_data),
+            )
+            self.tx_event.set()
+        else:
+            await self._stream_syn_handler(stream_id, target_payload, reader, writer)
+
+    async def _stream_syn_handler(
+        self, stream_id: int, target_payload: bytes, reader, writer
+    ):
+        stream_data = self.active_streams[stream_id]
+        stream_data["status"] = "ACTIVE"
+
+        stream = ARQ(
+            stream_id=stream_id,
+            session_id=self.session_id,
+            enqueue_tx_cb=self._client_enqueue_tx,
+            reader=reader,
+            writer=writer,
+            mtu=self.safe_uplink_mtu,
+            logger=self.logger,
+            window_size=self.config.get("ARQ_WINDOW_SIZE", 600),
+            rto=float(self.config.get("ARQ_INITIAL_RTO", 0.8)),
+            max_rto=float(self.config.get("ARQ_MAX_RTO", 1.5)),
+            is_socks=True,
+            initial_data=target_payload,
         )
-        self.tx_event.set()
+        stream_data["stream"] = stream
+        self.logger.info(
+            f"<green>SOCKS5 Stream <cyan>{stream_id}</cyan> Created and queued SOCKS5_SYN chunks.</green>"
+        )
+        self._send_ping_packet()
 
     async def _client_enqueue_tx(
-        self, priority, stream_id, sn, data, is_ack=False, is_fin=False, is_resend=False
+        self,
+        priority,
+        stream_id,
+        sn,
+        data,
+        is_ack=False,
+        is_fin=False,
+        is_resend=False,
+        is_socks_syn=False,
     ):
         if self.should_stop.is_set() or (
             self.session_restart_event and self.session_restart_event.is_set()
@@ -1248,7 +1429,10 @@ class MasterDnsVPNClient:
         ptype = Packet_Type.STREAM_DATA
         effective_priority = priority
 
-        if is_ack:
+        if is_socks_syn:
+            ptype = Packet_Type.SOCKS5_SYN
+            effective_priority = priority
+        elif is_ack:
             ptype = Packet_Type.STREAM_DATA_ACK
             effective_priority = 0
         elif is_fin:
@@ -1325,7 +1509,7 @@ class MasterDnsVPNClient:
                 stream_data["track_ack"].add(sn)
                 stream_data["count_ack"] += 1
 
-            elif ptype == Packet_Type.STREAM_DATA:
+            elif ptype in (Packet_Type.STREAM_DATA, Packet_Type.SOCKS5_SYN):
                 if sn in stream_data["track_data"]:
                     return
                 stream_data["track_data"].add(sn)
@@ -1350,8 +1534,9 @@ class MasterDnsVPNClient:
 
             active_sids = []
             _append = active_sids.append
-            for sid, s in list(self.active_streams.items()):
-                if s["tx_queue"]:
+            for sid in list(self.active_streams.keys()):
+                s = self.active_streams.get(sid)
+                if s and s.get("tx_queue"):
                     _append(sid)
 
             if active_sids:
@@ -1403,7 +1588,7 @@ class MasterDnsVPNClient:
                         if self.count_ping > 0:
                             self.count_ping -= 1
                 else:
-                    if q_ptype == Packet_Type.STREAM_DATA:
+                    if q_ptype in (Packet_Type.STREAM_DATA, Packet_Type.SOCKS5_SYN):
                         selected_stream_data["track_data"].discard(q_sn)
                         if selected_stream_data["count_data"] > 0:
                             selected_stream_data["count_data"] -= 1
@@ -1579,13 +1764,16 @@ class MasterDnsVPNClient:
 
             try:
                 stream_data["status"] = "ACTIVE"
-                reader = stream_data["reader"]
+
+                raw_reader = stream_data["reader"]
+                initial_payload = stream_data.get("initial_payload", b"")
+                wrapped_reader = PrependReader(raw_reader, initial_payload)
 
                 stream = ARQ(
                     stream_id=stream_id,
                     session_id=self.session_id,
                     enqueue_tx_cb=self._client_enqueue_tx,
-                    reader=reader,
+                    reader=wrapped_reader,
                     writer=writer,
                     mtu=self.safe_uplink_mtu,
                     logger=self.logger,
@@ -1601,7 +1789,18 @@ class MasterDnsVPNClient:
             finally:
                 stream_data.pop("stream_creating", None)
                 self._send_ping_packet()
-
+        elif ptype == Packet_Type.SOCKS5_SYN_ACK and stream_id_exists:
+            stream_obj = self.active_streams[stream_id].get("stream")
+            if (
+                stream_obj
+                and hasattr(stream_obj, "socks_connected")
+                and not stream_obj.socks_connected.is_set()
+            ):
+                stream_obj.socks_connected.set()
+                self.logger.info(
+                    f"<green>Socks5 Stream <cyan>{stream_id}</cyan> connection established.</green>"
+                )
+            self._send_ping_packet()
         elif (
             ptype in (Packet_Type.STREAM_DATA, Packet_Type.STREAM_RESEND)
             and stream_id_exists
@@ -1621,10 +1820,11 @@ class MasterDnsVPNClient:
             self.active_streams[stream_id]["fin_retries"] = 99
             await self.close_stream(stream_id, reason="Server sent FIN")
         elif ptype == Packet_Type.PACKED_CONTROL_BLOCKS and data:
+            _unpack_from = struct.unpack_from
             for i in range(0, len(data), 5):
                 if i + 5 > len(data):
                     break
-                b_ptype, b_stream_id, b_sn = struct.unpack(">BHH", data[i : i + 5])
+                b_ptype, b_stream_id, b_sn = _unpack_from(">BHH", data, i)
 
                 if (
                     b_ptype == Packet_Type.STREAM_DATA_ACK
@@ -1633,6 +1833,20 @@ class MasterDnsVPNClient:
                     stream_obj = self.active_streams[b_stream_id].get("stream")
                     if stream_obj:
                         await stream_obj.receive_ack(b_sn)
+                elif (
+                    b_ptype == Packet_Type.SOCKS5_SYN_ACK
+                    and b_stream_id in self.active_streams
+                ):
+                    stream_obj = self.active_streams[b_stream_id].get("stream")
+                    if (
+                        stream_obj
+                        and hasattr(stream_obj, "socks_connected")
+                        and not stream_obj.socks_connected.is_set()
+                    ):
+                        stream_obj.socks_connected.set()
+                        self.logger.info(
+                            f"<green>Socks5 Stream <cyan>{b_stream_id}</cyan> connection established.</green>"
+                        )
             self._send_ping_packet()
         elif ptype == Packet_Type.ERROR_DROP:
             if not self.session_restart_event.is_set():

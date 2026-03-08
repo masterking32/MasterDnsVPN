@@ -36,6 +36,8 @@ class ARQ:
         window_size: int = 600,
         rto: float = 0.8,
         max_rto: float = 1.5,
+        is_socks: bool = False,
+        initial_data: bytes = b"",
     ):
         self.stream_id = stream_id
         self.session_id = session_id
@@ -62,6 +64,12 @@ class ARQ:
         self.limit = max(50, int(self.window_size * 0.8))
         self.window_not_full = asyncio.Event()
         self.window_not_full.set()
+
+        self.is_socks = is_socks
+        self.initial_data = initial_data
+        self.socks_connected = asyncio.Event()
+        if not self.is_socks:
+            self.socks_connected.set()
 
         try:
             sock = writer.get_extra_info("socket")
@@ -91,6 +99,26 @@ class ARQ:
         _limit = self.limit
 
         try:
+            if self.is_socks and self.initial_data:
+                offset = 0
+                total_len = len(self.initial_data)
+                while offset < total_len:
+                    chunk = self.initial_data[offset : offset + _mtu]
+                    sn = self.snd_nxt
+                    self.snd_nxt = (sn + 1) % 65536
+
+                    self.snd_buf[sn] = {
+                        "data": chunk,
+                        "time": _monotonic(),
+                        "retries": 0,
+                        "current_rto": self.rto,
+                        "is_socks_syn": True,
+                    }
+                    await _enqueue(3, self.stream_id, sn, chunk, is_socks_syn=True)
+                    offset += _mtu
+
+            await self.socks_connected.wait()
+
             while not self.closed:
                 await self.window_not_full.wait()
 
@@ -116,6 +144,7 @@ class ARQ:
                     "time": self.last_activity,
                     "retries": 0,
                     "current_rto": self.rto,
+                    "is_socks_syn": False,
                 }
 
                 if len(self.snd_buf) >= _limit:
@@ -216,17 +245,25 @@ class ARQ:
         items_to_resend = []
         _append = items_to_resend.append
 
-        for sn, info in list(self.snd_buf.items()):
+        for sn in list(self.snd_buf.keys()):
+            info = self.snd_buf.get(sn)
+            if not info:
+                continue
+
             if now - info["time"] >= info["current_rto"]:
-                _append((sn, info["data"]))
+                _append((sn, info["data"], info.get("is_socks_syn", False)))
                 info["time"] = now
                 info["retries"] += 1
                 info["current_rto"] = min(self.max_rto, info["current_rto"] * 1.5)
 
         _enqueue = self.enqueue_tx
         _sid = self.stream_id
-        for sn, data in items_to_resend:
-            await _enqueue(1, _sid, sn, data, is_resend=True)
+
+        for sn, data, is_socks_syn in items_to_resend:
+            if is_socks_syn:
+                await _enqueue(1, _sid, sn, data, is_socks_syn=True)
+            else:
+                await _enqueue(1, _sid, sn, data, is_resend=True)
 
     async def close(self, reason="Unknown"):
         if self.closed:
