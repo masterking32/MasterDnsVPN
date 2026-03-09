@@ -377,8 +377,8 @@ sudo ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
 ```mermaid
 graph TD
     subgraph Client_Side ["🖥️ سیستم کاربر (Client)"]
-        App["📱 برنامه‌ها\n(مرورگر، تلگرام و...)"]
-        Client["🐍 کلاینت MasterDnsVPN\n(پروکسی SOCKS5/TCP)"]
+        App["📱 برنامه‌ها (مرورگر، تلگرام و...)"]
+        Client["🐍 کلاینت MasterDnsVPN<br>(پروکسی SOCKS5/TCP)"]
     end
 
     subgraph DNS_Network ["🌐 شبکه عمومی DNS"]
@@ -388,22 +388,22 @@ graph TD
     end
 
     subgraph Server_Side ["🖥️ سرور خارج از کشور (Server)"]
-        Server["🐍 سرور MasterDnsVPN\n(دریافت‌کننده روی پورت ۵۳)"]
-        Target["🌐 اینترنت آزاد\n(یا پروکسی خارجی)"]
+        Server["🐍 سرور MasterDnsVPN<br>(دریافت‌کننده روی پورت ۵۳)"]
+        Target["🌐 اینترنت آزاد<br>(یا پروکسی خارجی)"]
     end
 
     App -->|"ترافیک TCP"| Client
-    Client -->|"کوئری DNS TXT\n(رمزنگاری + قطعه‌بندی)"| R1
-    Client -->|"کوئری DNS TXT\n(تکثیر پکت)"| R2
-    Client -->|"کوئری DNS TXT\n(توزیع بار)"| RN
+    Client -->|"کوئری DNS TXT<br>(رمزنگاری + قطعه‌بندی)"| R1
+    Client -->|"کوئری DNS TXT<br>(تکثیر پکت)"| R2
+    Client -->|"کوئری DNS TXT<br>(توزیع بار)"| RN
 
     R1 -->|"فوروارد به NS سرور"| Server
     R2 -->|"فوروارد به NS سرور"| Server
     RN -->|"فوروارد به NS سرور"| Server
 
-    Server -->|"بازسازی پکت‌ها (ARQ)\nارسال به مقصد"| Target
+    Server -->|"بازسازی پکت‌ها (ARQ)<br>ارسال به مقصد"| Target
     Target -->|"پاسخ مقصد"| Server
-    Server -->|"پاسخ DNS TXT\n(رمزنگاری‌شده)"| R1
+    Server -->|"پاسخ DNS TXT<br>(رمزنگاری‌شده)"| R1
     R1 -->|"پاسخ DNS"| Client
     Client -->|"تحویل دیتای سالم"| App
 ```
