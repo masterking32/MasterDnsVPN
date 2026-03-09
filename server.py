@@ -901,20 +901,20 @@ class MasterDnsVPNServer:
         handle_req = self.handle_single_request
         semaphore = self.max_concurrent_requests
 
-        async def _task_wrapper(d, a):
-            async with semaphore:
-                await handle_req(d, a)
-
         while not self.should_stop.is_set():
             try:
                 data, addr = await async_recvfrom(loop, sock, 65536)
-
                 if len(data) < 12:
                     continue
 
-                task = loop.create_task(_task_wrapper(data, addr))
+                await semaphore.acquire()
+
+                task = loop.create_task(handle_req(data, addr))
                 bg_tasks.add(task)
-                task.add_done_callback(bg_tasks.discard)
+
+                task.add_done_callback(
+                    lambda t: (bg_tasks.discard(t), semaphore.release())
+                )
 
             except asyncio.CancelledError:
                 break

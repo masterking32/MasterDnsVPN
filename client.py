@@ -126,6 +126,7 @@ class MasterDnsVPNClient:
         self.domains_lower: tuple = tuple(d.lower() for d in self.domains)
         self.main_queue = []
         self.tx_event = asyncio.Event()
+        self.rx_semaphore = asyncio.Semaphore(200)
 
         self.logger.debug("<magenta>[INIT]</magenta> MasterDnsVPNClient initialized.")
 
@@ -1160,12 +1161,14 @@ class MasterDnsVPNClient:
         while not self.should_stop.is_set() and not self.session_restart_event.is_set():
             try:
                 data, addr = await async_recvfrom(self.loop, self.tunnel_sock, 65536)
-
+                await self.rx_semaphore.acquire()
                 task = self.loop.create_task(
                     self._process_and_route_incoming(data, addr)
                 )
                 self.rx_tasks.add(task)
-                task.add_done_callback(self.rx_tasks.discard)
+                task.add_done_callback(
+                    lambda t: (self.rx_tasks.discard(t), self.rx_semaphore.release())
+                )
 
             except asyncio.CancelledError:
                 break
@@ -1901,7 +1904,8 @@ class MasterDnsVPNClient:
         pending_tx = stream_data.get("tx_queue", [])
         if pending_tx:
             for item in pending_tx:
-                heapq.heappush(self.main_queue, item)
+                if item[2] in (Packet_Type.STREAM_FIN, Packet_Type.STREAM_DATA_ACK):
+                    heapq.heappush(self.main_queue, item)
             self.tx_event.set()
 
         try:
@@ -2069,6 +2073,9 @@ def main():
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+
+        if sys.platform == "win32":
+            loop.run_forever = lambda: loop.run_until_complete(asyncio.sleep(3600 * 24))
 
         def custom_exception_handler(loop, context):
             msg = context.get("message", "")
