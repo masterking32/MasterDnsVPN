@@ -1548,15 +1548,7 @@ def main():
             except Exception:
                 pass
 
-        try:
-            loop.run_until_complete(server.start())
-        except KeyboardInterrupt:
-            try:
-                server._signal_handler(signal.SIGINT, None)
-            except Exception:
-                pass
-            print("\nServer stopped by user (Ctrl+C). Goodbye!")
-            return
+        # On Windows, register a Console Ctrl Handler early so Ctrl+C is handled
         if sys.platform == "win32":
             try:
                 HandlerRoutine = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
@@ -1573,6 +1565,16 @@ def main():
                 ctypes.windll.kernel32.SetConsoleCtrlHandler(c_handler, True)
             except Exception:
                 pass
+
+        try:
+            loop.run_until_complete(server.start())
+        except KeyboardInterrupt:
+            try:
+                server._signal_handler(signal.SIGINT, None)
+            except Exception:
+                pass
+            print("\nServer stopped by user (Ctrl+C). Goodbye!")
+            return
     except KeyboardInterrupt:
         print("\nServer stopped by user (Ctrl+C). Goodbye!")
     except Exception as e:
