@@ -915,8 +915,8 @@ class MasterDnsVPNClient:
                     ),
                 )  # Each block is 5 bytes (1 byte type + 2 bytes stream ID + 2 bytes seq num)
 
-                max_founded_upload_mtu = max(c["upload_mtu_bytes"] for c in valid_conns)
-                max_founded_download_mtu = max(
+                max_found_upload_mtu = max(c["upload_mtu_bytes"] for c in valid_conns)
+                max_found_download_mtu = max(
                     c["download_mtu_bytes"] for c in valid_conns
                 )
 
@@ -946,7 +946,7 @@ class MasterDnsVPNClient:
 
                 self.logger.info("=" * 80)
                 self.logger.info(
-                    f"<cyan>[MTU RESULTS]</cyan> Max Upload MTU found: <yellow>{max_founded_upload_mtu}</yellow> | Max Download MTU found: <yellow>{max_founded_download_mtu}</yellow>"
+                    f"<cyan>[MTU RESULTS]</cyan> Max Upload MTU found: <yellow>{max_found_upload_mtu}</yellow> | Max Download MTU found: <yellow>{max_found_download_mtu}</yellow>"
                 )
                 self.logger.info(
                     f"<cyan>[MTU RESULTS]</cyan> Selected Synced Upload MTU: <yellow>{self.synced_upload_mtu}</yellow> | Selected Synced Download MTU: <yellow>{self.synced_download_mtu}</yellow>"
