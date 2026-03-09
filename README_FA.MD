@@ -78,7 +78,7 @@
 اگر قصد دارید سرور را روی یک سیستم لینوکسی راه‌اندازی کنید، ساده‌ترین راه استفاده از اسکریپت نصب خودکار است. کافی است دستور زیر را در ترمینال سرور وارد کنید:
 
 ```bash
-curl -sL [https://raw.githubusercontent.com/masterking32/MasterDnsVPN/main/server_linux_install.sh](https://raw.githubusercontent.com/masterking32/MasterDnsVPN/main/server_linux_install.sh) | sudo bash
+curl -sL https://raw.githubusercontent.com/masterking32/MasterDnsVPN/main/server_linux_install.sh | sudo bash
 ```
 
 این دستور یک اسکریپت را از مخزن گیت‌هاب دانلود کرده و تمام مراحل نصب و تنظیم سرور را به‌صورت خودکار انجام می‌دهد. پس از پایان نصب، سرور اجرا شده و یک **کلید رمزنگاری (Encryption Key)** در لاگ ترمینال به شما نمایش داده می‌شود. این کلید را حتماً کپی کنید، زیرا برای اتصال کلاینت به آن نیاز خواهید داشت.
@@ -171,7 +171,7 @@ nano client_config.toml
 
 ```bash
 # کلون کردن مخزن پروژه و نصب پیش‌نیازها
-git clone [https://github.com/masterking32/MasterDnsVPN.git](https://github.com/masterking32/MasterDnsVPN.git)
+git clone https://github.com/masterking32/MasterDnsVPN.git
 cd MasterDnsVPN
 pip install -r requirements.txt
 
@@ -242,6 +242,8 @@ python client.py
 | `NUM_DNS_WORKERS` | `3` | عدد صحیح (مثلاً `1` یا `3` یا `5`) | تعداد کارگرهای (Workers) DNS که مسئول ارسال کوئری‌های DNS و پردازش پاسخ‌ها هستند. افزایش این مقدار می‌تواند در شبکه‌های با ترافیک بالا یا تاخیر زیاد مفید باشد، اما مصرف منابع را نیز افزایش می‌دهد. |
 | `SOCKET_BUFFER_SIZE` | `8388608` | عدد صحیح (بایت) | اندازه بافر سوکت UDP. این مقدار تعیین می‌کند که چقدر داده می‌تواند در بافر سوکت ذخیره شود قبل از اینکه سیستم عامل شروع به رد کردن بسته‌ها کند. افزایش این مقدار در شبکه‌های با ترافیک بالا یا تاخیر زیاد توصیه می‌شود، اما توجه داشته باشید که مقادیر بسیار بالا ممکن است باعث مصرف بیش از حد حافظه شود. |
 | `LOG_LEVEL` | `"INFO"` | `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`, `"CRITICAL"` | سطح لاگ‌گیری برای کلاینت. تنظیم این مقدار به `DEBUG` می‌تواند در هنگام عیب‌یابی مفید باشد، اما ممکن است حجم زیادی از لاگ‌ها را تولید کند. برای استفاده روزمره، `INFO` یا `WARNING` معمولاً کافی است. |
+
+
 
 
 # فایل آموزش درحال بروز رسانی است، لطفا طی 1-2 ساعت آینده مجددا مراجعه کنید.
