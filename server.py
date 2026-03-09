@@ -219,7 +219,7 @@ class MasterDnsVPNServer:
         )
 
     def _touch_session(self, session_id: int) -> None:
-        """Update a session's last activity flatly and fast."""
+        """Update a session's last activity timestamp."""
         try:
             session = self.sessions.get(session_id)
             if session:
@@ -997,7 +997,7 @@ class MasterDnsVPNServer:
         session_id=None,
         extracted_header=None,
     ) -> Optional[bytes]:
-        """Handle SERVER_UPLOAD_TEST VPN packet."""
+        """Handle MTU_DOWN_REQ (download MTU test) VPN packet."""
 
         dot_idx = labels.find(".")
         if dot_idx <= 0:
