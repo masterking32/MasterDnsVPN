@@ -69,39 +69,127 @@
 
 ---
 
-## 📦 نیازمندی‌ها
+## بخش ۲: نصب و راه‌اندازی (کلاینت و سرور) 🚀
 
-- 🐍 پایتون 3.7 یا بالاتر
-- 🔐 بستهٔ `cryptography` (برای روش‌های AES/ChaCha20 الزامی)
-- 📝 بستهٔ `loguru` (برای لاگ‌گیری پیشرفته)
+شما می‌توانید این پروژه را به دو روش نصب و اجرا کنید. روش اول استفاده از فایل‌های از پیش آماده شده است (که بسیار سریع‌تر و راحت‌تر است) و روش دوم اجرای مستقیم از روی سورس‌کد است.
+
+### گام ۲.۱: استفاده از نسخه‌های کامپایل‌شده (روش پیشنهادی ✅)
+برای راحتی هرچه بیشتر شما، فایل‌های اجرایی از قبل کامپایل‌شده برای سیستم‌عامل‌ها و معماری‌های مختلف آماده شده‌اند. کافی است نسخهٔ مناسب با سیستم‌عامل خود را دانلود کرده و فایل را از حالت فشرده خارج کنید.
+
+> **نکتهٔ مهم:** 💡 هر فایل فشرده (ZIP) کلاینت، شامل فایل اجرایی کلاینت و یک فایل قالب به‌نام `client_config.toml` است. به همین ترتیب، فایل‌های سرور نیز شامل فایل اجرایی سرور و قالب `server_config.toml` هستند.
+
+#### لینک‌های دانلود کلاینت (Client) 📥
+
+| سیستم‌عامل (OS) | پردازنده (Architecture) | مناسب برای سیستم‌های... | لینک دانلود مستقیم |
+| :--- | :--- | :--- | :--- |
+| ویندوز (Windows) 🪟 | `AMD64` (64-bit) | ویندوز ۱۰ و ۱۱ | [دانلود نسخه ویندوز ⬇️](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Windows_AMD64.zip) |
+| مک‌اواس (macOS) 🍎 | `ARM64` | مک‌های جدید (سری M1 / M2 / M3) | [دانلود نسخه مک (Apple Silicon) ⬇️](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_MacOS_ARM64.zip) |
+| لینوکس (Linux) 🐧 | `AMD64` (64-bit) | توزیع‌های جدید (اوبونتو ۲۲.۰۴+، دبیان ۱۲+) | [دانلود نسخه لینوکس (جدید) ⬇️](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Linux_AMD64.zip) |
+| لینوکس (Legacy) 🐧 | `AMD64` (64-bit) | توزیع‌های قدیمی (اوبونتو ۲۰.۰۴، دبیان ۱۱) | [دانلود نسخه لینوکس (سازگاری بالا) ⬇️](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Linux-Legacy_AMD64.zip) |
+| لینوکس (ARM) 🐧 | `ARM64` | سرورهای ARM، رزبری‌پای و بردهای مشابه | [دانلود نسخه لینوکس (ARM) ⬇️](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Linux_ARM64.zip) |
+
+#### لینک‌های دانلود سرور (Server) 📤
+
+| سیستم‌عامل (OS) | پردازنده (Architecture) | مناسب برای سیستم‌های... | لینک دانلود مستقیم |
+| :--- | :--- | :--- | :--- |
+| ویندوز (Windows) 🪟 | `AMD64` (64-bit) | ویندوز سرور، ویندوز ۱۰ و ۱۱ | [دانلود سرور ویندوز ⬇️](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Windows_AMD64.zip) |
+| لینوکس (Linux) 🐧 | `AMD64` (64-bit) | سرورهای اوبونتو ۲۲.۰۴+، دبیان ۱۲+ | [دانلود سرور لینوکس (جدید) ⬇️](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Linux_AMD64.zip) |
+| لینوکس (Legacy) 🐧 | `AMD64` (64-bit) | سرورهای قدیمی (اوبونتو ۲۰.۰۴، دبیان ۱۱) | [دانلود سرور لینوکس (سازگاری بالا) ⬇️](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Linux-Legacy_AMD64.zip) |
+| لینوکس (ARM) 🐧 | `ARM64` | سرورهای ARM | [دانلود سرور لینوکس (ARM) ⬇️](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Linux_ARM64.zip) |
+| مک‌اواس (macOS) 🍎 | `ARM64` | مک‌های جدید (سری M1 / M2 / M3) | [دانلود سرور مک (Apple Silicon) ⬇️](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_MacOS_ARM64.zip) |
 
 ---
 
-## 🚀 نصب و اجرا
+### گام ۲.۱.۱: استخراج فایل‌ها و آماده‌سازی برای اجرا 🗂️
 
-### گزینه الف: دانلود فایل اجرایی آماده (پیشنهادی)
+پس از دانلود فایل ZIP مناسب با سیستم‌عامل خود، باید آن را از حالت فشرده خارج کنید تا به فایل اجرایی و فایل تنظیمات (`.toml`) دسترسی پیدا کنید. 
+*(در ویندوز و مک، کافیست روی فایل دانلود شده راست‌کلیک کرده و گزینه Extract را انتخاب کنید).*
 
-بدون نیاز به نصب پایتون، می‌توانید آخرین نسخهٔ باینری آماده را برای سیستم‌عامل خود دانلود کنید:
+**راهنمای مخصوص کاربران لینوکس:**
+در لینوکس ابتدا برنامه `unzip` و ویرایشگر `nano` را نصب کنید (اگر از قبل نصب نیستند):
+```bash
+sudo apt update
+sudo apt install unzip nano
+```
 
-**دانلود کلاینت:**
+سپس فایل ZIP دانلود شده را استخراج کنید (نام فایل را بر اساس نسخهٔ دانلودی خود تغییر دهید):
+```bash
+# استخراج فایل سرور (برای کلاینت نام فایل را تغییر دهید)
+unzip MasterDnsVPN_Server_Linux_AMD64.zip
 
-| سیستم‌عامل | دانلود |
-|------------|--------|
-| 🪟 ویندوز (AMD64) | [MasterDnsVPN_Client_Windows_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Windows_AMD64.zip) |
-| 🐧 لینوکس (AMD64) | [MasterDnsVPN_Client_Linux_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Linux_AMD64.zip) |
-| 🐧 لینوکس (ARM64) | [MasterDnsVPN_Client_Linux_ARM64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Linux_ARM64.zip) |
-| 🍎 مک‌اواس (ARM64) | [MasterDnsVPN_Client_MacOS_ARM64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_MacOS_ARM64.zip) |
+# مشاهده لیست فایل‌های استخراج شده
+ls
+```
 
-**دانلود سرور:**
+در سیستم‌عامل‌های لینوکس و مک، برای اجرای برنامه‌ها باید ابتدا **مجوز اجرا (Execute Permission)** را به فایل بدهید. اسم فایل را بر اساس خروجی دستور `ls` و چیزی که استخراج شده است تنظیم کنید:
+```bash
+chmod +x MasterDnsVPN_Server_Linux_AMD64
+```
 
-| سیستم‌عامل | دانلود |
-|------------|--------|
-| 🪟 ویندوز (AMD64) | [MasterDnsVPN_Server_Windows_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Windows_AMD64.zip) |
-| 🐧 لینوکس (AMD64) | [MasterDnsVPN_Server_Linux_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Linux_AMD64.zip) |
-| 🐧 لینوکس (ARM64) | [MasterDnsVPN_Server_Linux_ARM64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Linux_ARM64.zip) |
-| 🍎 مک‌اواس (ARM64) | [MasterDnsVPN_Server_MacOS_ARM64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_MacOS_ARM64.zip) |
+اکنون فایل تنظیمات (`server_config.toml` یا `client_config.toml`) را با ویرایشگر `nano` باز کرده و اطلاعات خود را وارد کنید (توضیحات کانفیگ در بخش‌های بعدی آمده است):
+```bash
+# ویرایش تنظیمات سرور
+nano server_config.toml
 
-هر فایل ZIP کلاینت شامل فایل اجرایی و یک فایل قالب `client_config.toml` است. هر فایل ZIP سرور شامل فایل اجرایی و یک فایل قالب `server_config.toml` است.
+# یا برای ویرایش تنظیمات کلاینت
+nano client_config.toml
+```
+> **نکته:** پس از وارد کردن تنظیمات، فایل را ذخیره کرده و خارج شوید (در `nano` کلیدهای ترکیبی `Ctrl + O` سپس `Enter` و در نهایت `Ctrl + X` را بزنید).
+
+پس از اعمال تغییرات در فایل کانفیگ، می‌توانید برنامه را اجرا کنید:
+```bash
+# اجرای فایل سرور
+./MasterDnsVPN_Server_Linux_AMD64
+
+# یا اجرای فایل کلاینت
+./MasterDnsVPN_Client_Linux_AMD64
+```
+> ⚠️ **اخطار:** نام فایل اجرایی ممکن است بسته به سیستم‌عامل و نسخه برنامه متفاوت باشد، پس حتماً با دستور `ls` نام دقیق را بررسی کنید.
+
+---
+
+### گام ۲.۲: نصب و اجرا از طریق سورس‌کد پایتون (مخصوص توسعه‌دهندگان 🧑‍💻)
+
+اگر ترجیح می‌دهید برنامه را مستقیماً از روی سورس‌کد اجرا کنید (این روش نیازمند نصب بودن پایتون روی سیستم شماست)، ترمینال یا خط فرمان خود را باز کرده و دستورات زیر را به‌ترتیب وارد کنید:
+
+ابتدا مخزن پروژه را کلون کرده، وارد پوشهٔ آن شوید و وابستگی‌های مورد نیاز را نصب کنید:
+```bash
+git clone [https://github.com/masterking32/MasterDnsVPN.git](https://github.com/masterking32/MasterDnsVPN.git)
+cd MasterDnsVPN
+pip install -r requirements.txt
+```
+
+سپس فایل‌های نمونهٔ کانفیگ را کپی کنید تا فایل‌های اصلی ایجاد شوند:
+```bash
+cp server_config.toml.simple server_config.toml
+cp client_config.toml.simple client_config.toml
+```
+
+پس از ویرایش فایل‌های کانفیگ (با `nano` یا هر ویرایشگر دیگر)، سرور یا کلاینت را اجرا کنید:
+```bash
+# اجرای سرور
+python server.py
+
+# اجرای کلاینت
+python client.py
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 **مراحل:**
 
@@ -114,7 +202,7 @@
 
 ---
 
-### گزینه ب: اجرا از سورس
+###
 
 #### 1. نصب وابستگی‌ها
 

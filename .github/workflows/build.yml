@@ -51,7 +51,7 @@ jobs:
             arch: amd64
             ext: ""
             package: tar.gz
-          - os: ubuntu-20.04 # legacy Linux compatibility
+          - os: ubuntu-latest
             platform: Linux-Legacy
             arch: amd64
             ext: ""
@@ -61,14 +61,9 @@ jobs:
             arch: arm64
             ext: ""
             package: tar.gz
-          - os: macos-latest # Apple Silicon (M1/M2)
+          - os: macos-latest
             platform: MacOS
             arch: arm64
-            ext: ""
-            package: tar.gz
-          - os: macos-12 # legacy MacOS Intel support
-            platform: MacOS
-            arch: amd64
             ext: ""
             package: tar.gz
 
@@ -76,13 +71,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python (Host)
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Install dependencies
+      - name: Install dependencies (Host)
+        if: ${{ matrix.platform != 'Linux-Legacy' }}
         run: |
           pip install --upgrade pip
           pip install pyinstaller
@@ -101,13 +97,20 @@ jobs:
           rm -rf dist || true
           mkdir -p dist
 
-      - name: Build client
+      - name: Build client (Standard)
+        if: ${{ matrix.platform != 'Linux-Legacy' }}
         run: |
           pyinstaller --onefile --icon=assets/masterdnsvpn.ico --name "MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}" client.py
 
-      - name: Build server
+      - name: Build server (Standard)
+        if: ${{ matrix.platform != 'Linux-Legacy' }}
         run: |
           pyinstaller --onefile --icon=assets/masterdnsvpn.ico --name "MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}" server.py
+
+      - name: Build client & server (Linux-Legacy via Docker)
+        if: ${{ matrix.platform == 'Linux-Legacy' }}
+        run: |
+          docker run --rm -v ${{ github.workspace }}:/work -w /work python:3.11-bullseye bash -c "pip install pyinstaller && pip install -r requirements.txt || true && pyinstaller --onefile --icon=assets/masterdnsvpn.ico --name 'MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}' client.py && pyinstaller --onefile --icon=assets/masterdnsvpn.ico --name 'MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}' server.py && chown -R $(id -u):$(id -g) dist/ build/ *.spec || true"
 
       - name: Bundle config templates with executables
         shell: bash
