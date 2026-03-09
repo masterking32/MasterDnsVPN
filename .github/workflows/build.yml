@@ -311,7 +311,7 @@ jobs:
               body += `- ${msg} ([${c.sha.substring(0,7)}](https://github.com/${owner}/${repo}/commit/${c.sha}))\n`;
             }
             if (prSet.size > 0) {
-              body += '\n### Merged PRS\n';
+              body += '\n### Merged PRs\n';
               for (const pr of prSet.values()) {
                 body += `- [#${pr.number}](${pr.url}) ${pr.title} ${pr.user}\n`;
               }
