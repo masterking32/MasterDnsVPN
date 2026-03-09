@@ -1,378 +1,376 @@
-# 🚀 MasterDnsVPN
+# Proyecto MasterDnsVPN 🚀
 
 ## [نسخه فارسی](https://github.com/masterking32/MasterDnsVPN/blob/main/README_FA.MD) | [English Version](https://github.com/masterking32/MasterDnsVPN/blob/main/README.MD) | [Spanish Version](https://github.com/masterking32/MasterDnsVPN/blob/main/README_ES.MD)
 
+El proyecto **MasterDnsVPN** es una solución robusta, de baja sobrecarga y avanzada para eludir la censura y el filtrado de internet, ocultando y encapsulando el tráfico TCP dentro de consultas DNS.
 
-MasterDnsVPN es una herramienta de tunelización DNS de alto rendimiento diseñada para encapsular el tráfico VPN en consultas DNS. Este proyecto está diseñado específicamente para eludir la estricta censura de la red y los firewalls donde se bloquean los protocolos VPN tradicionales.
+Este sistema está diseñado específicamente para eludir cortafuegos (firewalls) estrictos y restricciones severas de red donde los protocolos VPN tradicionales, o incluso los servicios conocidos de tunelización DNS como **DNSTT** y **SlipStream**, están bloqueados o son ineficaces debido a interrupciones masivas y limitaciones en los resolvers DNS.
 
-Cuenta con una implementación personalizada de **ARQ (solicitud de repetición automática)**, que garantiza una confiabilidad similar a la de TCP y un ordenamiento de paquetes a través del protocolo DNS basado en UDP, que es inherentemente poco confiable.
-
----
-
-⭐ Si te parece útil o interesante este proyecto, ¡por favor apóyalo dándole una estrella al repositorio! ⭐
+El objetivo principal de **MasterDnsVPN** es proporcionar un túnel seguro, confiable y flexible que minimice la sobrecarga (overhead) del protocolo y ofrezca un rendimiento estable y aceptable, incluso en redes que sufren de alta pérdida de paquetes (Packet Loss) o limitaciones estrictas de MTU.
 
 ---
 
-## ✨ Características principales
-- 🛡️ **Elusión de censura:** Aprovecha el protocolo DNS para canalizar el tráfico a través de entornos restringidos.
-- 🔐 **Seguridad robusta:** Admite múltiples métodos de cifrado, incluyendo XOR, ChaCha20, AES-128-GCM, AES-192-GCM y AES-256-GCM.
-- ⚙️ **Gestión inteligente de MTU:** Sondea y sincroniza automáticamente la unidad máxima de transmisión (MTU) óptima tanto para carga como para descarga.
-- 🔄 **Protocolo ARQ personalizado:** Soluciona problemas de pérdida de paquetes y entrega desordenada con retransmisión dinámica y control de flujo.
-- ⚡ **Balanceo de carga del solucionador:** Admite múltiples solucionadores DNS con estrategias de balanceo adaptativo (aleatorio, round-robin, mejor pérdida).
-- 🌐 **Multiplexación TCP:** Permite multiplexar múltiples conexiones TCP locales en una sola sesión DNS.
-- 📡 **Duplicación de paquetes multi-ruta:** Cada paquete puede enviarse simultáneamente por múltiples rutas resolver+dominio para máxima fiabilidad en condiciones de red extremas.
+## ✨ Características Principales y Ventajas
+
+- 🛡️ **Evasión de Censura Estricta:**  Diseñado específicamente para aumentar la probabilidad de penetrar firewalls y políticas de red restrictivas que bloquean los protocolos VPN estándar.
+
+- ⚡ **Balanceo de Carga y Diversidad de Resolvers:** Soporta múltiples resolvers DNS con estrategias avanzadas de balanceo de carga de paquetes (incluyendo Aleatorio, Round-Robin y Menor Pérdida).
+
+- 📡 **Duplicación de Paquetes (Multiruta):** Capaz de enviar el mismo paquete simultáneamente a través de múltiples rutas (diferentes resolvers y dominios). El paquete que llega primero es procesado; si un paquete se pierde en una ruta, su duplicado llega a salvo por otra. Esta técnica aumenta el uso de ancho de banda, pero mejora drásticamente la confiabilidad en redes altamente interrumpidas (ajustable y se puede desactivar).
+
+- 🔄 **Protocolo ARQ Personalizado y Optimización de Sobrecarga:** Implementa una capa ARQ (Solicitud de Repetición Automática) personalizada sobre UDP/DNS para la retransmisión y secuenciación de paquetes en lugar de depender de QUIC. Esto elimina la pesada sobrecarga de QUIC, reduce el MTU requerido y garantiza la compatibilidad con resolvers que carecen de soporte EDNS o tienen límites bajos de MTU.
+
+- 🔐 **Seguridad Robusta y Cifrado Flexible:** Soporta varios métodos de cifrado robustos para garantizar la privacidad del usuario, incluyendo: `XOR`, `ChaCha20`, `AES-128-GCM`, `AES-192-GCM` y `AES-256-GCM`.
+
+- 🧰 **Escaneo Automático y Sondeo de MTU:** Al ejecutarse, el cliente escanea automáticamente todos los resolvers configurados, prueba su calidad, muestra los resultados y calcula el MTU óptimo para sus rutas de red.
+
+- 🌐 **Multiplexación TCP:** Multiplexa múltiples conexiones TCP locales en una sola sesión DNS para una gestión óptima de los recursos.
+
+- 🗜️ **Compresión/Empaquetado de Paquetes Pequeños:** Si se configura, el sistema puede fusionar múltiples paquetes pequeños en una sola carga útil (payload) hasta el límite de MTU. Esto reduce drásticamente el número de solicitudes DNS salientes.
+
+- 🧦 **Optimización SOCKS5 Dedicada:** El sistema maneja automáticamente el reenvío SOCKS5, eliminando la necesidad de instalar herramientas proxy de terceros como X-UI o Dante. Además, establecer el protocolo en SOCKS5 elimina los paquetes de enlace (handshake) redundantes a través del túnel, reduciendo significativamente el tráfico.
+
+- 🚀 **Reenvío de Varios Protocolos TCP:** Además de la integración SOCKS5, también puede reenviar otros servicios basados en TCP como `VLESS`, `ShadowSocks`, `VMESS`, etc.
 
 ---
 
-## 🛠️ Requisitos previos de red (Configuración DNS)
-
-Para que el túnel sea funcional, debe ser propietario de un dominio y configurar los siguientes registros en su panel de administración DNS (p. ej., Cloudflare):
-
-1. **Registro A:** Cree un registro **A** que apunte a la IP pública de su servidor.
-   - Ejemplo: `s.example.com` -> `1.2.3.4`
-2. **Registro NS:** Cree un registro **NS** para el subdominio del túnel que apunte al registro A creado anteriormente.
-   - Ejemplo: `v.example.com` -> `s.example.com`
-
-> 💡 **Consejo profesional:** Cuanto más cortos sean los nombres de dominio y subdominio (p. ej., `v.ex.com`), más espacio queda para los datos útiles en cada paquete DNS, lo que aumenta significativamente el rendimiento.
+⭐ ¡Si utilizas o te gusta este proyecto, por favor apóyanos dándole una estrella al repositorio! ⭐
 
 ---
 
-## 📦 Requisitos
+# Guía de Configuración 🧑‍💻
 
-- 🐍 Python 3.7 o superior
-- 🔐 `cryptography` (Requerida para métodos de cifrado AES/ChaCha20)
-- 📝 `loguru` (Para un registro mejorado)
+## Sección 1: Requisitos Previos de Red (Configuración DNS) 🛠️
 
----
+Para que su servidor reciba y procese directamente las consultas DNS, debe delegar un subdominio a su servidor dedicado. Inicie sesión en el panel de administración DNS de su dominio (ej., Cloudflare, ArvanCloud) y cree los siguientes dos registros:
 
-## 🚀 Instalación y uso
+### Paso 1.1: Crear un Registro A (IP del Servidor) 🅰️
+Primero, cree un registro `A` que apunte un subdominio a la dirección IPv4 pública de su servidor.
+- **Tipo:** `A`
+- **Nombre:** Un nombre corto arbitrario (ej., `ns`)
+- **Dirección IPv4:** La dirección IP de su servidor (ej., `1.2.3.4`)
+  > **Resultado:** `ns.example.com -> 1.2.3.4`
 
-### Opción A: Descargar el ejecutable precompilado (Recomendado)
-
-Puede descargar el binario precompilado más reciente para su plataforma, sin necesidad de instalar Python.
-
-**Descargas del cliente:**
-
-| Plataforma | Descarga |
-|------------|----------|
-| 🪟 Windows (AMD64) | [MasterDnsVPN_Client_Windows_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Windows_AMD64.zip) |
-| 🐧 Linux (AMD64) | [MasterDnsVPN_Client_Linux_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Linux_AMD64.zip) |
-| 🐧 Linux (ARM64) | [MasterDnsVPN_Client_Linux_ARM64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Linux_ARM64.zip) |
-| 🍎 macOS (ARM64) | [MasterDnsVPN_Client_MacOS_ARM64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_MacOS_ARM64.zip) |
-
-**Descargas del servidor:**
-
-| Plataforma | Descarga |
-|------------|----------|
-| 🪟 Windows (AMD64) | [MasterDnsVPN_Server_Windows_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Windows_AMD64.zip) |
-| 🐧 Linux (AMD64) | [MasterDnsVPN_Server_Linux_AMD64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Linux_AMD64.zip) |
-| 🐧 Linux (ARM64) | [MasterDnsVPN_Server_Linux_ARM64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Linux_ARM64.zip) |
-| 🍎 macOS (ARM64) | [MasterDnsVPN_Server_MacOS_ARM64.zip](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_MacOS_ARM64.zip) |
-
-Cada archivo ZIP del cliente contiene el ejecutable y una plantilla de configuración `client_config.toml`. Cada archivo ZIP del servidor contiene el ejecutable y una plantilla de configuración `server_config.toml`.
-
-**Pasos:**
-
-1. Extraiga el archivo ZIP.
-2. Abra `client_config.toml` en cualquier editor de texto y configure los valores:
-   - `ENCRYPTION_KEY` — cópielo del registro del servidor en la primera ejecución.
-   - `DOMAINS` — su subdominio de túnel (p. ej., `v.example.com`).
-   - `RESOLVER_DNS_SERVERS` — resolvers DNS públicos (p. ej., `8.8.8.8`).
-3. Coloque `client_config.toml` en la **misma carpeta** que el ejecutable y ejecútelo.
+### Paso 1.2: Crear un Registro NS (Subdominio del Túnel) 🏷️
+A continuación, cree un registro `NS` (Name Server). Esto le dice a internet que el servidor que definió en el paso anterior es el responsable de manejar las consultas para este subdominio específico.
+- **Tipo:** `NS`
+- **Nombre:** El subdominio principal del túnel (ej., `v`)
+- **Objetivo/Nameserver:** El registro A que creó en el Paso 1.1 (ej., `ns.example.com`)
+  > **Resultado:** `v.example.com -> ns.example.com`
 
 ---
 
-### Opción B: Ejecutar desde el código fuente
+## Sección 1.3: Advertencia Crucial (Usuarios de Cloudflare) ⚠️
+Si está utilizando Cloudflare, el estado del Proxy para el registro `A` **DEBE** estar configurado en **DNS only (Nube Gris ☁️)**. Si el proxy está habilitado (Nube Naranja), Cloudflare bloqueará el tráfico UDP del puerto 53, y su túnel **¡no funcionará en absoluto!**
 
-#### 1. Instalar dependencias
+## Sección 1.4: Consejo de Oro para la Velocidad (MTU) 💡
+En el protocolo DNS, la longitud de su nombre de dominio consume parte de la capacidad limitada de carga útil de cada paquete. El uso de nombres de dominio y subdominio **más cortos** (ej., `v.ex.com` en lugar de `tunnel.mi-dominio-largo.com`) deja más espacio libre para la carga útil real del usuario, lo que resulta directamente en mayor velocidad y menos caídas.
 
-Clonar el repositorio e instalar las bibliotecas de Python necesarias:
+---
+
+## Sección 2: Instalación y Ejecución (Cliente y Servidor) 🚀
+
+Puede instalar y ejecutar este proyecto utilizando dos métodos: el método rápido y automatizado precompilado (Recomendado), o directamente desde el código fuente de Python.
+
+### Paso 2.1: Configuración Rápida del Servidor en Linux 🐧
+
+Si desea configurar el servidor en una máquina Linux, la forma más sencilla es utilizar el script de instalación automatizado. Simplemente ejecute el siguiente comando en la terminal de su servidor:
+
 ```bash
-git clone https://github.com/masterking32/MasterDnsVPN.git
+curl -sL [https://raw.githubusercontent.com/masterking32/MasterDnsVPN/main/server_linux_install.sh](https://raw.githubusercontent.com/masterking32/MasterDnsVPN/main/server_linux_install.sh) | sudo bash
+```
+
+Este comando descarga un script de GitHub y maneja automáticamente todo el proceso de instalación y configuración. Una vez finalizado, el servidor se iniciará y se mostrará una **Clave de Cifrado (Encryption Key)** en los registros de la terminal. Asegúrese de copiar esta clave (también se guarda en `encrypt_key.txt` junto al ejecutable del servidor), ya que la necesitará para conectar el cliente.
+
+> ⚠️ **Nota Importante 1:** Antes de ejecutar este script, debe poseer un dominio y haber configurado correctamente sus registros DNS (Sección 1).
+> 
+> ⚠️ **Nota Importante 2:** Este script solo configura el servidor Linux y no incluye el cliente. Para ejecutar el cliente en su máquina local, use el "Paso 2.2".
+> 
+> ⚠️ **Nota Importante 3:** También puede usar este comando para actualizar su servidor a la última versión.
+
+---
+
+### Paso 2.2: Uso de Binarios de Cliente Precompilados (Recomendado ✅)
+
+Para su comodidad, los ejecutables del cliente están precompilados. Simplemente descargue la versión correcta para su sistema operativo y extraiga el archivo ZIP.
+
+> 💡 **Nota:** Cada archivo ZIP del Cliente contiene el ejecutable y una plantilla de configuración predeterminada llamada `client_config.toml`. 
+
+#### Enlaces de Descarga del Cliente (Client) 📥
+
+| Sistema Operativo (OS) | Arquitectura | Adecuado Para... | Enlace de Descarga Directa |
+| :--- | :--- | :--- | :--- |
+| Windows 🪟 | `AMD64` (64-bit) | Windows 10 y 11 | [Descargar versión Windows ⬇️](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Windows_AMD64.zip) |
+| macOS 🍎 | `ARM64` | Macs nuevos (M1 / M2 / M3) | [Descargar Mac (Apple Silicon) ⬇️](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_MacOS_ARM64.zip) |
+| Linux 🐧 | `AMD64` (64-bit) | Distros nuevas (Ubuntu 22.04+, Debian 12+) | [Descargar Linux (Nuevo) ⬇️](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Linux_AMD64.zip) |
+| Linux (Legacy) 🐧 | `AMD64` (64-bit) | Distros antiguas (Ubuntu 20.04, Debian 11) | [Descargar Linux (Legacy) ⬇️](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Linux-Legacy_AMD64.zip) |
+| Linux (ARM) 🐧 | `ARM64` | Servidores ARM, Raspberry Pi, etc. | [Descargar Linux (ARM) ⬇️](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Client_Linux_ARM64.zip) |
+
+#### Enlaces de Descarga del Servidor (Server) 📤
+*(Solo si no utilizó el script de instalación rápida)*
+
+| Sistema Operativo (OS) | Arquitectura | Adecuado Para... | Enlace de Descarga Directa |
+| :--- | :--- | :--- | :--- |
+| Windows 🪟 | `AMD64` (64-bit) | Windows Server, Windows 10 y 11 | [Descargar Servidor Windows ⬇️](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Windows_AMD64.zip) |
+| Linux 🐧 | `AMD64` (64-bit) | Servidores Ubuntu 22.04+, Debian 12+ | [Descargar Servidor Linux (Nuevo) ⬇️](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Linux_AMD64.zip) |
+| Linux (Legacy) 🐧 | `AMD64` (64-bit) | Servidores antiguos (Ubuntu 20.04, Debian 11) | [Descargar Servidor Linux (Legacy) ⬇️](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Linux-Legacy_AMD64.zip) |
+| Linux (ARM) 🐧 | `ARM64` | Servidores en la nube ARM | [Descargar Servidor Linux (ARM) ⬇️](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Linux_ARM64.zip) |
+| macOS 🍎 | `ARM64` | Macs nuevos (M1 / M2 / M3) | [Descargar Servidor Mac (Apple Silicon) ⬇️](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_MacOS_ARM64.zip) |
+
+---
+
+### Paso 2.2.1: Extracción y Preparación en Linux 🗂️
+
+En Linux, asegúrese de tener las herramientas de extracción y edición de texto instaladas:
+
+```bash
+sudo apt update
+sudo apt install unzip nano
+```
+
+Extraiga el archivo ZIP descargado:
+
+```bash
+# Extraer el cliente (o servidor)
+unzip MasterDnsVPN_Client_Linux_AMD64.zip
+
+# Listar los archivos extraídos
+ls
+```
+
+En Linux y macOS, debe otorgar permisos de ejecución al archivo binario:
+
+```bash
+chmod +x MasterDnsVPN_Client_Linux_AMD64
+```
+
+Ahora, abra el archivo de configuración (`client_config.toml` o `server_config.toml`) con el editor `nano` y complete sus detalles (consulte la Sección 3):
+
+```bash
+nano client_config.toml
+```
+
+> **Nota:** En `nano`, presione `Ctrl + O` y luego `Enter` para guardar, y `Ctrl + X` para salir.
+
+Después de guardar la configuración, ejecute el programa:
+
+```bash
+./MasterDnsVPN_Client_Linux_AMD64
+```
+
+---
+
+### Paso 2.3: Instalación desde el Código Fuente (Para Desarrolladores 🧑‍💻)
+
+> ⚠️ **Atención:** Si es un usuario normal, no necesita esta sección. Utilice el Paso 2.2. Este método es estrictamente para desarrolladores que desean modificar o ejecutar el código de Python directamente.
+
+Para ejecutar el código fuente, Python debe estar instalado:
+
+```bash
+# Clonar el repositorio e instalar dependencias
+git clone [https://github.com/masterking32/MasterDnsVPN.git](https://github.com/masterking32/MasterDnsVPN.git)
 cd MasterDnsVPN
 pip install -r requirements.txt
-```
 
-#### 2. Configuración del servidor
-
-Copie la configuración de ejemplo:
-
-```bash
+# Copiar plantillas de configuración
 cp server_config.toml.simple server_config.toml
-```
-
-Edite `server_config.toml` para incluir su dominio y la IP/Puerto de reenvío de destino.
-- Instale un servidor proxy (p. ej., SOCKS5, VLESS, VMESS, SSH, MTProto, OpenVPN TCP, etc.) en el servidor para reenviar el tráfico a internet.
-- Configure `FORWARD_IP` y `FORWARD_PORT` en `server_config.toml` para que apunten a su servidor proxy.
-- Configure `DOMAIN` para que coincida con el subdominio que configuró en sus registros DNS (p. ej., `v.example.com`).
-
-#### 3. Ejecutar el servidor
-
-```bash
-python server.py
-```
-
-En la primera ejecución, el servidor generará una clave de cifrado. **Guarde esta clave**; la necesitará para configurar el cliente.
-
-#### 4. Configurar el cliente
-
-Copie la configuración de ejemplo del cliente:
-
-```bash
 cp client_config.toml.simple client_config.toml
-```
 
-Edite `client_config.toml`:
-
-- `DOMAINS`: Su subdominio de túnel (p. ej., `v.example.com`).
-
-- `ENCRYPTION_KEY`: La clave que aparece en el registro del servidor.
-
-- `RESOLVER_DNS_SERVERS`: Lista de resolvers DNS públicos (p. ej., `8.8.8.8`, `1.1.1.1`).
-
-#### 5. Ejecutar el cliente
-
-```bash
+# Editar configuraciones, luego ejecutar el servidor o cliente
+python server.py
 python client.py
 ```
 
-El cliente inicia un proxy SOCKS5 local en `127.0.0.1:1080` (configurable mediante `LISTEN_IP` / `LISTEN_PORT`). Configure su navegador o aplicación para usar este proxy y enrutar el tráfico a través del túnel.
+---
+
+# Sección 3: Estructura de Configuración (Config) 🛠️
+
+## Sección 3.1: Configuración y Ejecución Rápida del Cliente 🚀
+
+Si inició su servidor utilizando el script de Instalación Rápida (Paso 2.1), solo necesita editar `client_config.toml` en su máquina cliente. Los tres parámetros principales que DEBE configurar son:
+
+1. **`ENCRYPTION_KEY`**: Pegue la clave de cifrado que se mostró en la terminal de su servidor. ¡La conexión será rechazada sin esta clave!
+2. **`DOMAINS`**: Ingrese exactamente su subdominio de túnel (ej., `["v.example.com"]`). **Nota:** Actualmente, proporcione solo UN dominio.
+3. **`RESOLVER_DNS_SERVERS`**: Una lista de resolvers DNS públicos para enrutar el tráfico (ej., `["8.8.8.8", "1.1.1.1"]`).
+
+> ⚠️ **Nota Importante 1 (Cifrado):** El script de instalación rápida establece el cifrado del servidor en `XOR`. Asegúrese de que `DATA_ENCRYPTION_METHOD` en la configuración de su cliente también esté en `1`.
+> 
+> ⚠️ **Nota Importante 2 (Conexión):** El protocolo predeterminado es `SOCKS5`. Una vez que el cliente se esté ejecutando, configure sus aplicaciones (Navegador, Telegram) para usar un proxy SOCKS5 apuntando a `127.0.0.1` en el puerto `1080`. Por defecto, requiere usuario/contraseña: `master_dns_vpn`.
+> 
+> ⚠️ **Soporte:** Si encuentra problemas, adjunte sus registros de errores (logs) y abra un Issue exclusivamente en [GitHub Issues](https://github.com/masterking32/MasterDnsVPN/issues).
 
 ---
 
-## 🚨 Consejo de emergencia: Interrupción grave de la red
+## Sección 3.2: Configuración del Servidor (Instalación Manual) ⚙️
 
-> **Cuando la red está casi completamente caída y solo las consultas DNS están llegando (pérdida de paquetes y disrupciones extremas):**
-
-1. **Recopile tantas IPs de resolvedores DNS como sea posible.** Agréguelas todas a `RESOLVER_DNS_SERVERS` en `client_config.toml`. Puede usar resolvedores públicos de Google (`8.8.8.8`, `8.8.4.4`), Cloudflare (`1.1.1.1`, `1.0.0.1`), Quad9 (`9.9.9.9`), OpenDNS (`208.67.222.222`, `208.67.220.220`) y otros.
-
-2. **Aumente `PACKET_DUPLICATION_COUNT`** en `client_config.toml`. Este parámetro controla cuántas rutas resolver+dominio diferentes usa cada paquete **simultáneamente**.
-
-   - Con 6 resolvedores y 2 dominios, tendrá **12 rutas potenciales**.
-   - Configurar `PACKET_DUPLICATION_COUNT = 6` significa que cada paquete se envía por 6 rutas diferentes a la vez.
-   - Incluso si 5 de las 6 rutas fallan, el paquete llega por la ruta superviviente.
-
-   > ⚠️ **Compensación:** Una duplicación mayor aumenta proporcionalmente el uso de ancho de banda y CPU. Un valor de `3`–`6` es un buen equilibrio durante las interrupciones. La capa ARQ del servidor desduplicará automáticamente las copias recibidas para que su aplicación vea cada paquete solo una vez.
-
-3. **Agregue múltiples dominios de túnel** (lista `DOMAINS`) para multiplicar aún más el número de rutas disponibles.
+Si **no** utilizó el script del Paso 2.1, debe editar manualmente el archivo `server_config.toml`. Asegúrese de que los parámetros críticos como el método de cifrado y el dominio coincidan **exactamente** en ambos lados.
 
 ---
 
-## ⚙️ Referencia de configuración
+## Sección 3.3: Variables de Configuración del Cliente (`client_config.toml`) 📖
 
-### 🖥️ Servidor — `server_config.toml`
-
-> 🔑 La clave de cifrado se **genera automáticamente** en el primer arranque y se guarda en `encrypt_key.txt` junto al ejecutable del servidor. También se imprime en el log del servidor. Cópiela en el campo `ENCRYPTION_KEY` del cliente. Para rotar la clave, elimine `encrypt_key.txt` y reinicie el servidor.
-
-| Parámetro | Valor predeterminado | Descripción |
-|-----------|---------------------|-------------|
-| `LOG_LEVEL` | `"INFO"` | Nivel de registro: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` |
-| `UDP_HOST` | `"0.0.0.0"` | IP a la que el servidor DNS/UDP se enlaza. `"0.0.0.0"` = todas las interfaces. |
-| `UDP_PORT` | `53` | Puerto UDP del servidor DNS. El puerto `53` (DNS estándar) requiere privilegios de root/admin. |
-| `DOMAIN` | `["t.example.com"]` | Dominio(s) del túnel que acepta este servidor. Debe coincidir con la lista `DOMAINS` del cliente. |
-| `DATA_ENCRYPTION_METHOD` | `1` | Algoritmo de cifrado. **Debe coincidir con el cliente.** `0`=Ninguno, `1`=XOR, `2`=ChaCha20, `3`=AES-128-GCM, `4`=AES-192-GCM, `5`=AES-256-GCM |
-| `SESSION_TIMEOUT` | `300` | Tiempo de inactividad (segundos) antes de que expire una sesión de cliente. |
-| `SESSION_CLEANUP_INTERVAL` | `60` | Intervalo (segundos) para eliminar sesiones expiradas. |
-| `FORWARD_IP` | `"127.0.0.1"` | IP del proxy/servicio local al que se reenvía el tráfico descifrado. |
-| `FORWARD_PORT` | `8080` | Puerto del proxy/servicio local (p. ej. `1080` para SOCKS5, `443` para VLESS). |
-| `ARQ_WINDOW_SIZE` | `600` | Tamaño de la ventana ARQ (número de paquetes no reconocidos permitidos en vuelo). Ventanas más grandes pueden mejorar el rendimiento en conexiones de alta latencia pero pueden aumentar el uso de memoria. |
-| `SOCKET_BUFFER_SIZE` | `8388608` (8 MB) | Tamaño del buffer de envío/recepción del socket UDP. Aumente si tiene alto rendimiento y desea reducir la pérdida de paquetes debido a desbordamiento de buffer. |
-| `MAX_CONCURRENT_REQUESTS` | `1000` | Número máximo de solicitudes DNS concurrentes que el servidor procesará. Ajuste según la carga esperada y la capacidad del servidor. |
-| `ARQ_INITIAL_RTO` | `0.8` | Tiempo de espera inicial de retransmisión (segundos) para ARQ. Ajuste según la latencia de la red. |
-| `ARQ_MAX_RTO` | `1.5` | Tiempo de espera máximo de retransmisión (segundos) para ARQ. Esto limita el backoff exponencial para evitar retrasos excesivos. |
-
-### 💻 Cliente — `client_config.toml`
-
-| Parámetro | Valor predeterminado | Descripción |
-|-----------|---------------------|-------------|
-| `LOG_LEVEL` | `"INFO"` | Nivel de registro: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` |
-| `RESOLVER_DNS_SERVERS` | `["8.8.8.8"]` | Resolvedores DNS públicos a los que se reenvían las consultas del túnel. Agregue múltiples para redundancia y balanceo. |
-| `MIN_UPLOAD_MTU` | `40` | MTU mínimo de subida (bytes) que un resolvedor debe alcanzar para ser utilizado. Ponga `0` para deshabilitar. |
-| `MIN_DOWNLOAD_MTU` | `40` | MTU mínimo de bajada (bytes) que un resolvedor debe alcanzar para ser utilizado. Ponga `0` para deshabilitar. |
-| `MAX_UPLOAD_MTU` | `160` | Límite superior (bytes) para el sondeo automático de MTU de subida. |
-| `MAX_DOWNLOAD_MTU` | `200` | Límite superior (bytes) para el sondeo automático de MTU de bajada. |
-| `RESOLVER_BALANCING_STRATEGY` | `1` | Estrategia de balanceo de carga: `1`=Aleatorio, `2`=Round-Robin, `3`=Menor pérdida |
-| `DOMAINS` | `["t.example.com"]` | Dominio(s) del túnel que apuntan al servidor vía registros NS. Agregue múltiples para redundancia multi-ruta. |
-| `DATA_ENCRYPTION_METHOD` | `1` | Algoritmo de cifrado. **Debe coincidir con el servidor.** `0`=Ninguno, `1`=XOR, `2`=ChaCha20, `3`=AES-128-GCM, `4`=AES-192-GCM, `5`=AES-256-GCM |
-| `ENCRYPTION_KEY` | `""` | Clave del `encrypt_key.txt` del servidor o del log del primer arranque. Debe coincidir con el servidor. |
-| `DNS_QUERY_TIMEOUT` | `5` | Segundos de espera para una respuesta DNS antes de considerar la consulta fallida. |
-| `LISTEN_IP` | `"127.0.0.1"` | IP local en la que escucha el proxy SOCKS5. |
-| `LISTEN_PORT` | `1080` | Puerto local del proxy SOCKS5. Configure su aplicación para usar esta dirección. |
-| `NUM_DNS_WORKERS` | `4` | Número de tareas async DNS concurrentes. Aumente para mayor tráfico. |
-| `PACKET_DUPLICATION_COUNT` | `3` | Rutas resolver+dominio por las que se envía cada paquete simultáneamente. Mayor = más fiable pero más ancho de banda. |
-| `ARQ_WINDOW_SIZE` | `600` | Tamaño de la ventana ARQ (número de paquetes no reconocidos permitidos en vuelo). Ventanas más grandes pueden mejorar el rendimiento en conexiones de alta latencia pero pueden aumentar el uso de memoria. |
-| `SOCKET_BUFFER_SIZE` | `8388608` (8 MB) | Tamaño del buffer de envío/recepción del socket UDP. Aumente si tiene alto rendimiento y desea reducir la pérdida de paquetes debido a desbordamiento de buffer. |
-| `ARQ_INITIAL_RTO` | `0.8` | Tiempo de espera inicial de retransmisión (segundos) para ARQ. Ajuste según la latencia de la red. |
-| `ARQ_MAX_RTO` | `1.5` | Tiempo de espera máximo de retransmisión (segundos) para ARQ. Esto limita el backoff exponencial para evitar retrasos excesivos. |
-| `NUM_RX_WORKERS` | `2` | Número de tareas async que procesan los paquetes recibidos. Aumente para mayor tráfico. |
-| `MAX_CONNECTION_ATTEMPTS` | `10` | Número máximo de intentos de conexión antes de rendirse. Ajuste según la confiabilidad de la red. |
+| Parámetro | Valor Predeterminado | Valores Aceptados | Descripción |
+|---------|--------------|------------------|-------|
+| `PROTOCOL_TYPE` | `"SOCKS5"` | `"SOCKS5"`, `"TCP"` | **Tipo de Protocolo del Túnel:**<br><br>• `"SOCKS5"`: Altamente recomendado. Optimizado para máxima velocidad.<br>• `"TCP"`: Usado para reenviar puertos sin procesar (ej., VLESS o OpenVPN). |
+| `DOMAINS` | `["v.domain.com"]` | Matriz (ej., `["sub.site.com"]`) | El subdominio <br>NS<br> configurado en la Sección 1. Debe ser idéntico al del servidor. |
+| `DATA_ENCRYPTION_METHOD` | `1` | `0` a `5` | **Algoritmo de Cifrado:**<br><br>`0`: Desactivado<br>`1`: Algoritmo XOR (Recomendado - Alta velocidad)<br>`2`: ChaCha20<br>`3`: AES-128-GCM<br>`4`: AES-192-GCM<br>`5`: AES-256-GCM |
+| `ENCRYPTION_KEY` | `""` | Cadena (String) | Clave de cifrado coincidente con la del servidor. |
+| `LISTEN_IP` | `"0.0.0.0"` | IP Válida | Dirección IP local en la que el cliente escucha. `"127.0.0.1"` para mayor seguridad. |
+| `LISTEN_PORT` | `1080` | Puerto | El puerto local para conectar sus aplicaciones. |
+| `SOCKS5_AUTH` | `true` | `true` o `false` | Habilita la autenticación local <br>SOCKS5<br>. (Solo afecta la conexión entre su navegador y su propio cliente local). |
+| `SOCKS5_USER` | `"master_dns_vpn"` | Cadena | Nombre de usuario para el proxy SOCKS local. |
+| `SOCKS5_PASS` | `"master_dns_vpn"` | Cadena | Contraseña para el proxy SOCKS local. |
+| `RESOLVER_DNS_SERVERS` | `["8.8.8.8", "1.1.1.1"]` | Lista de IPs | Lista de servidores DNS públicos. Agregue más IPs para mayor estabilidad. |
+| `PACKET_DUPLICATION_COUNT` | `3` | Entero positivo | Número de veces que se duplica un paquete simultáneamente. Aumentar reduce caídas pero consume ancho de banda. |
+| `RESOLVER_BALANCING_STRATEGY` | `1` | `1`, `2`, `3` | **Estrategia de Balanceo:**<br>`1`: **Aleatorio**<br>`2`: **Round-Robin**<br>`3`: **Menor Pérdida** |
+| `MIN_UPLOAD_MTU` | `40` | Entero (Bytes) | MTU de subida mínimo requerido para usar un resolver. |
+| `MIN_DOWNLOAD_MTU` | `40` | Entero (Bytes) | MTU de bajada mínimo requerido para usar un resolver. |
+| `MAX_UPLOAD_MTU` | `220` | Entero (Bytes) | Límite superior para el escaneo automático de MTU. |
+| `ARQ_WINDOW_SIZE` | `3000` | Entero | Tamaño de ventana ARQ. Ajustar según la RAM del dispositivo. |
+| `LOG_LEVEL` | `"INFO"` | `"DEBUG"`, `"INFO"`, etc. | Nivel de registro del cliente. |
 
 ---
 
-## 🛑 Problemas comunes: Puerto 53 en uso (Linux)
-Si recibe un error de "Puerto 53 en uso" al iniciar el servidor, es probable que otro proceso (como `systemd-resolved` o `dnsmasq`) esté utilizando el puerto DNS estándar. Para resolver esto:
+## Sección 3.4: Variables de Configuración del Servidor (`server_config.toml`) 📖
 
-- Edite la configuración: `sudo nano /etc/systemd/resolved.conf`
-- Descomente la línea y cambie a: `DNSStubListener=no`
-- Reinicie el servicio: `sudo systemctl restart systemd-resolved`
-
-(Opcional) Actualice **resolv.conf**: `sudo ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf`
+| Parámetro | Valor Predeterminado | Valores Aceptados | Descripción |
+|---------|--------------|------------------|-------|
+| `UDP_HOST` | `"0.0.0.0"` | IP Válida | Dirección IP a la que se vincula el servidor. |
+| `UDP_PORT` | `53` | Puerto | Puerto del servidor. **Debe ser 53** para que la resolución DNS funcione. |
+| `DOMAIN` | `["v.domain.com"]` | Matriz | El dominio para el que este servidor es autoritativo. |
+| `DATA_ENCRYPTION_METHOD` | `1` | `0` a `5` | **Algoritmo de Cifrado.** Debe coincidir exactamente con el Cliente. |
+| `PROTOCOL_TYPE` | `"SOCKS5"` | `"SOCKS5"`, `"TCP"` | Debe coincidir con la configuración del Cliente. |
+| `USE_EXTERNAL_SOCKS5` | `false` | `true` o `false` | `false`: El servidor Python maneja el proxy directamente (Más rápido). `true`: Se conecta a un proxy de terceros. |
+| `FORWARD_IP` | `"127.0.0.1"` | IP Válida | IP del proxy externo (si `USE_EXTERNAL_SOCKS5=true`). |
+| `FORWARD_PORT` | `1080` | Puerto | Puerto del proxy externo. |
 
 ---
 
-## ⚙️ Ejecución como servicio en segundo plano (Systemd)
+## Sección 3.5: Mejor Comprensión de MTU y Ajustes Dorados para Inicio Rápido ⚠️
 
-Para entornos de producción, se recomienda ejecutar el servidor como un servicio en segundo plano para que se inicie automáticamente al arrancar el sistema.
+### Sección 3.5.1: Concepto de MTU en Túneles DNS 📦
+**MTU** significa **Unidad Máxima de Transmisión**—el tamaño máximo de un paquete de datos enviado por la red.
+En redes muy filtradas, los paquetes grandes suelen perderse (Drop). Reducir el MTU garantiza la estabilidad. Sin embargo, establecerlo demasiado bajo divide los datos en fragmentos diminutos, reduciendo su velocidad.
 
-- Crear archivo de servicio: `sudo nano /etc/systemd/system/masterdnsvpn.service`
-- Pegue la siguiente configuración (ajuste la ruta `/path/to/`)
+### Sección 3.5.2: Guía para Optimizar el MTU 🚀
+El cliente utiliza una "Búsqueda Binaria" (Binary Search) para encontrar el MTU exacto en el primer inicio. Este proceso toma tiempo. Para acelerarlo:
 
-```ini
-[Unit]
-Description=MasterDnsVPN Server
-After=network.target
+1. Ejecute el cliente y observe el registro inicial que dice:
+   `Domain: v.example.com -> MIN and MAX_UPLOAD_MTU = 133 | MIN and MAX_DOWNLOAD_MTU = 129`
+2. Cierre el programa inmediatamente.
+3. Abra `client_config.toml` y establezca `MAX_UPLOAD_MTU` exactamente en el número sugerido (`133`).
 
-[Service]
-Type=simple
-WorkingDirectory=/path/to/MasterDnsVPN
-ExecStart=/usr/bin/python3 server.py
-Restart=on-failure
-User=root
+### Sección 3.5.3: Truco de Oro para un Inicio Instantáneo (Fast Boot) ⚡
+Para evitar por completo la fase de prueba, establezca los valores MIN y MAX **exactamente iguales** en su configuración:
 
-[Install]
-WantedBy=multi-user.target
+```toml
+MIN_UPLOAD_MTU = 133
+MAX_UPLOAD_MTU = 133
 
+MIN_DOWNLOAD_MTU = 129
+MAX_DOWNLOAD_MTU = 129
 ```
-- Guardar y salir. Luego, habilite y inicie el servicio:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable masterdnsvpn
-sudo systemctl start masterdnsvpn
-sudo systemctl status masterdnsvpn
-```
+El cliente omitirá la búsqueda, probará este número solo una vez y se conectará en fracciones de segundo.
 
 ---
 
-## 🛠️ Cómo funciona
+## Sección 4: Emergencias y Solución de Problemas 🚨
 
-### Arquitectura del sistema
+### Sección 4.1: Cortes Severos de Red (Intranet Nacional) ⚠️
+Cuando la internet está bloqueada y solo pasa el tráfico DNS:
+1. Añada tantos resolvers DNS públicos válidos como pueda a `RESOLVER_DNS_SERVERS`.
+2. Aumente el `PACKET_DUPLICATION_COUNT` (ej. a `5` o `6`). Esto envía el mismo paquete simultáneamente a múltiples servidores, garantizando la entrega incluso si la mayoría fallan.
+
+### Sección 4.2: Conflicto del Puerto 53 (Servidor Linux) 🛑
+Si el puerto 53 está ocupado por `systemd-resolved`:
+1. `sudo nano /etc/systemd/resolved.conf`
+2. Cambie a: `DNSStubListener=no`
+3. `sudo systemctl restart systemd-resolved`
+4. **Crítico:** Actualice `resolv.conf`: `sudo ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf`
+
+---
+
+## Sección 5: Arquitectura y Flujo de Trabajo 🛠️
+
+### Sección 5.1: Diagrama de Arquitectura de Alto Nivel
 
 ```mermaid
 graph TD
-    subgraph Client_Machine ["🖥️ Máquina cliente"]
-        App["📱 Aplicación local\n(Navegador / cualquier app TCP)"]
-        Client["🐍 MasterDnsVPN Client\n(SOCKS5 listener en :1080)"]
+    subgraph Client_Side ["🖥️ Sistema del Usuario (Cliente)"]
+        App["📱 Aplicaciones (Navegador, Telegram, etc.)"]
+        Client["🐍 Cliente MasterDnsVPN<br>(Proxy SOCKS5/TCP)"]
     end
 
-    subgraph Public_DNS ["🌐 Resolvedores DNS públicos"]
-        R1["📡 8.8.8.8 (Google)"]
-        R2["📡 1.1.1.1 (Cloudflare)"]
-        R3["📡 9.9.9.9 (Quad9)"]
-        RN["📡 ...más resolvedores"]
+    subgraph DNS_Network ["🌐 Red DNS Pública"]
+        R1["📡 Resolver 1 (ej. 8.8.8.8)"]
+        R2["📡 Resolver 2 (ej. 1.1.1.1)"]
+        RN["📡 ... Otros Resolvers"]
     end
 
-    subgraph Server_Machine ["🖥️ Servidor VPN"]
-        Server["🐍 MasterDnsVPN Server\n(UDP :53 — NS autoritativo)"]
-        Proxy["🔀 Proxy local\n(VLESS / SOCKS5 / SSH)"]
+    subgraph Server_Side ["🖥️ Servidor Remoto (Servidor)"]
+        Server["🐍 Servidor MasterDnsVPN<br>(Escuchando en Puerto 53)"]
+        Target["🌐 Internet Libre<br>(o Proxy Externo)"]
     end
 
-    Internet["🌍 Internet"]
+    App -->|"Tráfico TCP"| Client
+    Client -->|"Consulta DNS TXT<br>(Cifrado + Fragmentación)"| R1
+    Client -->|"Consulta DNS TXT<br>(Duplicación de Paquetes)"| R2
+    Client -->|"Consulta DNS TXT<br>(Balanceo de Carga)"| RN
 
-    App -->|"Flujo TCP"| Client
-    Client -->|"Consultas DNS TXT cifradas\n(ruta 1: dominio A)"| R1
-    Client -->|"Consultas DNS TXT cifradas\n(ruta 2: dominio A)"| R2
-    Client -->|"Consultas DNS TXT cifradas\n(ruta 3: dominio B)"| R3
-    Client -->|"...paquetes duplicados\nen N rutas"| RN
+    R1 -->|"Reenviar a Servidor NS"| Server
+    R2 -->|"Reenviar a Servidor NS"| Server
+    RN -->|"Reenviar a Servidor NS"| Server
 
-    R1 -->|"Búsqueda NS → enruta al\nservidor autoritativo"| Server
-    R2 --> Server
-    R3 --> Server
-    RN --> Server
-
-    Server -->|"Datos TCP descifrados"| Proxy
-    Proxy -->|"Respuesta"| Server
-    Server -->|"Respuestas DNS cifradas"| R1
+    Server -->|"Reconstruir Paquetes (ARQ)<br>Reenviar al Destino"| Target
+    Target -->|"Respuesta del Destino"| Server
+    Server -->|"Respuesta DNS TXT<br>(Cifrada)"| R1
     R1 -->|"Respuesta DNS"| Client
+    Client -->|"Entregar Datos Intactos"| App
 ```
 
-### Flujo de paquetes (Diagrama de secuencia)
+### Sección 5.2: Ciclo de Vida del Paquete 🔄
 
 ```mermaid
 sequenceDiagram
-    participant App as 📱 Aplicación local
-    participant Client as 🐍 Cliente (ARQ)
-    participant DNS1 as 📡 Resolvedor 8.8.8.8
-    participant DNS2 as 📡 Resolvedor 1.1.1.1
-    participant Server as 🖥️ Servidor (ARQ)
-    participant Proxy as 🔀 Proxy
+    participant App as 📱 Aplicación del Usuario
+    participant Client as 🐍 Cliente (Capa ARQ)
+    participant DNS as 📡 Resolvers DNS
+    participant Server as 🖥️ Servidor (Capa ARQ)
+    participant Target as 🌐 Destino Final
 
-    App->>Client: Datos TCP (flujo continuo)
-
-    Note over Client: 1. Dividir datos en fragmentos del tamaño MTU
-    Note over Client: 2. Asignar número de secuencia (ARQ)
-    Note over Client: 3. Cifrar + codificar en etiqueta DNS TXT
-    Note over Client: 4. Duplicar en N rutas resolver+dominio
-
-    par Envío multi-ruta simultáneo (PACKET_DUPLICATION_COUNT = 2)
-        Client->>DNS1: Consulta DNS TXT — seq#5 — dominio A
-        Client->>DNS2: Consulta DNS TXT — seq#5 — dominio B
-    end
-
-    DNS1->>Server: Reenviar (NS autoritativo para dominio A)
-    DNS2->>Server: Reenviar (NS autoritativo para dominio B)
-
-    Note over Server: ARQ deduplica las copias de seq#5
-    Note over Server: Reordenar paquetes fuera de secuencia
-    Note over Server: Descifrar y reensamblar flujo
-
-    Server->>Proxy: Reenviar datos TCP reensamblados
-    Proxy-->>Server: Datos de respuesta
-
-    Note over Server: Dividir respuesta, cifrar, encolar
-
-    Server-->>DNS1: Respuesta DNS TXT — seq#5 ack + datos
-    DNS1-->>Client: Respuesta DNS
-
-    Note over Client: ARQ reordena y entrega en orden a App
-
-    Client-->>App: Datos TCP (en orden)
+    App->>Client: Enviar datos TCP (continuos)
+    Note over Client: 1. Fragmentar datos basado en MTU<br>2. Cifrar y añadir cabecera VPN<br>3. Asignar Número de Secuencia
+    Client->>DNS: Enviar consulta simultáneamente a varios resolvers
+    DNS->>Server: Reenviar consultas (El servidor es el NS)
+    Note over Server: 1. ARQ descarta duplicados<br>2. Se ordenan los paquetes<br>3. Petición descifrada
+    Server->>Target: Conexión SOCKS5/TCP al destino
+    Target-->>Server: Recibir respuesta
+    Note over Server: Fragmentar, cifrar y encolar
+    Server-->>DNS: Enviar respuesta en registros TXT
+    DNS-->>Client: Entregar respuesta DNS al Cliente
+    Note over Client: Ordenar, Confirmar (ACK), Reconstruir TCP
+    Client-->>App: Entregar datos intactos a la App
 ```
 
-### Conceptos clave
+---
 
-| Concepto | Descripción |
-|---|---|
-| **Session** | Una conexión de cliente; hasta 255 sesiones concurrentes por servidor |
-| **Stream** | Una conexión TCP multiplexada sobre una sesión |
-| **MTU Probing** | Búsqueda binaria al inicio para encontrar el tamaño máximo de payload DNS en su ruta |
-| **ARQ** | Números de secuencia + retransmisión garantizan que no se pierdan datos sobre UDP/DNS |
-| **PACKET_DUPLICATION_COUNT** | Cada paquete se envía simultáneamente por este número de rutas resolver+dominio |
-| **Resolver Balancing** | Estrategias: Aleatorio (1), Round-Robin (2), Menor pérdida (3) |
+## Sección 6: Notas Técnicas Avanzadas ⚙️
+
+- ⚡ **SOCKS5 Directo (Fast-Connect):** Configurar `USE_EXTERNAL_SOCKS5` como `false` permite que el código en Python enrute el tráfico directamente al destino, reduciendo drásticamente la latencia.
+- 🔄 **Sondeo Adaptativo:** El cliente reduce la frecuencia de sus consultas `Keep-Alive` cuando no hay tráfico, para evitar saturar la red DNS.
+- 🔒 **Biblioteca Cryptography:** Requiere instalación para algoritmos AES-GCM. Sin embargo, para hardware limitado como routers, el método interno `XOR` no requiere dependencias adicionales y es extremadamente rápido.
 
 ---
 
-## 📝 Notas técnicas
-
-- ⚡ **Optimización de MTU:** Al conectarse, el cliente realiza una búsqueda binaria para encontrar la MTU máxima posible para su ruta específica. Esto garantiza la máxima velocidad sin fragmentación de paquetes.
-
-- 🔄 **Sondeo adaptativo:** El cliente utiliza mecanismos de retroceso inteligente y comprobación de inactividad para reducir la sobrecarga de DNS cuando no se transmite tráfico.
-
-- 🔒 **Cifrado:** Para los métodos AES/ChaCha20 se requiere la biblioteca `cryptography`. Para dispositivos con recursos limitados, se recomienda XOR (Método 1).
-
-- 🔁 **Múltiples servidores simultáneos:** Puede ejecutar múltiples instancias independientes del servidor MasterDnsVPN, cada una con un dominio de túnel diferente, y listar todos los dominios en el array `DOMAINS` del cliente. El cliente tratará cada combinación dominio+resolvedor como una ruta separada, distribuyendo y duplicando automáticamente el tráfico en todas ellas.
+## 🤝 Contribuciones (Contributing)
+¡Las contribuciones son absolutamente bienvenidas! Si tiene ideas, correcciones o mejoras de rendimiento, haga un Fork del proyecto y envíe un Pull Request. Reporte cualquier problema exclusivamente en la sección de [Issues](https://github.com/masterking32/MasterDnsVPN/issues).
 
 ---
 
-## 🤝 Contribuciones
-¡Agradecemos sus contribuciones! Por favor, forkee el repositorio y cree una pull request con sus cambios.
-
----
-
-## 📄 Licencia
-Este proyecto está licenciado bajo la licencia MIT. Consulte el archivo de LICENCIA para obtener más información.
+## 📄 Licencia (License)
+Este proyecto está publicado bajo la Licencia **MIT**. Consulte el archivo `LICENSE` para todos los detalles.
 
 ---
 
 ## 👨‍💻 Desarrollador
-Desarrollado por [MasterkinG32](https://github.com/masterking32)
+Desarrollado con ❤️ por: [**MasterkinG32**](https://github.com/masterking32)
