@@ -77,7 +77,7 @@ Puede instalar y ejecutar este proyecto utilizando dos métodos: el método ráp
 Si desea configurar el servidor en una máquina Linux, la forma más sencilla es utilizar el script de instalación automatizado. Simplemente ejecute el siguiente comando en la terminal de su servidor:
 
 ```bash
-curl -sL [https://raw.githubusercontent.com/masterking32/MasterDnsVPN/main/server_linux_install.sh](https://raw.githubusercontent.com/masterking32/MasterDnsVPN/main/server_linux_install.sh) | sudo bash
+curl -sL https://raw.githubusercontent.com/masterking32/MasterDnsVPN/main/server_linux_install.sh | sudo bash
 ```
 
 Este comando descarga un script de GitHub y maneja automáticamente todo el proceso de instalación y configuración. Una vez finalizado, el servidor se iniciará y se mostrará una **Clave de Cifrado (Encryption Key)** en los registros de la terminal. Asegúrese de copiar esta clave (también se guarda en `encrypt_key.txt` junto al ejecutable del servidor), ya que la necesitará para conectar el cliente.
@@ -168,7 +168,7 @@ Para ejecutar el código fuente, Python debe estar instalado:
 
 ```bash
 # Clonar el repositorio e instalar dependencias
-git clone [https://github.com/masterking32/MasterDnsVPN.git](https://github.com/masterking32/MasterDnsVPN.git)
+git clone https://github.com/masterking32/MasterDnsVPN.git
 cd MasterDnsVPN
 pip install -r requirements.txt
 
