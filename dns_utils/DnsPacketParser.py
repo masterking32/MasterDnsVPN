@@ -933,7 +933,7 @@ class DnsPacketParser:
 
         if mtu > 0 and mtu < safe_bytes_capacity:
             final_mtu_bytes = mtu
-            final_mtu_chars = int((mtu * 8) / self.LOG2_36)
+            final_mtu_chars = int(math.ceil((mtu * 8) / self.LOG2_36))
         else:
             final_mtu_bytes = safe_bytes_capacity
             final_mtu_chars = max_payload_chars

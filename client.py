@@ -1005,15 +1005,17 @@ class MasterDnsVPNClient:
         try:
             buffer_size = int(self.config.get("SOCKET_BUFFER_SIZE", 8388608))
             try:
-                self.udp_sock.setsockopt(
+                self.tunnel_sock.setsockopt(
                     socket.SOL_SOCKET, socket.SO_RCVBUF, buffer_size
                 )
-                self.udp_sock.setsockopt(
+                self.tunnel_sock.setsockopt(
                     socket.SOL_SOCKET, socket.SO_SNDBUF, buffer_size
                 )
             except OSError:
                 new_size = 65535
-                self.udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, new_size)
+                self.tunnel_sock.setsockopt(
+                    socket.SOL_SOCKET, socket.SO_RCVBUF, new_size
+                )
         except Exception as e:
             self.logger.debug(f"Failed to increase socket buffer: {e}")
 
