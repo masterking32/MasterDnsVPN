@@ -1049,9 +1049,21 @@ class MasterDnsVPNClient:
                     reuse_port=True,
                 )
 
-            self.logger.success(
-                f"<g>Ready! Local Proxy listening on {listen_ip}:{listen_port}</g>"
-            )
+            if self.protocol_type == "SOCKS5":
+                if self.config.get("AUTH_USERNAME") and self.config.get(
+                    "AUTH_PASSWORD"
+                ):
+                    self.logger.info(
+                        f"<green>SOCKS5 Proxy started on {listen_port} with Authentication. Username: <cyan>{self.config.get('AUTH_USERNAME')}</cyan></green>"
+                    )
+                else:
+                    self.logger.info(
+                        f"<green>SOCKS5 Proxy started on {listen_port} without Authentication.</green>"
+                    )
+            else:
+                self.logger.info(
+                    f"<green>TCP Proxy started on {listen_port} (Protocol: {self.protocol_type})</green>"
+                )
 
             self.workers = []
 
