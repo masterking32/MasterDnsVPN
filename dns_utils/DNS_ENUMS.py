@@ -52,7 +52,7 @@ class DNS_Record_Type:
     MINFO = 14  # Mailbox information
     MX = 15  # Mail exchange
     TXT = 16  # Text strings
-    PR = 17  # Responsible person
+    RP = 17  # Responsible person
     AFSDB = 18  # AFS database
     X25 = 19  # X.25 calling address
     ISDN = 20  # ISDN calling address
@@ -81,7 +81,7 @@ class DNS_Record_Type:
     DS = 43  # Delegation signer
     SSHFP = 44  # SSH public key fingerprint
     IPSECKEY = 45  # IPsec key
-    RPSIG = 46  # DNSSEC signature
+    RRSIG = 46  # DNSSEC signature
     NSEC = 47  # Next secure record
     DNSKEY = 48  # DNS key record
     DHCID = 49  # DHCP identifier
