@@ -22,5 +22,5 @@ logs/
 *.tar.gz
 *.bak
 *.tmp
-.exe
+*.exe
 build/
