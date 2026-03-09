@@ -46,7 +46,7 @@ jobs:
             arch: amd64
             ext: .exe
             package: zip
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             platform: Linux
             arch: amd64
             ext: ""
