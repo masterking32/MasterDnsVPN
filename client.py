@@ -1886,7 +1886,7 @@ class MasterDnsVPNClient:
         stream_data["status"] = "CLOSING"
 
         self.logger.info(
-            f"<yellow>Closing Client Stream <cyan>{stream_id}</cyan>. Reason: <red>{reason}</red></yellow>"
+            f"<yellow>Closing Client Stream <cyan>{stream_id}</cyan>. Reason: <yellow>{reason}</yellow></yellow>"
         )
 
         stream_obj = stream_data.get("stream")
@@ -2074,9 +2074,6 @@ def main():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
-        if sys.platform == "win32":
-            loop.run_forever = lambda: loop.run_until_complete(asyncio.sleep(3600 * 24))
-
         def custom_exception_handler(loop, context):
             msg = context.get("message", "")
             if (
@@ -2128,7 +2125,8 @@ def main():
                 pass
 
         try:
-            loop.run_until_complete(client.start())
+            loop.create_task(client.start())
+            loop.run_forever()
         except KeyboardInterrupt:
             try:
                 client._signal_handler(signal.SIGINT, None)

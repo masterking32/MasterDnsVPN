@@ -1086,7 +1086,7 @@ class MasterDnsVPNServer:
             session["closed_streams"].pop(next(iter(session["closed_streams"])))
 
         self.logger.info(
-            f"<yellow>Closing Stream <cyan>{stream_id}</cyan> in Session <cyan>{session_id}</cyan>. Reason: <red>{reason}</red></yellow>"
+            f"<yellow>Closing Stream <cyan>{stream_id}</cyan> in Session <cyan>{session_id}</cyan>. Reason: <yellow>{reason}</yellow></yellow>"
         )
 
         arq_obj = stream_data.get("arq_obj")
