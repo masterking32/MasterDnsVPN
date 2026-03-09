@@ -42,7 +42,7 @@ echo -e "${CYAN}------------------------------------------------------${NC}"
 log_header "Preparing Environment"
 log_info "Updating system and installing dependencies..."
 apt-get update -y > /dev/null 2>&1
-apt-get install -y lsof net-tools wget unzip curl > /dev/null 2>&1
+apt-get install -y lsof net-tools wget unzip curl ca-certificates > /dev/null 2>&1
 log_success "System tools are ready."
 
 # 2. Port 53 Management
@@ -124,10 +124,16 @@ chmod +x "$EXECUTABLE"
 log_header "Configuration"
 [ -f "server_config.toml.backup" ] && mv server_config.toml.backup server_config.toml && log_info "Config restored from backup."
 
-if [ -f "server_config.toml" ] && grep -q 'DOMAIN = \["v.domain.com"\]' server_config.toml; then
+if [ ! -f "server_config.toml" ] && [ -f "server_config.toml.simple" ]; then
+    cp server_config.toml.simple server_config.toml
+fi
+
+if [ -f "server_config.toml" ] && grep -Fq 'DOMAIN = ["v.domain.com"]' server_config.toml; then
     echo -e "${YELLOW}${BOLD}Attention:${NC} You need to set your NS Record Domain."
     read -p ">>> Enter your Domain (e.g. vpn.example.com): " USER_DOMAIN
-    [ -n "$USER_DOMAIN" ] && sed -i "s/DOMAIN = \\[\"v.domain.com\"\\]/DOMAIN = \\[\"$USER_DOMAIN\"\\]/" server_config.toml
+    if [ -n "$USER_DOMAIN" ]; then
+        sed -i 's/DOMAIN = \["v\.domain\.com"\]/DOMAIN = ["'"$USER_DOMAIN"'"]/' server_config.toml
+    fi
 fi
 
 # 5. Initialization & Key
