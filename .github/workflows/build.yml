@@ -66,7 +66,7 @@ jobs:
             arch: arm64
             ext: ""
             package: tar.gz
-          - os: macos-13 # legacy MacOS Intel support
+          - os: macos-12 # legacy MacOS Intel support
             platform: MacOS
             arch: amd64
             ext: ""
