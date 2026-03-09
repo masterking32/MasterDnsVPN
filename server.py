@@ -14,7 +14,6 @@ import struct
 import sys
 import time
 from collections import deque
-from ctypes import wintypes
 from typing import Any, Optional
 
 from dns_utils import ARQ
@@ -1559,6 +1558,7 @@ def main():
             return
         if sys.platform == "win32":
             try:
+                from ctypes import wintypes
                 HandlerRoutine = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
 
                 def _console_handler(dwCtrlType):

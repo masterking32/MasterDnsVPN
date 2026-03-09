@@ -12,7 +12,6 @@ import socket
 import struct
 import sys
 import time
-from ctypes import wintypes
 from typing import Optional, Tuple
 
 from dns_utils import ARQ, PrependReader
@@ -2117,6 +2116,7 @@ def main():
         # On Windows, register a Console Ctrl Handler early so Ctrl+C is handled
         if sys.platform == "win32":
             try:
+                from ctypes import wintypes
                 HandlerRoutine = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
 
                 def _console_handler(dwCtrlType):
