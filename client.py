@@ -104,7 +104,7 @@ class MasterDnsVPNClient:
             input("Press Enter to exit...")
             sys.exit(1)
 
-        self.dns_packet_parser = DnsPacketParser(
+        self.dns_parser = DnsPacketParser(
             logger=self.logger,
             encryption_method=self.encryption_method,
             encryption_key=self.encryption_key,
@@ -210,7 +210,7 @@ class MasterDnsVPNClient:
         if not response_bytes:
             return None, b""
 
-        parsed = self.dns_packet_parser.parse_dns_packet(response_bytes)
+        parsed = self.dns_parser.parse_dns_packet(response_bytes)
         if addr and parsed and parsed.get("questions"):
             try:
                 qname = parsed["questions"][0].get("qName", "").lower()
@@ -236,7 +236,7 @@ class MasterDnsVPNClient:
             if answer.get("type") != DNS_Record_Type.TXT:
                 continue
 
-            txt_str = self.dns_packet_parser.extract_txt_from_rData(answer["rData"])
+            txt_str = self.dns_parser.extract_txt_from_rData(answer["rData"])
             if not txt_str:
                 continue
 
@@ -244,11 +244,11 @@ class MasterDnsVPNClient:
 
             if len(parts) == 3:
                 header_str, answer_id_str, chunk_payload = parts[0], parts[1], parts[2]
-                header_bytes = self.dns_packet_parser.decode_and_decrypt_data(
+                header_bytes = self.dns_parser.decode_and_decrypt_data(
                     header_str, lowerCaseOnly=False
                 )
 
-                parsed_header = self.dns_packet_parser.parse_vpn_header_bytes(
+                parsed_header = self.dns_parser.parse_vpn_header_bytes(
                     header_bytes
                 )
                 if parsed_header:
@@ -282,7 +282,7 @@ class MasterDnsVPNClient:
         else:
             assembled_data_str = "".join(chunks[i] for i in sorted(chunks.keys()))
 
-        decoded_data = self.dns_packet_parser.decode_and_decrypt_data(
+        decoded_data = self.dns_parser.decode_and_decrypt_data(
             assembled_data_str, lowerCaseOnly=False
         )
         return final_parsed_header, decoded_data
@@ -363,14 +363,14 @@ class MasterDnsVPNClient:
                 f"<magenta>[MTU Probe]</magenta> Testing Upload MTU: <yellow>{mtu_size}</yellow> bytes via <cyan>{dns_server}</cyan>"
             )
 
-        mtu_char_len, mtu_bytes = self.dns_packet_parser.calculate_upload_mtu(
+        mtu_char_len, mtu_bytes = self.dns_parser.calculate_upload_mtu(
             domain=domain, mtu=mtu_size
         )
         if mtu_size > mtu_bytes or mtu_char_len < 29:
             return False
 
         random_hex = generate_random_hex_text(mtu_char_len)
-        dns_queries = self.dns_packet_parser.build_request_dns_query(
+        dns_queries = self.dns_parser.build_request_dns_query(
             domain=domain,
             session_id=os.urandom(1)[0],
             packet_type=Packet_Type.MTU_UP_REQ,
@@ -429,15 +429,15 @@ class MasterDnsVPNClient:
             )
 
         data_bytes = mtu_size.to_bytes(4, "big")
-        encrypted_data = self.dns_packet_parser.codec_transform(
+        encrypted_data = self.dns_parser.codec_transform(
             data_bytes, encrypt=True
         )
 
-        mtu_char_len, _ = self.dns_packet_parser.calculate_upload_mtu(
+        mtu_char_len, _ = self.dns_parser.calculate_upload_mtu(
             domain=domain, mtu=64
         )
 
-        dns_queries = self.dns_packet_parser.build_request_dns_query(
+        dns_queries = self.dns_parser.build_request_dns_query(
             domain=domain,
             session_id=os.urandom(1)[0],
             packet_type=Packet_Type.MTU_DOWN_REQ,
@@ -488,7 +488,7 @@ class MasterDnsVPNClient:
     ) -> tuple:
         try:
             self.logger.debug(f"<cyan>[MTU]</cyan> Testing upload MTU for {domain}")
-            mtu_char_len, mtu_bytes = self.dns_packet_parser.calculate_upload_mtu(
+            mtu_char_len, mtu_bytes = self.dns_parser.calculate_upload_mtu(
                 domain=domain, mtu=0
             )
             if default_mtu > 512 or default_mtu <= 0:
@@ -510,7 +510,7 @@ class MasterDnsVPNClient:
                 allowed_min_mtu=self.min_upload_mtu,
             )
             if optimal_mtu > 29:
-                mtu_char_len, mtu_bytes = self.dns_packet_parser.calculate_upload_mtu(
+                mtu_char_len, mtu_bytes = self.dns_parser.calculate_upload_mtu(
                     domain=domain, mtu=optimal_mtu
                 )
                 return True, mtu_bytes, mtu_char_len
@@ -557,11 +557,11 @@ class MasterDnsVPNClient:
             if self.encryption_method == 0:
                 enc_header = raw_header
             else:
-                enc_header = self.dns_packet_parser.codec_transform(
+                enc_header = self.dns_parser.codec_transform(
                     raw_header, encrypt=True
                 )
 
-            base36_header = self.dns_packet_parser.base_encode(
+            base36_header = self.dns_parser.base_encode(
                 enc_header, lowerCaseOnly=True
             )
             prefix_len = len(base36_header) + 3
@@ -573,7 +573,7 @@ class MasterDnsVPNClient:
 
             unique_domains = set(self.domains)
             for d in unique_domains:
-                _, max_up_bytes = self.dns_packet_parser.calculate_upload_mtu(
+                _, max_up_bytes = self.dns_parser.calculate_upload_mtu(
                     domain=d, mtu=0
                 )
                 optimal_up_mtu = max_up_bytes
@@ -707,11 +707,11 @@ class MasterDnsVPNClient:
                 + sync_token
             )
 
-            encrypted_data = self.dns_packet_parser.codec_transform(
+            encrypted_data = self.dns_parser.codec_transform(
                 data_bytes, encrypt=True
             )
 
-            dns_queries = self.dns_packet_parser.build_request_dns_query(
+            dns_queries = self.dns_parser.build_request_dns_query(
                 domain=domain,
                 session_id=self.session_id,
                 packet_type=Packet_Type.SET_MTU_REQ,
@@ -786,11 +786,11 @@ class MasterDnsVPNClient:
 
             init_token = os.urandom(8).hex().encode("ascii")
 
-            encrypted_token = self.dns_packet_parser.codec_transform(
+            encrypted_token = self.dns_parser.codec_transform(
                 init_token, encrypt=True
             )
 
-            dns_queries = self.dns_packet_parser.build_request_dns_query(
+            dns_queries = self.dns_parser.build_request_dns_query(
                 domain=domain,
                 session_id=0,
                 packet_type=Packet_Type.SESSION_INIT,
@@ -1718,7 +1718,7 @@ class MasterDnsVPNClient:
 
         try:
             data_encrypted = (
-                self.dns_packet_parser.codec_transform(data, encrypt=True)
+                self.dns_parser.codec_transform(data, encrypt=True)
                 if data
                 else b""
             )
@@ -1729,7 +1729,7 @@ class MasterDnsVPNClient:
 
             for conn in target_conns:
                 self.balancer.report_send(conn["_key"])
-                query_packets = self.dns_packet_parser.build_request_dns_query(
+                query_packets = self.dns_parser.build_request_dns_query(
                     domain=conn["domain"],
                     session_id=self.session_id,
                     packet_type=pkt_type,
