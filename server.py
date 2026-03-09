@@ -175,7 +175,7 @@ class MasterDnsVPNServer:
             return None
 
     async def _close_session(self, session_id: int) -> None:
-        session = self.sessions.pop(session_id, None)
+        session = self.sessions.get(session_id)
         if not session:
             return
 
