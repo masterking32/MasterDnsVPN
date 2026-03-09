@@ -1142,7 +1142,7 @@ class MasterDnsVPNServer:
             eff_priority = 0
         elif is_fin:
             ptype = Packet_Type.STREAM_FIN
-            eff_priority = 0
+            eff_priority = 4
         elif is_syn_ack:
             ptype = Packet_Type.STREAM_SYN_ACK
             eff_priority = 0

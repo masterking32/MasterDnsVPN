@@ -1458,7 +1458,7 @@ class MasterDnsVPNClient:
             effective_priority = 0
         elif is_fin:
             ptype = Packet_Type.STREAM_FIN
-            effective_priority = 0
+            effective_priority = 4
         elif is_resend:
             ptype = Packet_Type.STREAM_RESEND
             effective_priority = 1

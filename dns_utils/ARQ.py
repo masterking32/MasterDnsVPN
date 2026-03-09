@@ -162,7 +162,21 @@ class ARQ:
                 if final_reason == "Unknown":
                     final_reason = "IO Loop Exit"
 
-                asyncio.create_task(self.close(reason=final_reason))
+                if "EOF" in final_reason:
+                    asyncio.create_task(self._graceful_close(final_reason))
+                else:
+                    asyncio.create_task(self.close(reason=final_reason))
+
+    async def _graceful_close(self, reason):
+        """
+        Wait for unacknowledged data to be sent and ACKed before closing.
+        """
+        wait_time = 0
+        while len(self.snd_buf) > 0 and wait_time < 30.0 and not self.closed:
+            await asyncio.sleep(0.5)
+            wait_time += 0.5
+
+        await self.close(reason=reason)
 
     async def _retransmit_loop(self):
         """Separate lightweight task for RTO checks."""
@@ -275,7 +289,7 @@ class ARQ:
         if not self._fin_sent:
             self._fin_sent = True
             try:
-                await self.enqueue_tx(0, self.stream_id, 0, b"", is_fin=True)
+                await self.enqueue_tx(4, self.stream_id, 0, b"", is_fin=True)
             except Exception:
                 pass
 
