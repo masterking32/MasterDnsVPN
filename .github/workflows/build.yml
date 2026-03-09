@@ -8,8 +8,10 @@ permissions:
 
 jobs:
   preflight:
-    name: Preflight - suggest secrets
+    name: Preflight - suggest secrets & generate tag
     runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.get_tag.outputs.tag }}
     steps:
       - name: Print recommended secrets and guidance
         run: |
@@ -19,6 +21,14 @@ jobs:
           echo " - STORAGE_TOKEN: (optional) token for private artifact stores"
           echo
           echo "To add a secret: repository Settings → Secrets and variables → Actions → New repository secret"
+
+      - name: Generate Release Tag
+        id: get_tag
+        run: |
+          SHORT_SHA=$(echo ${GITHUB_SHA} | cut -c1-7)
+          TS=$(date -u +%Y.%m.%d.%H%M%S)
+          echo "tag=v${TS}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Generated Tag: v${TS}-${SHORT_SHA}"
 
   build:
     name: Build (matrix)
@@ -41,14 +51,24 @@ jobs:
             arch: amd64
             ext: ""
             package: tar.gz
+          - os: ubuntu-20.04 # legacy Linux compatibility
+            platform: Linux-Legacy
+            arch: amd64
+            ext: ""
+            package: tar.gz
           - os: ubuntu-latest
             platform: Linux
             arch: arm64
             ext: ""
             package: tar.gz
-          - os: macos-latest
+          - os: macos-latest # Apple Silicon (M1/M2)
             platform: MacOS
             arch: arm64
+            ext: ""
+            package: tar.gz
+          - os: macos-13 # legacy MacOS Intel support
+            platform: MacOS
+            arch: amd64
             ext: ""
             package: tar.gz
 
@@ -83,11 +103,11 @@ jobs:
 
       - name: Build client
         run: |
-          pyinstaller --onefile --name "MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}" client.py
+          pyinstaller --onefile --icon=assets/masterdnsvpn.ico --name "MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}" client.py
 
       - name: Build server
         run: |
-          pyinstaller --onefile --name "MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}" server.py
+          pyinstaller --onefile --icon=assets/masterdnsvpn.ico --name "MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}" server.py
 
       - name: Bundle config templates with executables
         shell: bash
@@ -104,21 +124,27 @@ jobs:
           $platform = '${{ matrix.platform }}'
           $arch = '${{ matrix.arch }}'
           $ext = '${{ matrix.ext }}'
+          $tag = '${{ needs.preflight.outputs.release_tag }}'
           $archUpper = $arch.ToUpper()
-          $clientDesiredBase = "MasterDnsVPN_Client_${platform}_$archUpper"
-          $serverDesiredBase = "MasterDnsVPN_Server_${platform}_$archUpper"
+
+          $clientZipBase = "MasterDnsVPN_Client_${platform}_$archUpper"
+          $serverZipBase = "MasterDnsVPN_Server_${platform}_$archUpper"
+
+          $clientExeName = "${clientZipBase}_${tag}${ext}"
+          $serverExeName = "${serverZipBase}_${tag}${ext}"
+
           $clientOrig = "MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }}"
           $serverOrig = "MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }}"
 
           if (Test-Path $clientOrig) {
-            Rename-Item -Path $clientOrig -NewName "${clientDesiredBase}${ext}" -Force
+            Rename-Item -Path $clientOrig -NewName $clientExeName -Force
           }
           if (Test-Path $serverOrig) {
-            Rename-Item -Path $serverOrig -NewName "${serverDesiredBase}${ext}" -Force
+            Rename-Item -Path $serverOrig -NewName $serverExeName -Force
           }
 
-          Compress-Archive -Path "${clientDesiredBase}${ext}","client_config.toml" -DestinationPath "${clientDesiredBase}.zip" -Force
-          Compress-Archive -Path "${serverDesiredBase}${ext}","server_config.toml" -DestinationPath "${serverDesiredBase}.zip" -Force
+          Compress-Archive -Path $clientExeName,"client_config.toml" -DestinationPath "${clientZipBase}.zip" -Force
+          Compress-Archive -Path $serverExeName,"server_config.toml" -DestinationPath "${serverZipBase}.zip" -Force
 
       - name: Package artifacts (non-Windows)
         if: ${{ matrix.os != 'windows-latest' }}
@@ -128,32 +154,36 @@ jobs:
           cd dist
           ARCH_UPPER=$(echo "${{ matrix.arch }}" | tr '[:lower:]' '[:upper:]')
           PLATFORM="${{ matrix.platform }}"
+          TAG="${{ needs.preflight.outputs.release_tag }}"
 
-          CLIENT_DESIRED_BASE="MasterDnsVPN_Client_${PLATFORM}_${ARCH_UPPER}"
-          SERVER_DESIRED_BASE="MasterDnsVPN_Server_${PLATFORM}_${ARCH_UPPER}"
+          CLIENT_ZIP_BASE="MasterDnsVPN_Client_${PLATFORM}_${ARCH_UPPER}"
+          SERVER_ZIP_BASE="MasterDnsVPN_Server_${PLATFORM}_${ARCH_UPPER}"
+
+          CLIENT_EXE_NAME="${CLIENT_ZIP_BASE}_${TAG}${{ matrix.ext }}"
+          SERVER_EXE_NAME="${SERVER_ZIP_BASE}_${TAG}${{ matrix.ext }}"
 
           CLIENT_ORIG="MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }}"
           SERVER_ORIG="MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }}"
 
           if [ -f "${CLIENT_ORIG}" ]; then
-            mv "${CLIENT_ORIG}" "${CLIENT_DESIRED_BASE}${{ matrix.ext }}" || true
+            mv "${CLIENT_ORIG}" "${CLIENT_EXE_NAME}" || true
           fi
           if [ -f "${SERVER_ORIG}" ]; then
-            mv "${SERVER_ORIG}" "${SERVER_DESIRED_BASE}${{ matrix.ext }}" || true
+            mv "${SERVER_ORIG}" "${SERVER_EXE_NAME}" || true
           fi
 
-          CLIENT_ZIP="${CLIENT_DESIRED_BASE}.zip"
-          SERVER_ZIP="${SERVER_DESIRED_BASE}.zip"
-          CLIENT_TAR="${CLIENT_DESIRED_BASE}.tar.gz"
-          SERVER_TAR="${SERVER_DESIRED_BASE}.tar.gz"
+          CLIENT_ZIP="${CLIENT_ZIP_BASE}.zip"
+          SERVER_ZIP="${SERVER_ZIP_BASE}.zip"
+          CLIENT_TAR="${CLIENT_ZIP_BASE}.tar.gz"
+          SERVER_TAR="${SERVER_ZIP_BASE}.tar.gz"
 
           CLIENT_TOML="client_config.toml"
           SERVER_TOML="server_config.toml"
 
-          zip -j "${CLIENT_ZIP}" "${CLIENT_DESIRED_BASE}${{ matrix.ext }}" "${CLIENT_TOML}" || true
-          tar -czf "${CLIENT_TAR}" "${CLIENT_DESIRED_BASE}${{ matrix.ext }}" "${CLIENT_TOML}" || true
-          zip -j "${SERVER_ZIP}" "${SERVER_DESIRED_BASE}${{ matrix.ext }}" "${SERVER_TOML}" || true
-          tar -czf "${SERVER_TAR}" "${SERVER_DESIRED_BASE}${{ matrix.ext }}" "${SERVER_TOML}" || true
+          zip -j "${CLIENT_ZIP}" "${CLIENT_EXE_NAME}" "${CLIENT_TOML}" || true
+          tar -czf "${CLIENT_TAR}" "${CLIENT_EXE_NAME}" "${CLIENT_TOML}" || true
+          zip -j "${SERVER_ZIP}" "${SERVER_EXE_NAME}" "${SERVER_TOML}" || true
+          tar -czf "${SERVER_TAR}" "${SERVER_EXE_NAME}" "${SERVER_TOML}" || true
 
       - name: Code sign Windows executables (optional)
         if: ${{ env.CODE_SIGN_CERT != '' && matrix.os == 'windows-latest' }}
@@ -174,7 +204,7 @@ jobs:
           } else { Write-Host "cert.pfx not found after decode; skipping signing." }
 
       - name: Code sign macOS executables (optional)
-        if: ${{ env.CODE_SIGN_CERT != '' && matrix.os == 'macos-latest' }}
+        if: ${{ env.CODE_SIGN_CERT != '' && startsWith(matrix.os, 'macos') }}
         shell: bash
         run: |
           echo "Decoding CODE_SIGN_CERT to cert.pfx"
@@ -182,12 +212,11 @@ jobs:
           if [ -f cert.pfx ]; then
             echo "Importing cert.pfx into login keychain (may require interactive access)"
             security import cert.pfx -k ~/Library/Keychains/login.keychain -P "${{ env.CODE_SIGN_CERT_PASSWORD }}" -T /usr/bin/codesign || true
-            # attempt to find an identity and codesign
             IDENTITY=$(security find-identity -v -p codesigning | head -n1 | awk -F '"' '{print $2}') || true
             if [ -n "$IDENTITY" ]; then
               echo "Found identity: $IDENTITY. Signing macOS binaries."
-              for f in ./dist/*${{ matrix.platform }}*${{ matrix.arch }}*; do
-                if [ -f "$f" ]; then
+              for f in ./dist/*${{ matrix.platform }}*${{ matrix.arch }}_v*; do
+                if [ -f "$f" ] && [[ "$f" != *.* ]]; then
                   codesign --sign "$IDENTITY" --options runtime --timestamp --force "$f" || true
                 fi
               done
@@ -209,7 +238,7 @@ jobs:
   release:
     name: Create Release and attach artifacts
     runs-on: ubuntu-latest
-    needs: build
+    needs: [preflight, build]
     steps:
       - name: Checkout repository (fetch tags)
         uses: actions/checkout@v4
@@ -227,10 +256,6 @@ jobs:
           ls -la release_assets || true
           echo "Recursive listing:" 
           find release_assets -maxdepth 3 -print || true
-
-      - name: Get short commit SHA
-        id: get_short_sha
-        run: echo "short_sha=$(echo ${GITHUB_SHA} | cut -c1-7)" >> $GITHUB_OUTPUT
 
       - name: Build release notes body
         id: create_release
@@ -298,14 +323,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Get timestamp for tag
-        id: get_timestamp
-        run: |
-          echo "ts=$(date -u +%Y.%m.%d.%H%M%S)" >> $GITHUB_OUTPUT
-
       - name: Debug release assets and planned tag
         run: |
-          echo "Planned release tag: ${{ steps.get_short_sha.outputs.short_sha }}-${{ steps.get_timestamp.outputs.ts }}"
+          echo "Planned release tag: ${{ needs.preflight.outputs.release_tag }}"
           echo "Contents of release_assets:"
           find release_assets -maxdepth 5 -type f -print || true
 
@@ -325,8 +345,8 @@ jobs:
           files: |
             release_assets/**/*.zip
             release_assets/**/*.tar.gz
-          tag_name: v${{ steps.get_timestamp.outputs.ts }}-${{ steps.get_short_sha.outputs.short_sha }}
-          name: Release v${{ steps.get_timestamp.outputs.ts }} (${{ steps.get_short_sha.outputs.short_sha }})
+          tag_name: ${{ needs.preflight.outputs.release_tag }}
+          name: Release ${{ needs.preflight.outputs.release_tag }}
           body: ${{ fromJson(steps.create_release.outputs.result).body }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
