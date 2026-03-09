@@ -855,23 +855,6 @@ class MasterDnsVPNClient:
         """Run the MasterDnsVPN Client main logic."""
         self.logger.info("Setting up connections...")
         all_resolvers = 0
-        self.count_ping = 0
-        self.active_streams = {}
-        self.enqueue_seq = 0
-        self.last_stream_id = 0
-        self.main_queue = []
-        self.tx_event = asyncio.Event()
-        self.round_robin_index = 0
-        self.last_stream_id = 0
-
-        self.count_ack = 0
-        self.count_data = 0
-        self.count_resend = 0
-        self.count_ping = 0
-        self.track_ack = set()
-        self.track_resend = set()
-        self.track_types = set()
-        self.track_data = set()
         try:
             self.session_restart_event = asyncio.Event()
 
