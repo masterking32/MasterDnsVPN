@@ -2034,25 +2034,33 @@ class MasterDnsVPNClient:
         except asyncio.TimeoutError:
             pass
 
-    def _signal_handler(self, signum, frame) -> None:
-        """Handle termination signals to stop the client gracefully.
+    def _signal_handler(self, signum, frame=None) -> None:
+        """Handle termination signals to stop the client gracefully (Thread-Safe)."""
 
-        Only log the received signal the first time to avoid repeated INFO
-        messages when multiple console events are received.
-        """
-        if not self.should_stop.is_set():
-            self.logger.info(
-                f"<red>Received signal <cyan>{signum}</cyan>. Stopping MasterDnsVPN Client...</red>"
-            )
-            self.should_stop.set()
-            if self.session_restart_event and not self.session_restart_event.is_set():
-                self.session_restart_event.set()
-            self.logger.info("<magenta>Stopping MasterDnsVPN Client...</magenta>")
+        def _trigger_stop():
+            if getattr(self, "should_stop", None) and not self.should_stop.is_set():
+                self.logger.info(
+                    f"<red>Received signal <cyan>{signum}</cyan>. Stopping MasterDnsVPN Client...</red>"
+                )
+                self.should_stop.set()
+                if (
+                    getattr(self, "session_restart_event", None)
+                    and not self.session_restart_event.is_set()
+                ):
+                    self.session_restart_event.set()
+                self.logger.info("<magenta>Stopping MasterDnsVPN Client...</magenta>")
+            else:
+                self.logger.info(
+                    f"<red>Received signal <cyan>{signum}</cyan> again. Forcing exit...</red>"
+                )
+                os._exit(0)
 
-        else:
-            self.logger.info(
-                f"<red>Received signal <cyan>{signum}</cyan> again. Already stopping...</red>"
-            )
+        try:
+            if getattr(self, "loop", None) and self.loop.is_running():
+                self.loop.call_soon_threadsafe(_trigger_stop)
+            else:
+                _trigger_stop()
+        except Exception:
             os._exit(0)
 
 
