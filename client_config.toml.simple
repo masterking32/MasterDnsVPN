@@ -59,7 +59,7 @@ RESOLVER_DNS_SERVERS = [
 
 # Maximum number of packets to duplicate and send for each DNS query to improve reliability on unstable networks.
 # Increase this value to improve reliability on highly unstable networks, but be aware it will increase bandwidth usage.
-# For example, setting PACKET_DUPLICATION_COUNT = 3 means each packet will be sent 5 times in a row to 5 different DNS resolvers, and the server will accept the first valid response it receives, ignoring duplicates.
+# For example, setting PACKET_DUPLICATION_COUNT = 3 means each packet will be sent 3 times in a row to 3 different DNS resolvers, and the server will accept the first valid response it receives, ignoring duplicates.
 PACKET_DUPLICATION_COUNT = 3
 
 # Maximum number of packets to batch together in a single DNS response.
