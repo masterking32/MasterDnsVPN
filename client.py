@@ -64,6 +64,8 @@ class MasterDnsVPNClient:
         self.min_upload_mtu: int = self.config.get("MIN_UPLOAD_MTU", 0)
         self.min_download_mtu: int = self.config.get("MIN_DOWNLOAD_MTU", 0)
 
+        self.base_encode_responses: bool = self.config.get("BASE_ENCODE_DATA", False)
+
         self.mtu_test_retries: int = self.config.get("MTU_TEST_RETRIES", 2)
         self.mtu_test_timeout: float = float(self.config.get("MTU_TEST_TIMEOUT", 1.0))
 
@@ -137,6 +139,14 @@ class MasterDnsVPNClient:
         self.logger.debug("<magenta>[INIT]</magenta> MasterDnsVPNClient initialized.")
 
         self._block_packer = struct.Struct(">BHH")
+        self.config_version = self.config.get("CONFIG_VERSION", 0.1)
+        self.min_config_version = 1.0
+
+        if self.config_version < self.min_config_version:
+            self.logger.warning(
+                f"Your config version ({self.config_version}) is outdated. "
+                f"Please update your config file to the latest version ({self.min_config_version}) for best performance and new features."
+            )
 
     # ---------------------------------------------------------
     # Connection Management
@@ -230,7 +240,9 @@ class MasterDnsVPNClient:
             except Exception:
                 pass
 
-        return self.dns_parser.extract_vpn_response(parsed)
+        return self.dns_parser.extract_vpn_response(
+            parsed, is_encoded=self.base_encode_responses
+        )
 
     # ---------------------------------------------------------
     # MTU Testing Logic
@@ -314,7 +326,8 @@ class MasterDnsVPNClient:
         if mtu_size > mtu_bytes or mtu_char_len < 29:
             return False
 
-        random_hex = generate_random_hex_text(mtu_char_len)
+        flag_str = "1" if self.base_encode_responses else "0"
+        random_hex = flag_str + generate_random_hex_text(mtu_char_len - 1)
         dns_queries = self.dns_parser.build_request_dns_query(
             domain=domain,
             session_id=os.urandom(1)[0],
@@ -374,11 +387,12 @@ class MasterDnsVPNClient:
                 f"<magenta>[MTU Probe]</magenta> Testing Download MTU: <yellow>{mtu_size}</yellow> bytes via <cyan>{dns_server}</cyan>"
             )
 
-        target_length = max(4, up_mtu_bytes)
-        data_bytes = mtu_size.to_bytes(4, "big")
+        target_length = max(5, up_mtu_bytes)
+        flag_byte = b"\x01" if self.base_encode_responses else b"\x00"
+        data_bytes = flag_byte + mtu_size.to_bytes(4, "big")
 
-        if target_length > 4:
-            data_bytes += os.urandom(target_length - 4)
+        if target_length > 5:
+            data_bytes += os.urandom(target_length - 5)
 
         encrypted_data = self.dns_parser.codec_transform(data_bytes, encrypt=True)
 
@@ -1032,8 +1046,10 @@ class MasterDnsVPNClient:
             resolver = selected_conn.get("resolver")
 
             init_token = os.urandom(8).hex().encode("ascii")
+            flag_byte = b"\x01" if self.base_encode_responses else b"\x00"
+            payload = init_token + flag_byte
 
-            encrypted_token = self.dns_parser.codec_transform(init_token, encrypt=True)
+            encrypted_token = self.dns_parser.codec_transform(payload, encrypt=True)
 
             dns_queries = self.dns_parser.build_request_dns_query(
                 domain=domain,
@@ -1645,22 +1661,36 @@ class MasterDnsVPNClient:
                 await asyncio.wait_for(
                     self.active_streams[stream_id]["handshake_event"].wait(),
                     timeout=60.0,
-                )  # بعدا یادم باشه اگه زودتر نشست کلاینت بسته شد اینو هم چک کنم دیگه صبر نکنه الکی!
+                )
 
                 if (
                     stream_id in self.active_streams
                     and self.active_streams[stream_id].get("status") == "ACTIVE"
                 ):
-                    reply = b"\x05\x00\x00"  # VER, REP=0(success), RSV
-                    if atyp == 0x01:
-                        reply += b"\x01" + target_addr_bytes + target_port_bytes
-                    elif atyp == 0x03:
-                        reply += b"\x03" + target_addr_bytes + target_port_bytes
-                    elif atyp == 0x04:
-                        reply += b"\x04" + target_addr_bytes + target_port_bytes
+                    if writer and not writer.is_closing():
+                        reply = b"\x05\x00\x00"  # VER, REP=0(success), RSV
+                        if atyp == 0x01:
+                            reply += b"\x01" + target_addr_bytes + target_port_bytes
+                        elif atyp == 0x03:
+                            reply += b"\x03" + target_addr_bytes + target_port_bytes
+                        elif atyp == 0x04:
+                            reply += b"\x04" + target_addr_bytes + target_port_bytes
 
-                    writer.write(reply)
-                    await writer.drain()
+                        try:
+                            writer.write(reply)
+                            await writer.drain()
+                        except Exception as e:
+                            self.logger.debug(
+                                f"Failed to write SOCKS5 reply to local client: {e}"
+                            )
+                            await self.close_stream(
+                                stream_id,
+                                reason="Local client disconnected during handshake",
+                            )
+                    else:
+                        raise ConnectionError(
+                            "Local writer closed before SOCKS5 reply."
+                        )
                 else:
                     raise ConnectionError("Stream closed before handshake completion.")
 
@@ -2030,6 +2060,11 @@ class MasterDnsVPNClient:
 
     async def _handle_server_response(self, header, data):
         ptype = header["packet_type"]
+        header_session_id = header.get("session_id", -1)
+
+        if header_session_id != self.session_id and ptype != Packet_Type.SESSION_ACCEPT:
+            return
+
         stream_id = header.get("stream_id", 0)
         sn = header.get("sequence_num", 0)
 
@@ -2174,6 +2209,12 @@ class MasterDnsVPNClient:
             return
 
         stream_data["status"] = "CLOSING"
+
+        if (
+            "handshake_event" in stream_data
+            and not stream_data["handshake_event"].is_set()
+        ):
+            stream_data["handshake_event"].set()
 
         self.logger.info(
             f"<yellow>Closing Client Stream <cyan>{stream_id}</cyan>. Reason: <yellow>{reason}</yellow></yellow>"

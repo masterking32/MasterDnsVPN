@@ -76,6 +76,14 @@ MAX_PACKETS_PER_BATCH = 3
 #   3 - Least Loss: Prefer resolvers with the lowest observed packet-loss rate.
 RESOLVER_BALANCING_STRATEGY = 2
 
+# Server Response Encoding
+# If True, the client will request that the server base64-encode the response data.
+# This can help bypass certain filters that block non-ASCII data in DNS responses, but it increases
+# response size and adds encoding overhead. By default, this is false, though some servers may
+# ignore this flag and always base64-encode responses.
+# Change it to true if you didn't find any good resolvers with supporting bytes transfer
+BASE_ENCODE_DATA = false
+
 # ------------------------------------------------------------------------------
 # 4. MTU TESTING SETTINGS (Accuracy vs Speed)
 # ------------------------------------------------------------------------------
@@ -137,3 +145,8 @@ SOCKET_BUFFER_SIZE = 8388608
 
 # Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL
 LOG_LEVEL = "INFO"
+
+--------------------------------------------------------------------------------
+# DO NOT EDIT BELOW UNLESS YOU KNOW WHAT YOU ARE DOING! (Advanced Settings)
+CONFIG_VERSION = 1.0
+--------------------------------------------------------------------------------

@@ -100,3 +100,8 @@ SESSION_TIMEOUT = 300  # 5 minutes
 
 # Frequency (seconds) at which the server checks for and removes expired sessions.
 SESSION_CLEANUP_INTERVAL = 60  # 1 minute
+
+--------------------------------------------------------------------------------
+# DO NOT EDIT BELOW UNLESS YOU KNOW WHAT YOU ARE DOING! (Advanced Settings)
+CONFIG_VERSION = 1.0
+--------------------------------------------------------------------------------

@@ -8,6 +8,7 @@ import asyncio
 import ctypes
 import heapq
 import os
+import random
 import signal
 import socket
 import struct
@@ -17,10 +18,9 @@ from collections import deque
 from ctypes import wintypes
 from typing import Any, Optional
 
-from dns_utils import ARQ
+from dns_utils import ARQ, DnsPacketParser
 from dns_utils.config_loader import get_config_path, load_config
 from dns_utils.DNS_ENUMS import DNS_Record_Type, Packet_Type
-from dns_utils import DnsPacketParser
 from dns_utils.utils import async_recvfrom, async_sendto, get_encrypt_key, getLogger
 
 # Ensure UTF-8 output for consistent logging
@@ -66,6 +66,8 @@ class MasterDnsVPNServer:
         self.socks5_auth: bool = self.config.get("SOCKS5_AUTH", False)
         self.socks5_user: str = str(self.config.get("SOCKS5_USER", ""))
         self.socks5_pass: str = str(self.config.get("SOCKS5_PASS", ""))
+
+        self.recently_closed_sessions = {}
 
         if self.protocol_type not in ("SOCKS5", "TCP"):
             self.logger.error(
@@ -134,10 +136,19 @@ class MasterDnsVPNServer:
 
         self._block_packer = struct.Struct(">BHH")
 
+        self.config_version = self.config.get("CONFIG_VERSION", 0.1)
+        self.min_config_version = 1.0
+
+        if self.config_version < self.min_config_version:
+            self.logger.warning(
+                f"Your config version ({self.config_version}) is outdated. "
+                f"Please update your config file to the latest version ({self.min_config_version}) for best performance and new features."
+            )
+
     # ---------------------------------------------------------
     # Session Management
     # ---------------------------------------------------------
-    async def new_session(self) -> Optional[int]:
+    async def new_session(self, base_flag: bool = False) -> Optional[int]:
         """
         Create a new session and return its session ID.
         """
@@ -166,10 +177,15 @@ class MasterDnsVPNServer:
                 "upload_mtu": 512,
                 "download_mtu": 512,
                 "max_packed_blocks": 1,
+                "base_encode_responses": base_flag,
             }
 
+            server_response_type = "Bytes"
+            if base_flag:
+                server_response_type = "Base-Encoded String"
+
             self.logger.info(
-                f"<green>Created new session with ID: <cyan>{session_id}</cyan></green>"
+                f"<green>Created new session with ID: <cyan>{session_id}</cyan>, Response Type: <cyan>{server_response_type}</cyan></green>"
             )
             return session_id
         except Exception as e:
@@ -184,6 +200,12 @@ class MasterDnsVPNServer:
         self.logger.debug(
             f"<yellow>Closing Session <cyan>{session_id}</cyan> and all its streams...</yellow>"
         )
+
+        base_flag = session.get("base_encode_responses", False)
+        self.recently_closed_sessions[session_id] = {
+            "time": time.monotonic(),
+            "base_encode": base_flag,
+        }
 
         stream_ids = list(session.get("streams", {}).keys())
 
@@ -240,30 +262,31 @@ class MasterDnsVPNServer:
         extracted_header=None,
     ) -> Optional[bytes]:
         """Handle NEW_SESSION VPN packet."""
-
-        client_token = self.dns_parser.extract_vpn_data_from_labels(labels)
-        if not client_token:
+        client_payload = self.dns_parser.extract_vpn_data_from_labels(labels)
+        if not client_payload or len(client_payload) < 17:
             return None
 
-        new_session_id = await self.new_session()
+        flag = client_payload[-1]
+        client_token = client_payload[:-1]
+        base_encode = flag == 1
+
+        new_session_id = await self.new_session(base_encode)
         if new_session_id is None:
-            self.logger.debug(
-                f"<red>Failed to create new session for NEW_SESSION packet from {addr}</red>"
-            )
+            self.logger.debug(f"<red>Failed to create new session from {addr}</red>")
             return None
 
         response_bytes = (
             client_token + b":" + str(new_session_id).encode("ascii", errors="ignore")
         )
-        response_packet = self.dns_parser.generate_vpn_response_packet(
+
+        return self.dns_parser.generate_vpn_response_packet(
             domain=request_domain,
             session_id=new_session_id,
             packet_type=Packet_Type.SESSION_ACCEPT,
             data=response_bytes,
             question_packet=data,
+            encode_data=base_encode,
         )
-
-        return response_packet
 
     async def _session_cleanup_loop(self) -> None:
         """Background task to periodically cleanup inactive sessions (Crash-Proof)."""
@@ -291,6 +314,14 @@ class MasterDnsVPNServer:
                         self.logger.debug(
                             f"<red>Error closing session <cyan>{sid}</cyan>: {e}</red>"
                         )
+
+                expired_closed = [
+                    sid
+                    for sid, data in self.recently_closed_sessions.items()
+                    if now - data["time"] > 600
+                ]
+                for sid in expired_closed:
+                    self.recently_closed_sessions.pop(sid, None)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -348,7 +379,10 @@ class MasterDnsVPNServer:
             )
         elif packet_type == Packet_Type.MTU_UP_REQ:
             return await self._handle_mtu_up(
-                request_domain=request_domain, session_id=session_id, data=data
+                request_domain=request_domain,
+                session_id=session_id,
+                data=data,
+                labels=labels,
             )
         elif packet_type == Packet_Type.MTU_DOWN_REQ:
             return await self._handle_mtu_down(
@@ -370,12 +404,27 @@ class MasterDnsVPNServer:
             self.logger.warning(
                 f"<yellow>Packet received for expired/invalid session <cyan>{session_id}</cyan> from <cyan>{addr}</cyan>. Dropping.</yellow>"
             )
+
+            closed_info = self.recently_closed_sessions.get(session_id)
+            if not closed_info:
+                return self.dns_parser.generate_vpn_response_packet(
+                    domain=request_domain,
+                    session_id=session_id,
+                    packet_type=Packet_Type.ERROR_DROP,
+                    data=b"INVALID",
+                    question_packet=data,
+                    encode_data=random.choice([True, False]),
+                )
+
+            is_base = closed_info["base_encode"] if closed_info else True
+
             return self.dns_parser.generate_vpn_response_packet(
                 domain=request_domain,
                 session_id=session_id,
                 packet_type=Packet_Type.ERROR_DROP,
                 data=b"INVALID",
                 question_packet=data,
+                encode_data=is_base,
             )
 
         now_mono = time.monotonic()
@@ -681,6 +730,8 @@ class MasterDnsVPNServer:
         if res_ptype == Packet_Type.PONG:
             res_data = b"PO:" + os.urandom(4)
 
+        base_encode = session.get("base_encode_responses", False)
+
         return self.dns_parser.generate_vpn_response_packet(
             domain=request_domain,
             session_id=session_id,
@@ -689,6 +740,7 @@ class MasterDnsVPNServer:
             question_packet=data,
             stream_id=res_stream_id,
             sequence_num=res_sn,
+            encode_data=base_encode,
         )
 
     async def _process_socks5_target(self, session_id, stream_id, target_payload):
@@ -991,12 +1043,14 @@ class MasterDnsVPNServer:
             f"<green>Session <cyan>{session_id}</cyan> MTU synced - Upload: <cyan>{safe_upload_mtu}</cyan>, Download: <cyan>{safe_download_mtu}</cyan></green>"
         )
 
+        base_encode = session.get("base_encode_responses", False)
         return self.dns_parser.generate_vpn_response_packet(
             domain=request_domain,
             session_id=session_id,
             packet_type=Packet_Type.SET_MTU_RES,
             data=sync_token,
             question_packet=data,
+            encode_data=base_encode,
         )
 
     async def _handle_mtu_down(
@@ -1024,13 +1078,15 @@ class MasterDnsVPNServer:
             first_part_of_data, lowerCaseOnly=True
         )
 
-        if not download_size_bytes or len(download_size_bytes) < 4:
+        if not download_size_bytes or len(download_size_bytes) < 5:
             self.logger.warning(
                 f"Failed to decode download size in SERVER_DOWNLOAD_TEST packet from {addr}"
             )
             return None
 
-        download_size = int.from_bytes(download_size_bytes[:4], "big")
+        flag = download_size_bytes[0]
+        base_encode = flag == 1
+        download_size = int.from_bytes(download_size_bytes[1:5], "big")
 
         if download_size < 29:
             self.logger.warning(
@@ -1038,11 +1094,11 @@ class MasterDnsVPNServer:
             )
             return None
 
-        if download_size > len(download_size_bytes):
-            padding_len = download_size - len(download_size_bytes)
-            raw_plaintext = download_size_bytes + os.urandom(padding_len)
+        if download_size > len(download_size_bytes) - 1:
+            padding_len = download_size - (len(download_size_bytes) - 1)
+            raw_plaintext = download_size_bytes[1:] + os.urandom(padding_len)
         else:
-            raw_plaintext = download_size_bytes[:download_size]
+            raw_plaintext = download_size_bytes[1 : 1 + download_size]
 
         return self.dns_parser.generate_vpn_response_packet(
             domain=request_domain,
@@ -1050,6 +1106,7 @@ class MasterDnsVPNServer:
             packet_type=Packet_Type.MTU_DOWN_RES,
             data=raw_plaintext,
             question_packet=data,
+            encode_data=base_encode,
         )
 
     async def _handle_mtu_up(
@@ -1063,12 +1120,16 @@ class MasterDnsVPNServer:
         extracted_header=None,
     ) -> Optional[bytes]:
         """Handle SERVER_UPLOAD_TEST VPN packet."""
+        raw_label = labels.split(".")[0] if "." in labels else labels
+        base_encode = raw_label.startswith("1")
+
         return self.dns_parser.generate_vpn_response_packet(
             domain=request_domain,
             session_id=session_id if session_id is not None else 255,
             packet_type=Packet_Type.MTU_UP_RES,
             data=b"1",
             question_packet=data,
+            encode_data=base_encode,
         )
 
     # ---------------------------------------------------------
