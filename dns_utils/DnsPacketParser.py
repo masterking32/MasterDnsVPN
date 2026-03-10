@@ -342,13 +342,21 @@ class DnsPacketParser:
             flags = ((question_packet[2] << 8) | question_packet[3]) | 0x8000
             qd_count = (question_packet[4] << 8) | question_packet[5]
 
+            ar_count = (question_packet[10] << 8) | question_packet[11]
+
             offset = 12
             for _ in range(qd_count):
                 _, offset = self._parse_dns_name_from_bytes(question_packet, offset)
                 offset += 4  # Skip Type and Class
 
+            res_ar_count = 0
+            edns0_bytes = b""
+            if ar_count > 0:
+                edns0_bytes = b"\x00\x00\x29\x10\x00\x00\x00\x00\x00\x00\x00"
+                res_ar_count = 1
+
             new_header = self._HEADER_PACKER.pack(
-                pkt_id, flags, qd_count, len(answers), 0, 0
+                pkt_id, flags, qd_count, len(answers), 0, res_ar_count
             )
 
             parts = [new_header, question_packet[12:offset]]
@@ -357,6 +365,9 @@ class DnsPacketParser:
                 _append(
                     self._serialize_resource_record(ans, compress_pointer=b"\xc0\x0c")
                 )
+
+            if res_ar_count > 0:
+                _append(edns0_bytes)
 
             return b"".join(parts)
         except Exception as e:
@@ -789,37 +800,36 @@ class DnsPacketParser:
         total_fragments: int = 0,
         total_data_length: int = 0,
     ) -> bytes:
-        MAX_ALLOWED_CHARS_PER_TXT = 191
-
         header = self.create_vpn_header(
             session_id,
             packet_type,
-            base36_encode=False,
-            stream_id=stream_id,
-            sequence_num=sequence_num,
-            fragment_id=fragment_id,
-            total_fragments=total_fragments,
-            total_data_length=total_data_length,
+            False,
+            stream_id,
+            sequence_num,
+            fragment_id,
+            total_fragments,
+            total_data_length,
         )
-        base_enc = self.base_encode
-        simple_ans = self.simple_answer_packet
+
+        header_b = header.encode("ascii", errors="ignore")
+        header_dot = header_b + b"."
+
         txt_type = DNS_Record_Type.TXT
         in_class = DNS_QClass.IN
-
-        data_str = base_enc(data, lowerCaseOnly=False)
+        simple_ans = self.simple_answer_packet
         answers = []
         append = answers.append
 
+        data_str = self.base_encode(data, lowerCaseOnly=False)
+
         if not data_str:
-            full_chunk_str = header + ".0."
-            encoded = full_chunk_str.encode("ascii", errors="ignore")
             append(
                 {
                     "name": domain,
                     "type": txt_type,
                     "class": in_class,
                     "TTL": 0,
-                    "rData": bytes((len(encoded),)) + encoded,
+                    "rData": bytes((len(header_dot),)) + header_dot,
                 }
             )
             return simple_ans(answers, question_packet)
@@ -827,42 +837,56 @@ class DnsPacketParser:
         data_bytes = data_str.encode("ascii", errors="ignore")
         data_len = len(data_bytes)
 
-        prefix_bytes = (header + ".0.").encode("ascii", errors="ignore")
-        prefix_len = len(prefix_bytes)
+        if data_len + len(header_dot) <= 255:
+            full_chunk = header_dot + data_bytes
+            append(
+                {
+                    "name": domain,
+                    "type": txt_type,
+                    "class": in_class,
+                    "TTL": 0,
+                    "rData": bytes((len(full_chunk),)) + full_chunk,
+                }
+            )
+            return simple_ans(answers, question_packet)
 
-        merged_rdata_parts = []
-        _append = merged_rdata_parts.append
+        cur = 0
+        chunk_id = 0
 
-        available_space = MAX_ALLOWED_CHARS_PER_TXT - prefix_len
-        first_chunk_payload = data_bytes[0:available_space]
-        full_chunk = prefix_bytes + first_chunk_payload
-        _append(bytes((len(full_chunk),)) + full_chunk)
-
-        cur = available_space
+        int_cache = self._int_bytes_cache
+        header_prefix = header_dot + b"0."
 
         while cur < data_len:
-            next_idx = cur + MAX_ALLOWED_CHARS_PER_TXT
-            chunk_payload = data_bytes[cur:next_idx]
+            if chunk_id == 0:
+                prefix = header_prefix
+            else:
+                prefix = int_cache.get(chunk_id) or (str(chunk_id) + ".").encode(
+                    "ascii"
+                )
 
-            _append(bytes((len(chunk_payload),)) + chunk_payload)
-            cur = next_idx
+            available_space = 255 - len(prefix)
+            chunk_payload = data_bytes[cur : cur + available_space]
+            full_chunk = prefix + chunk_payload
 
-        answers.append(
-            {
-                "name": domain,
-                "type": txt_type,
-                "class": in_class,
-                "TTL": 0,
-                "rData": b"".join(merged_rdata_parts),
-            }
-        )
+            append(
+                {
+                    "name": domain,
+                    "type": txt_type,
+                    "class": in_class,
+                    "TTL": 0,
+                    "rData": bytes((len(full_chunk),)) + full_chunk,
+                }
+            )
+
+            cur += available_space
+            chunk_id += 1
 
         return simple_ans(answers, question_packet)
 
     def extract_txt_from_rData(self, rData: bytes) -> str:
         """
         Extract and concatenate all TXT strings from the rData field.
-        Handles multiple character-strings packed within a single rData.
+        Optimized to join bytes at C-level before decoding.
         """
         if not rData:
             return ""
@@ -870,6 +894,7 @@ class DnsPacketParser:
         extracted = []
         offset = 0
         total_len = len(rData)
+        _append = extracted.append
 
         while offset < total_len:
             length = rData[offset]
@@ -878,15 +903,13 @@ class DnsPacketParser:
                 continue
 
             if offset + length > total_len:
-                extracted.append(rData[offset:].decode("utf-8", errors="ignore"))
+                _append(rData[offset:])
                 break
 
-            extracted.append(
-                rData[offset : offset + length].decode("utf-8", errors="ignore")
-            )
+            _append(rData[offset : offset + length])
             offset += length
 
-        return "".join(extracted)
+        return b"".join(extracted).decode("utf-8", errors="ignore")
 
     def calculate_upload_mtu(self, domain: str, mtu: int = 0) -> int:
         """

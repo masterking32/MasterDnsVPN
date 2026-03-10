@@ -1012,13 +1012,13 @@ class MasterDnsVPNServer:
             first_part_of_data, lowerCaseOnly=True
         )
 
-        if not download_size_bytes:
+        if not download_size_bytes or len(download_size_bytes) < 4:
             self.logger.warning(
                 f"Failed to decode download size in SERVER_DOWNLOAD_TEST packet from {addr}"
             )
             return None
 
-        download_size = int.from_bytes(download_size_bytes, "big")
+        download_size = int.from_bytes(download_size_bytes[:4], "big")
 
         if download_size < 29:
             self.logger.warning(
@@ -1026,8 +1026,8 @@ class MasterDnsVPNServer:
             )
             return None
 
-        padding_len = download_size - len(download_size_bytes)
-        if padding_len > 0:
+        if download_size > len(download_size_bytes):
+            padding_len = download_size - len(download_size_bytes)
             raw_plaintext = download_size_bytes + os.urandom(padding_len)
         else:
             raw_plaintext = download_size_bytes[:download_size]

@@ -229,9 +229,6 @@ class MasterDnsVPNClient:
                 pass
 
         if not parsed or not parsed.get("answers"):
-            self.logger.debug(
-                "<yellow>[PARSER]</yellow> DNS response contains no answers."
-            )
             return None, b""
 
         chunks = {}
@@ -269,22 +266,37 @@ class MasterDnsVPNClient:
                             pass
 
             elif len(parts) == 2:
-                answer_id_str, chunk_payload = parts[0], parts[1]
-                try:
-                    chunks[int(answer_id_str)] = chunk_payload
-                except ValueError:
-                    pass
+                if detected_packet_type is None:
+                    header_str, chunk_payload = parts[0], parts[1]
+                    header_bytes = self.dns_parser.decode_and_decrypt_data(
+                        header_str, lowerCaseOnly=False
+                    )
+                    parsed_header = self.dns_parser.parse_vpn_header_bytes(header_bytes)
+                    if parsed_header:
+                        detected_packet_type = parsed_header["packet_type"]
+                        final_parsed_header = parsed_header
+                        chunks[0] = chunk_payload
+                else:
+                    answer_id_str, chunk_payload = parts[0], parts[1]
+                    try:
+                        chunks[int(answer_id_str)] = chunk_payload
+                    except ValueError:
+                        pass
 
         if detected_packet_type is None or final_parsed_header is None:
-            self.logger.debug(
-                "<yellow>[PARSER]</yellow> No valid VPN header found in answers."
-            )
             return None, b""
 
         if len(chunks) == 1:
-            assembled_data_str = next(iter(chunks.values()))
+            assembled_data_str = (
+                chunks[0] if 0 in chunks else next(iter(chunks.values()))
+            )
         else:
-            assembled_data_str = "".join(chunks[i] for i in sorted(chunks.keys()))
+            parts = []
+            _append = parts.append
+            for i in range(len(chunks)):
+                if i in chunks:
+                    _append(chunks[i])
+            assembled_data_str = "".join(parts)
 
         decoded_data = self.dns_parser.decode_and_decrypt_data(
             assembled_data_str, lowerCaseOnly=False
@@ -425,6 +437,7 @@ class MasterDnsVPNClient:
         dns_server: str,
         dns_port: int,
         mtu_size: int,
+        up_mtu_bytes: int,
         is_retry: bool = False,
     ) -> bool:
         if not is_retry:
@@ -432,10 +445,17 @@ class MasterDnsVPNClient:
                 f"<magenta>[MTU Probe]</magenta> Testing Download MTU: <yellow>{mtu_size}</yellow> bytes via <cyan>{dns_server}</cyan>"
             )
 
+        target_length = max(4, up_mtu_bytes)
         data_bytes = mtu_size.to_bytes(4, "big")
+
+        if target_length > 4:
+            data_bytes += os.urandom(target_length - 4)
+
         encrypted_data = self.dns_parser.codec_transform(data_bytes, encrypt=True)
 
-        mtu_char_len, _ = self.dns_parser.calculate_upload_mtu(domain=domain, mtu=64)
+        mtu_char_len, _ = self.dns_parser.calculate_upload_mtu(
+            domain=domain, mtu=target_length
+        )
 
         dns_queries = self.dns_parser.build_request_dns_query(
             domain=domain,
@@ -519,14 +539,19 @@ class MasterDnsVPNClient:
         return False, 0, 0
 
     async def test_download_mtu_size(
-        self, domain: str, dns_server: str, dns_port: int, default_mtu: int
+        self,
+        domain: str,
+        dns_server: str,
+        dns_port: int,
+        default_mtu: int,
+        up_mtu_bytes: int,
     ) -> tuple:
         try:
             self.logger.debug(f"<cyan>[MTU]</cyan> Testing download MTU for {domain}")
 
             async def test_fn(m, is_retry=False):
                 return await self.send_download_mtu_test(
-                    domain, dns_server, dns_port, m, is_retry
+                    domain, dns_server, dns_port, m, up_mtu_bytes, is_retry
                 )
 
             optimal_mtu = await self._binary_search_mtu(
@@ -942,7 +967,7 @@ class MasterDnsVPNClient:
 
             # Step 2: Download MTU
             down_valid, down_mtu_bytes = await self.test_download_mtu_size(
-                domain, resolver, dns_port, self.max_download_mtu
+                domain, resolver, dns_port, self.max_download_mtu, up_mtu_bytes
             )
 
             if not down_valid or (
