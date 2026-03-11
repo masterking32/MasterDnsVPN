@@ -127,6 +127,7 @@ class ARQ:
                     self.snd_buf[sn] = {
                         "data": chunk,
                         "time": _monotonic(),
+                        "create_time": _monotonic(),
                         "retries": 0,
                         "current_rto": self.rto,
                         "is_socks_syn": True,
@@ -165,7 +166,8 @@ class ARQ:
 
                 self.snd_buf[sn] = {
                     "data": raw_data,
-                    "time": self.last_activity,
+                    "time": self.last_activity,,
+                    "create_time": _monotonic(),
                     "retries": 0,
                     "current_rto": self.rto,
                     "is_socks_syn": False,
@@ -218,7 +220,7 @@ class ARQ:
 
         self.close_reason = reason
 
-        deadline = time.monotonic() + 180.0
+        deadline = time.monotonic() + 300.0
         while self.snd_buf and time.monotonic() < deadline and not self.closed:
             await asyncio.sleep(0.05)
 
@@ -355,9 +357,8 @@ class ARQ:
         items_to_resend = []
         _append = items_to_resend.append
 
-        max_retries = 20
         for sn, info in list(self.snd_buf.items()):
-            if info["retries"] >= max_retries:
+            if info["create_time"] + 120.0 >= now:
                 await self.abort(reason=f"Max retransmissions exceeded for sn={sn}")
                 return
 

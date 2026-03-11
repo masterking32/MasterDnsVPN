@@ -1053,13 +1053,14 @@ class MasterDnsVPNClient:
         self.logger.info("Setting up connections...")
         all_resolvers = 0
         self.count_ping = 0
-        self.active_streams = {}
         self.enqueue_seq = 0
-        self.last_stream_id = 0
         self.main_queue = []
         self.tx_event = asyncio.Event()
         self.round_robin_index = 0
         self.last_stream_id = 0
+
+        self.active_streams = {}
+        self.closed_streams = {}
 
         self.count_ack = 0
         self.count_data = 0
@@ -1186,7 +1187,9 @@ class MasterDnsVPNClient:
         self.main_queue = []
         self.round_robin_index = 0
         self.tx_event = asyncio.Event()
+
         self.active_streams = {}
+        self.closed_streams = {}
         self.enqueue_seq = 0
         self.last_stream_id = 0
 
@@ -1764,6 +1767,9 @@ class MasterDnsVPNClient:
         else:
             stream_data = self.active_streams.get(stream_id)
             if not stream_data:
+                if is_rst or is_fin_ack:
+                    heapq.heappush(self.main_queue, queue_item)
+                    self.tx_event.set()
                 return
 
             if is_resend:
@@ -2023,6 +2029,20 @@ class MasterDnsVPNClient:
         stream_id = header.get("stream_id", 0)
         sn = header.get("sequence_num", 0)
 
+        if stream_id > 0 and stream_id in self.closed_streams:
+            if ptype == Packet_Type.STREAM_FIN:
+                await self._client_enqueue_tx(0, stream_id, sn, b"", is_fin_ack=True)
+                return
+            elif ptype in (
+                Packet_Type.STREAM_DATA,
+                Packet_Type.STREAM_RESEND,
+                Packet_Type.STREAM_DATA_ACK,
+            ):
+                await self._client_enqueue_tx(
+                    0, stream_id, 0, b"RST:" + os.urandom(4), is_rst=True
+                )
+                return
+
         stream_id_exists = False
         if stream_id > 0 and stream_id in self.active_streams:
             stream_id_exists = True
@@ -2093,13 +2113,25 @@ class MasterDnsVPNClient:
         elif ptype == Packet_Type.STREAM_FIN and stream_id_exists:
             self._send_ping_packet()
             stream_data = self.active_streams[stream_id]
-            stream_data["fin_retries"] = 99
-
             arq = stream_data.get("stream")
-            if arq:
-                arq._fin_received = True
-                arq._fin_seq_received = sn
-                await arq._try_finalize_remote_eof()
+            if (
+                arq
+                and getattr(arq, "_fin_sent", False)
+                and getattr(arq, "_fin_acked", False)
+            ):
+                stream_data["fin_retries"] = 99
+
+            if (
+                stream_data.get("status") in ("CLOSING", "TIME_WAIT")
+                or not arq
+                or getattr(arq, "closed", False)
+            ):
+                await self._client_enqueue_tx(0, stream_id, sn, b"", is_fin_ack=True)
+                return
+
+            arq._fin_received = True
+            arq._fin_seq_received = sn
+            await arq._try_finalize_remote_eof()
 
         elif ptype == Packet_Type.STREAM_FIN_ACK and stream_id_exists:
             arq = self.active_streams[stream_id].get("stream")
@@ -2107,8 +2139,6 @@ class MasterDnsVPNClient:
                 arq._fin_acked = True
                 if arq._fin_received:
                     await arq._try_finalize_remote_eof()
-                elif not arq.snd_buf:
-                    await self.close_stream(stream_id, reason="FIN acknowledged")
 
         elif ptype == Packet_Type.STREAM_RST and stream_id_exists:
             arq = self.active_streams[stream_id].get("stream")
@@ -2150,13 +2180,15 @@ class MasterDnsVPNClient:
     async def close_stream(
         self, stream_id: int, reason: str = "Unknown", abortive: bool = False
     ) -> None:
-        """Safely and fully close a specific local stream and salvage pending FIN/ACKs."""
+        """Safely close a stream without sending FIN before snd_buf is drained."""
 
         stream_data = self.active_streams.get(stream_id)
-        if not stream_data or stream_data.get("status") in ("CLOSING", "TIME_WAIT"):
+        if not stream_data:
             return
 
-        stream_data["status"] = "CLOSING"
+        status = stream_data.get("status")
+        if status in ("CLOSING", "TIME_WAIT"):
+            return
 
         if (
             "handshake_event" in stream_data
@@ -2164,18 +2196,44 @@ class MasterDnsVPNClient:
         ):
             stream_data["handshake_event"].set()
 
+        stream_obj = stream_data.get("stream") or stream_data.get("arq_obj")
+
+        # Phase 1: start graceful drain, but do NOT finalize yet
+        if not abortive and stream_obj and not getattr(stream_obj, "closed", False):
+            if not getattr(stream_obj, "_fin_sent", False):
+                stream_data["status"] = "DRAINING"
+                self.logger.debug(
+                    f"<yellow>Draining Client Stream <cyan>{stream_id}</cyan>. Reason: "
+                    f"<yellow>{reason}</yellow></yellow>"
+                )
+                try:
+                    await stream_obj._initiate_graceful_close(reason=reason)
+                except Exception:
+                    pass
+                return
+
+        # Phase 2: final cleanup
+        stream_data["status"] = "CLOSING"
+        self.closed_streams[stream_id] = time.monotonic()
+
+        if len(self.closed_streams) > 1000:
+            self.closed_streams.pop(next(iter(self.closed_streams)))
+
         self.logger.debug(
-            f"<yellow>Closing Client Stream <cyan>{stream_id}</cyan>. Reason: <yellow>{reason}</yellow></yellow>"
+            f"<yellow>Closing Client Stream <cyan>{stream_id}</cyan>. Reason: "
+            f"<yellow>{reason}</yellow></yellow>"
         )
 
-        stream_obj = stream_data.get("stream") or stream_data.get("arq_obj")
         if stream_obj:
             try:
                 if abortive:
                     await stream_obj.abort(reason=reason)
-                else:
+                elif not getattr(stream_obj, "closed", False):
                     await stream_obj.close(
-                        reason=reason, send_fin=False if stream_obj._rst_sent else True
+                        reason=reason,
+                        send_fin=False
+                        if getattr(stream_obj, "_rst_sent", False)
+                        else True,
                     )
             except Exception:
                 pass
@@ -2183,7 +2241,12 @@ class MasterDnsVPNClient:
         pending_tx = stream_data.get("tx_queue", [])
         if pending_tx:
             for item in pending_tx:
-                if item[2] in (Packet_Type.STREAM_FIN, Packet_Type.STREAM_DATA_ACK):
+                if item[2] in (
+                    Packet_Type.STREAM_FIN,
+                    Packet_Type.STREAM_FIN_ACK,
+                    Packet_Type.STREAM_RST,
+                    Packet_Type.STREAM_DATA_ACK,
+                ):
                     heapq.heappush(self.main_queue, item)
             self.tx_event.set()
 
@@ -2192,6 +2255,8 @@ class MasterDnsVPNClient:
             stream_data.get("track_data", set()).clear()
             stream_data.get("track_resend", set()).clear()
             stream_data.get("track_ack", set()).clear()
+            stream_data.get("track_fin", set()).clear()
+            stream_data.get("track_syn_ack", set()).clear()
             stream_data["status"] = "TIME_WAIT"
             stream_data["close_time"] = time.monotonic()
         except Exception:
@@ -2224,9 +2289,27 @@ class MasterDnsVPNClient:
                             s["last_activity_time"] = now
                             s["fin_retries"] = s.get("fin_retries", 0) + 1
                             fin_data = b"FIN:" + os.urandom(4)
+
+                            fin_sn = 0
+                            stream_obj = s.get("stream")
+                            if (
+                                stream_obj
+                                and getattr(stream_obj, "_fin_seq_sent", None)
+                                is not None
+                            ):
+                                fin_sn = stream_obj._fin_seq_sent
+
                             await self._client_enqueue_tx(
-                                1, sid, 0, fin_data, is_fin=True
+                                1, sid, fin_sn, fin_data, is_fin=True
                             )
+
+                expired_closed = [
+                    sid
+                    for sid, closed_at in self.closed_streams.items()
+                    if now - closed_at > 45.0
+                ]
+                for sid in expired_closed:
+                    self.closed_streams.pop(sid, None)
 
                 dead_streams = []
                 for sid, s in list(self.active_streams.items()):
@@ -2237,7 +2320,7 @@ class MasterDnsVPNClient:
                     if (
                         stream_obj
                         and getattr(stream_obj, "closed", False)
-                        and status == "ACTIVE"
+                        and status in ("ACTIVE", "DRAINING")
                     ):
                         dead_streams.append(sid)
                     elif status == "PENDING" and (now - create_time) > 350.0:

@@ -453,7 +453,12 @@ class MasterDnsVPNServer:
         sn = extracted_header.get("sequence_num", 0) if extracted_header else 0
 
         if stream_id > 0 and stream_id in session.get("closed_streams", {}):
-            if packet_type in (
+            if packet_type == Packet_Type.STREAM_FIN:
+                await self._server_enqueue_tx(
+                    session_id, 0, stream_id, sn, b"", is_fin_ack=True
+                )
+                return None
+            elif packet_type in (
                 Packet_Type.STREAM_DATA,
                 Packet_Type.STREAM_RESEND,
                 Packet_Type.STREAM_DATA_ACK,
@@ -535,8 +540,8 @@ class MasterDnsVPNServer:
                     await self._server_enqueue_tx(
                         session_id, 1, stream_id, sn, b"", is_ack=True
                     )
-                    await self._server_enqueue_tx(
-                        session_id, 2, stream_id, 0, b"", is_socks_syn_ack=True
+                    self.loop.create_task(
+                        self._repeat_socks_syn_ack(session_id, stream_id)
                     )
 
                 elif stream_data["status"] == "SOCKS_CONNECTING":
@@ -544,7 +549,11 @@ class MasterDnsVPNServer:
                         session_id, 1, stream_id, sn, b"", is_ack=True
                     )
 
-                elif stream_data["status"] == "SOCKS_HANDSHAKE":
+                elif stream_data["status"] in ("SOCKS_HANDSHAKE", "PENDING"):
+                    if "socks_chunks" not in stream_data:
+                        stream_data["socks_chunks"] = {}
+                    if stream_data.get("status") == "PENDING":
+                        stream_data["status"] = "SOCKS_HANDSHAKE"
                     extracted_data = self.dns_parser.extract_vpn_data_from_labels(
                         labels
                     )
@@ -597,8 +606,14 @@ class MasterDnsVPNServer:
         elif packet_type == Packet_Type.STREAM_FIN:
             stream_data = streams.get(stream_id)
             if stream_data:
-                stream_data["fin_retries"] = 99
                 arq = stream_data.get("arq_obj")
+                if (
+                    arq
+                    and getattr(arq, "_fin_sent", False)
+                    and getattr(arq, "_fin_acked", False)
+                ):
+                    stream_data["fin_retries"] = 99
+
                 if arq:
                     arq._fin_received = True
                     arq._fin_seq_received = sn
@@ -626,7 +641,9 @@ class MasterDnsVPNServer:
                     arq._fin_acked = True
                     if arq._fin_received:
                         await arq._try_finalize_remote_eof()
-                    elif not getattr(arq, "snd_buf", True):
+                    elif not getattr(arq, "snd_buf", True) and getattr(
+                        arq, "_remote_write_closed", False
+                    ):
                         await self.close_stream(
                             session_id, stream_id, reason="FIN acknowledged"
                         )
@@ -936,6 +953,16 @@ class MasterDnsVPNServer:
                 session_id, stream_id, reason=f"SOCKS target unreachable: {e}"
             )
 
+    async def _repeat_socks_syn_ack(self, session_id: int, stream_id: int):
+        for _ in range(3):
+            try:
+                await self._server_enqueue_tx(
+                    session_id, 2, stream_id, 0, b"", is_socks_syn_ack=True
+                )
+                await asyncio.sleep(0.08)
+            except Exception:
+                break
+
     async def handle_single_request(self, data, addr):
         """Handle a single DNS request efficiently."""
         if not data or not addr:
@@ -1184,34 +1211,53 @@ class MasterDnsVPNServer:
         reason: str = "Unknown",
         abortive: bool = False,
     ) -> None:
-        """Safely and fully close a specific stream, salvage pending FIN/ACKs, and free resources."""
+        """Safely close a specific stream without sending FIN before snd_buf is drained."""
         session = self.sessions.get(session_id)
         if not session:
             return
 
         session_streams = session.get("streams", {})
         stream_data = session_streams.get(stream_id)
-
-        if not stream_data or stream_data.get("status") in ("CLOSING", "TIME_WAIT"):
+        if not stream_data:
             return
 
-        stream_data["status"] = "CLOSING"
+        status = stream_data.get("status")
+        if status in ("CLOSING", "TIME_WAIT"):
+            return
 
+        arq_obj = stream_data.get("arq_obj")
+
+        # Phase 1: graceful drain first
+        if not abortive and arq_obj and not getattr(arq_obj, "closed", False):
+            if not getattr(arq_obj, "_fin_sent", False):
+                stream_data["status"] = "DRAINING"
+                self.logger.debug(
+                    f"<yellow>Draining Stream <cyan>{stream_id}</cyan> in Session "
+                    f"<cyan>{session_id}</cyan>. Reason: <yellow>{reason}</yellow></yellow>"
+                )
+                try:
+                    await arq_obj._initiate_graceful_close(reason=reason)
+                except Exception as e:
+                    self.logger.debug(f"Error draining ARQStream {stream_id}: {e}")
+                return
+
+        # Phase 2: final cleanup
+        stream_data["status"] = "CLOSING"
         session.setdefault("closed_streams", {})[stream_id] = time.monotonic()
 
         if len(session["closed_streams"]) > 1000:
             session["closed_streams"].pop(next(iter(session["closed_streams"])))
 
         self.logger.debug(
-            f"<yellow>Closing Stream <cyan>{stream_id}</cyan> in Session <cyan>{session_id}</cyan>. Reason: <yellow>{reason}</yellow></yellow>"
+            f"<yellow>Closing Stream <cyan>{stream_id}</cyan> in Session "
+            f"<cyan>{session_id}</cyan>. Reason: <yellow>{reason}</yellow></yellow>"
         )
 
-        arq_obj = stream_data.get("arq_obj")
         if arq_obj:
             try:
                 if abortive:
                     await arq_obj.abort(reason=reason)
-                else:
+                elif not getattr(arq_obj, "closed", False):
                     await arq_obj.close(reason=reason, send_fin=True)
             except Exception as e:
                 self.logger.debug(f"Error closing ARQStream {stream_id}: {e}")
@@ -1231,7 +1277,15 @@ class MasterDnsVPNServer:
         if pending_tx:
             main_q = session.setdefault("main_queue", [])
             for item in pending_tx:
-                heapq.heappush(main_q, item)
+                if item[2] in (
+                    Packet_Type.STREAM_FIN,
+                    Packet_Type.STREAM_FIN_ACK,
+                    Packet_Type.STREAM_RST,
+                    Packet_Type.STREAM_DATA_ACK,
+                    Packet_Type.STREAM_SYN_ACK,
+                    Packet_Type.SOCKS5_SYN_ACK,
+                ):
+                    heapq.heappush(main_q, item)
 
         try:
             stream_data["tx_queue"].clear()
@@ -1322,7 +1376,10 @@ class MasterDnsVPNServer:
         else:
             stream_data = session.get("streams", {}).get(stream_id)
             if not stream_data:
+                if is_rst or is_fin_ack:
+                    heapq.heappush(session["main_queue"], queue_item)
                 return
+
             if is_resend:
                 if sn in stream_data["track_data"]:
                     return
@@ -1465,8 +1522,18 @@ class MasterDnsVPNServer:
                                     stream_data.get("fin_retries", 0) + 1
                                 )
                                 fin_data = b"FIN:" + os.urandom(4)
+
+                                fin_sn = 0
+                                arq_obj = stream_data.get("arq_obj")
+                                if (
+                                    arq_obj
+                                    and getattr(arq_obj, "_fin_seq_sent", None)
+                                    is not None
+                                ):
+                                    fin_sn = arq_obj._fin_seq_sent
+
                                 await self._server_enqueue_tx(
-                                    session_id, 1, sid, 0, fin_data, is_fin=True
+                                    session_id, 1, sid, fin_sn, fin_data, is_fin=True
                                 )
 
                     closed_ids = [
