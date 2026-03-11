@@ -1079,15 +1079,16 @@ class MasterDnsVPNClient:
                 if not await self.test_mtu_sizes():
                     self.logger.error("No valid servers found to connect.")
                     return
+                # --- NEW LOGIC START ---
+                valid_conns.sort(key=lambda x: (x.get("upload_mtu_bytes", 0), x.get("download_mtu_bytes", 0)), reverse=True)
 
-                valid_conns = [c for c in self.connections_map if c.get("is_valid")]
+                num_workers = self.config.get("NUM_DNS_WORKERS", 4)
+                target_count = num_workers * 2
 
-                if not valid_conns:
-                    self.logger.error("No valid connections found after MTU testing!")
-                    return
-
-                self.balancer.set_balancers(valid_conns)
-
+                valid_conns = valid_conns[:target_count]
+                
+                self.logger.info(f"<cyan>Selected top {len(valid_conns)} DNS servers based on MTU for the VPN.</cyan>")
+                # --- NEW LOGIC END ---
                 self.synced_upload_mtu = min(c["upload_mtu_bytes"] for c in valid_conns)
                 self.synced_upload_mtu_chars = min(
                     c["upload_mtu_chars"] for c in valid_conns
