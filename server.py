@@ -149,10 +149,9 @@ class MasterDnsVPNServer:
     # ---------------------------------------------------------
     # Session Management
     # ---------------------------------------------------------
-    async def new_session(self, base_flag: bool = False) -> Optional[int]:
-        """
-        Create a new session and return its session ID.
-        """
+    async def new_session(
+        self, base_flag: bool = False, client_token: bytes = b""
+    ) -> Optional[int]:
         try:
             if not self.free_session_ids:
                 self.logger.error("All 255 session slots are full!")
@@ -164,6 +163,7 @@ class MasterDnsVPNServer:
             self.sessions[session_id] = {
                 "created_at": now,
                 "last_packet_time": now,
+                "init_token": client_token,
                 "streams": {},
                 "main_queue": [],
                 "round_robin_index": 0,
@@ -270,11 +270,29 @@ class MasterDnsVPNServer:
         flag = client_payload[-1]
         client_token = client_payload[:-1]
         base_encode = flag == 1
+        now = time.monotonic()
 
-        new_session_id = await self.new_session(base_encode)
-        if new_session_id is None:
-            self.logger.debug(f"<red>Failed to create new session from {addr}</red>")
-            return None
+        existing_session_id = None
+        for sid, sess in self.sessions.items():
+            if (
+                now - sess.get("created_at", 0) <= 10.0
+                and sess.get("init_token") == client_token
+            ):
+                existing_session_id = sid
+                break
+
+        if existing_session_id is not None:
+            new_session_id = existing_session_id
+            self.logger.debug(
+                f"<yellow>Retransmit detected from {addr}. Reusing Session {new_session_id}</yellow>"
+            )
+        else:
+            new_session_id = await self.new_session(base_encode, client_token)
+            if new_session_id is None:
+                self.logger.debug(
+                    f"<red>Failed to create new session from {addr}</red>"
+                )
+                return None
 
         response_bytes = (
             client_token + b":" + str(new_session_id).encode("ascii", errors="ignore")
