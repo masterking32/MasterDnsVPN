@@ -1304,6 +1304,7 @@ class MasterDnsVPNServer:
             return
 
         if stream_id in session.get("closed_streams", {}):
+            await self._server_enqueue_tx(session_id, 1, stream_id, 0, b"", is_fin=True)
             return
 
         session_streams = session["streams"]
