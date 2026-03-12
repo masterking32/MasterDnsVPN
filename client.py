@@ -121,7 +121,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
             )
         )
         self.max_packets_per_batch: int = int(
-            self.config.get("MAX_PACKETS_PER_BATCH", 3)
+            self.config.get("MAX_PACKETS_PER_BATCH", 100)
         )
         self.packet_duplication_count = self.config.get("PACKET_DUPLICATION_COUNT", 1)
 
@@ -197,7 +197,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
         # ---------------------------------------------------------
         # Packet/control metadata tables
         # ---------------------------------------------------------
-        self._block_packer = struct.Struct(">BHH")
+        self._block_packer = DnsPacketParser.PACKED_CONTROL_BLOCK_STRUCT
         self._valid_packet_types = {
             v
             for k, v in Packet_Type.__dict__.items()
@@ -232,7 +232,6 @@ class MasterDnsVPNClient(PacketQueueMixin):
                 Packet_Type.STREAM_SYN,
                 Packet_Type.STREAM_FIN,
                 Packet_Type.STREAM_RST,
-                Packet_Type.SOCKS5_SYN,
             }
         )
         self._socks5_error_reply_map = {
@@ -786,9 +785,9 @@ class MasterDnsVPNClient(PacketQueueMixin):
             )
             has_warnings = True
 
-        if self.max_packets_per_batch > 5:
+        if self.max_packets_per_batch < 10:
             self.logger.warning(
-                f"<yellow>🔸 [Performance]: <cyan>MAX_PACKETS_PER_BATCH</cyan> is set to <red>{self.max_packets_per_batch}</red>. Reduce to <green>1-5</green> for better performance. Higher values can increase latency and reduce performance due to larger batch processing times. Recommended: <green>1-3</green>.</yellow>"
+                f"<yellow>🔸 [Performance]: <cyan>MAX_PACKETS_PER_BATCH</cyan> is low (<red>{self.max_packets_per_batch}</red>). Consider increasing to <green>10</green>+ for better performance.</yellow>"
             )
             has_warnings = True
 
@@ -1353,18 +1352,15 @@ class MasterDnsVPNClient(PacketQueueMixin):
                     64, self.synced_upload_mtu - self.crypto_overhead
                 )
 
-                remaining_mtu_space = (
-                    self.safe_uplink_mtu - 4
-                )  # 4 bytes for os.urandom(4) to avoid DNS caching
-
+                upload_pack_limit = self._compute_mtu_based_pack_limit(
+                    self.synced_upload_mtu,
+                    50.0,
+                    self._block_packer.size,
+                )
                 self.max_packed_blocks = max(
                     1,
-                    min(
-                        remaining_mtu_space // 5,
-                        self.config.get("MAX_PACKETS_PER_BATCH", 3),
-                    ),
-                )  # Each block is 5 bytes (1 byte type + 2 bytes stream ID + 2 bytes seq num)
-
+                    min(upload_pack_limit, self.max_packets_per_batch),
+                )
                 max_found_upload_mtu = max(c["upload_mtu_bytes"] for c in valid_conns)
                 max_found_download_mtu = max(
                     c["download_mtu_bytes"] for c in valid_conns
@@ -2117,6 +2113,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
             target_queue = None
             is_main = False
             selected_stream_data = None
+            selected_sid = None
 
             active_sids = [
                 sid for sid, s in self.active_streams.items() if s.get("tx_queue")
@@ -2168,13 +2165,19 @@ class MasterDnsVPNClient(PacketQueueMixin):
                 target_priority = int(item[0])
 
                 candidate_queues = []
-                if self.main_queue:
-                    candidate_queues.append((self.main_queue, self.__dict__))
-                for sid in active_sids:
+                ordered_sids = active_sids
+                if (not is_main) and selected_sid in active_sids:
+                    start_idx = active_sids.index(selected_sid)
+                    ordered_sids = active_sids[start_idx:] + active_sids[:start_idx]
+
+                for sid in ordered_sids:
                     s_data = self.active_streams.get(sid)
                     if s_data and s_data.get("tx_queue"):
                         candidate_queues.append((s_data["tx_queue"], s_data))
 
+                # main_queue is a fallback/source for same-priority compact controls.
+                if self.main_queue:
+                    candidate_queues.append((self.main_queue, self.__dict__))
                 while blocks < max_blocks:
                     packed_any = False
                     for q_ref, owner in candidate_queues:
@@ -2317,25 +2320,36 @@ class MasterDnsVPNClient(PacketQueueMixin):
             stream_data["last_activity_time"] = time.monotonic()
 
         if ptype == Packet_Type.PACKED_CONTROL_BLOCKS and data:
-            _unpack_from = struct.unpack_from
-            for i in range(0, len(data), 5):
-                if i + 5 > len(data):
+            _unpack_from = self._block_packer.unpack_from
+            block_tasks = []
+            block_size = self._block_packer.size
+            for i in range(0, len(data), block_size):
+                if i + block_size > len(data):
                     break
-                b_ptype, b_stream_id, b_sn = _unpack_from(">BHH", data, i)
+                b_ptype, b_stream_id, b_sn = _unpack_from(data, i)
                 if b_ptype not in self._valid_packet_types:
                     continue
-                await self._handle_server_response(
-                    {
-                        "packet_type": b_ptype,
-                        "session_id": self.session_id,
-                        "stream_id": b_stream_id,
-                        "sequence_num": b_sn,
-                    },
-                    b"",
+                block_tasks.append(
+                    self._handle_server_response(
+                        {
+                            "packet_type": b_ptype,
+                            "session_id": self.session_id,
+                            "stream_id": b_stream_id,
+                            "sequence_num": b_sn,
+                        },
+                        b"",
+                    )
                 )
+
+            # Process packed controls in bounded parallel batches for lower latency.
+            for idx in range(0, len(block_tasks), 8):
+                await asyncio.gather(
+                    *block_tasks[idx : idx + 8],
+                    return_exceptions=True,
+                )
+
             self._send_ping_packet()
             return
-
         if ptype == Packet_Type.STREAM_SYN_ACK and stream_id_exists:
             if stream_data.get("stream") or stream_data.get("status") == "ACTIVE":
                 return

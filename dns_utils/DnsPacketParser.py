@@ -142,6 +142,10 @@ class DnsPacketParser:
     _Q_PACKER = struct.Struct(">HH")
     _HEADER_PACKER = struct.Struct(">HHHHHH")
 
+    # Packed control block format: packet_type(1) + stream_id(2) + sequence_num(2) = 5 bytes
+    PACKED_CONTROL_BLOCK_STRUCT = struct.Struct(">BHH")
+    PACKED_CONTROL_BLOCK_SIZE = PACKED_CONTROL_BLOCK_STRUCT.size
+
     _VALID_QTYPES = frozenset(
         v for k, v in DNS_Record_Type.__dict__.items() if not k.startswith("__")
     )

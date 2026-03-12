@@ -118,7 +118,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
         self.forward_ip = self.config["FORWARD_IP"]
         self.forward_port = int(self.config["FORWARD_PORT"])
 
-        self.max_packets_per_batch = int(self.config.get("MAX_PACKETS_PER_BATCH", 20))
+        self.max_packets_per_batch = int(self.config.get("MAX_PACKETS_PER_BATCH", 1000))
         self.arq_window_size = int(self.config.get("ARQ_WINDOW_SIZE", 300))
         self.session_timeout = int(self.config.get("SESSION_TIMEOUT", 300))
         self.session_cleanup_interval = int(
@@ -151,7 +151,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
             for k, v in Packet_Type.__dict__.items()
             if not k.startswith("__") and isinstance(v, int)
         }
-        self._block_packer = struct.Struct(">BHH")
+        self._block_packer = DnsPacketParser.PACKED_CONTROL_BLOCK_STRUCT
         self._stream_packet_handlers = {
             Packet_Type.STREAM_DATA: self._handle_stream_data_packet,
             Packet_Type.STREAM_RESEND: self._handle_stream_data_packet,
@@ -221,7 +221,6 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 Packet_Type.STREAM_SYN,
                 Packet_Type.STREAM_FIN,
                 Packet_Type.STREAM_RST,
-                Packet_Type.SOCKS5_SYN,
             }
         )
         self._socks5_rep_packet_map = {
@@ -936,22 +935,31 @@ class MasterDnsVPNServer(PacketQueueMixin):
             return
 
         _unpack_from = self._block_packer.unpack_from
-        for i in range(0, len(extracted_data), 5):
-            if i + 5 > len(extracted_data):
+        block_tasks = []
+        block_size = self._block_packer.size
+        for i in range(0, len(extracted_data), block_size):
+            if i + block_size > len(extracted_data):
                 break
             b_ptype, b_stream_id, b_sn = _unpack_from(extracted_data, i)
             if b_ptype not in self._valid_packet_types:
                 continue
 
-            # Re-dispatch packed blocks through normal per-type handlers.
-            await self._dispatch_stream_packet(
-                packet_type=b_ptype,
-                session_id=session_id,
-                stream_id=b_stream_id,
-                sn=b_sn,
-                labels="",
-                extracted_header={"packet_type": b_ptype},
-                now_mono=now_mono,
+            block_tasks.append(
+                self._dispatch_stream_packet(
+                    packet_type=b_ptype,
+                    session_id=session_id,
+                    stream_id=b_stream_id,
+                    sn=b_sn,
+                    labels="",
+                    extracted_header={"packet_type": b_ptype},
+                    now_mono=now_mono,
+                )
+            )
+
+        for idx in range(0, len(block_tasks), 8):
+            await asyncio.gather(
+                *block_tasks[idx : idx + 8],
+                return_exceptions=True,
             )
 
     async def _dispatch_stream_packet(
@@ -1087,15 +1095,19 @@ class MasterDnsVPNServer(PacketQueueMixin):
 
         main_queue = session.get("main_queue")
 
-        active_entries = [sdata for sdata in streams.values() if sdata.get("tx_queue")]
+        active_stream_ids = [
+            sid for sid, sdata in streams.items() if sdata.get("tx_queue")
+        ]
+        selected_stream_id = None
 
-        if active_entries:
-            num_active = len(active_entries)
-            rr_index = session.get("round_robin_index", 0)
+        if active_stream_ids:
+            num_active = len(active_stream_ids)
+            rr_index = int(session.get("round_robin_index", 0))
             if rr_index >= num_active:
                 rr_index = 0
 
-            selected_stream_data = active_entries[rr_index]
+            selected_stream_id = active_stream_ids[rr_index]
+            selected_stream_data = streams[selected_stream_id]
             t_queue = selected_stream_data["tx_queue"]
 
             if main_queue and main_queue[0][0] < t_queue[0][0]:
@@ -1107,7 +1119,6 @@ class MasterDnsVPNServer(PacketQueueMixin):
         elif main_queue:
             target_queue = main_queue
             is_main = True
-
         if target_queue:
             item = heapq.heappop(target_queue)
             q_ptype, q_stream_id, q_sn = item[2], item[3], item[4]
@@ -1134,11 +1145,21 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 target_priority = int(item[0])
 
                 candidate_queues = []
+                ordered_stream_ids = active_stream_ids
+                if (not is_main) and selected_stream_id in active_stream_ids:
+                    start_idx = active_stream_ids.index(selected_stream_id)
+                    ordered_stream_ids = (
+                        active_stream_ids[start_idx:] + active_stream_ids[:start_idx]
+                    )
+
+                for sid in ordered_stream_ids:
+                    sdata = streams.get(sid)
+                    if sdata and sdata.get("tx_queue"):
+                        candidate_queues.append((sdata["tx_queue"], sdata))
+
+                # main_queue is fallback/source for same-priority compact controls.
                 if main_queue:
                     candidate_queues.append((main_queue, session))
-                for sdata in active_entries:
-                    candidate_queues.append((sdata["tx_queue"], sdata))
-
                 while blocks < max_blocks:
                     packed_any = False
                     for q_ref, owner in candidate_queues:
@@ -1496,14 +1517,15 @@ class MasterDnsVPNServer(PacketQueueMixin):
         session["upload_mtu"] = safe_upload_mtu - self.crypto_overhead
         session["download_mtu"] = safe_downlink_mtu
 
-        remaining_mtu_space = (
-            safe_downlink_mtu - 4
-        )  # 4 bytes for os.urandom(4) to avoid DNS caching
+        download_pack_limit = self._compute_mtu_based_pack_limit(
+            safe_download_mtu,
+            80.0,
+            self._block_packer.size,
+        )
         session["max_packed_blocks"] = max(
             1,
-            min(remaining_mtu_space // 5, self.config.get("MAX_PACKETS_PER_BATCH", 20)),
-        )  # Each block is 5 bytes (1 byte type + 2 bytes stream ID + 2 bytes seq num)
-
+            min(download_pack_limit, self.max_packets_per_batch),
+        )
         self._touch_session(session_id)
 
         self.logger.info(

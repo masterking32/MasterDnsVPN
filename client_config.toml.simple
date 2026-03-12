@@ -55,9 +55,11 @@ RESOLVER_DNS_SERVERS = ["8.8.8.8", "8.8.4.4", "1.1.1.1"]
 # 1 = no duplication.
 PACKET_DUPLICATION_COUNT = 2
 
-# Max packet/control blocks packed per DNS operation.
+# Max packet/control blocks packed per DNS operation (user upper bound).
+# Runtime value = min(MAX_PACKETS_PER_BATCH, MTU-based upload limit).
+# Upload MTU limit uses 50% of negotiated upload MTU: floor((MTU*0.50)/5).
 # 1 = disable batching.
-MAX_PACKETS_PER_BATCH = 3
+MAX_PACKETS_PER_BATCH = 100
 
 # Resolver balancing strategy:
 # 1=random, 2=round-robin, 3=least-loss, 4=lowest-latency
@@ -139,4 +141,4 @@ LOG_LEVEL = "INFO"
 # ------------------------------------------------------------------------------
 # 7) Version Marker
 # ------------------------------------------------------------------------------
-CONFIG_VERSION = 1.0
+CONFIG_VERSION = 2.0

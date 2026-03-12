@@ -88,8 +88,10 @@ MAX_SESSIONS = 255
 # Max concurrent DNS request handlers.
 MAX_CONCURRENT_REQUESTS = 1000
 
-# Max packed blocks per DNS response cycle.
-MAX_PACKETS_PER_BATCH = 20
+# Max packed control blocks per response cycle (user upper bound).
+# Runtime value = min(MAX_PACKETS_PER_BATCH, MTU-based download limit).
+# Download MTU limit uses 80% of negotiated download MTU: floor((MTU*0.80)/5).
+MAX_PACKETS_PER_BATCH = 1000
 
 # UDP socket buffer bytes.
 SOCKET_BUFFER_SIZE = 8388608
@@ -100,4 +102,4 @@ LOG_LEVEL = "INFO"
 # ------------------------------------------------------------------------------
 # 7) Version Marker
 # ------------------------------------------------------------------------------
-CONFIG_VERSION = 1.0
+CONFIG_VERSION = 2.0

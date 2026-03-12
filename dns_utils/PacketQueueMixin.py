@@ -1,4 +1,4 @@
-﻿# MasterDnsVPN
+# MasterDnsVPN
 # Author: MasterkinG32
 # Github: https://github.com/masterking32
 # Year: 2026
@@ -24,6 +24,23 @@ class PacketQueueMixin:
         Packet_Type.STREAM_SYN_ACK,
         Packet_Type.SOCKS5_SYN_ACK,
     }
+
+    def _compute_mtu_based_pack_limit(
+        self, mtu_size: int, usage_percent: float, block_size: int = 5
+    ) -> int:
+        """
+        Convert MTU budget to max packable control blocks.
+        Example: mtu=200, percent=100, block_size=5 -> 40 blocks.
+        """
+        try:
+            mtu = max(0, int(mtu_size))
+            pct = max(1.0, min(100.0, float(usage_percent)))
+            blk = max(1, int(block_size))
+        except Exception:
+            return 1
+
+        usable_budget = int(mtu * (pct / 100.0))
+        return max(1, usable_budget // blk)
 
     def _inc_priority_counter(self, owner: dict, priority: int) -> None:
         counters = owner.setdefault("priority_counts", {})
