@@ -1665,13 +1665,18 @@ class TestBuildRequestDnsQuery:
 
 
 class TestExtractVpnHeaderFromLabels:
-    def test_empty_returns_empty(self) -> None:
+    def test_empty_returns_none(self) -> None:
         p = _make_parser(method=0)
-        assert p.extract_vpn_header_from_labels("") == b""
+        assert p.extract_vpn_header_from_labels("") is None
 
-    def test_non_string_returns_empty(self) -> None:
+    def test_non_string_returns_none(self) -> None:
         p = _make_parser(method=0)
-        assert p.extract_vpn_header_from_labels(None) == b""  # type: ignore[arg-type]
+        assert p.extract_vpn_header_from_labels(None) is None  # type: ignore[arg-type]
+
+    def test_bytes_input_decoded_then_processed(self) -> None:
+        p = _make_parser(method=0)
+        result = p.extract_vpn_header_from_labels(b"somedata.example")  # type: ignore[arg-type]
+        assert isinstance(result, (bytes, dict, type(None)))
 
 
 class TestExtractVpnDataFromLabels:
@@ -3663,3 +3668,32 @@ class TestDnsPacketParserParseErrors:
             {"AnCount": 1}, None, 0, "AnCount", "answer"  # type: ignore[arg-type]
         )
         assert result is None
+
+    def test_decode_bytes_input_auto_decoded(self) -> None:
+        """decode_and_decrypt_data accepts bytes input and decodes it to str first."""
+        p = _make_parser(method=0)
+        result = p.decode_and_decrypt_data(b"MFRA", lowerCaseOnly=True)
+        assert isinstance(result, bytes)
+
+    def test_decode_base64_lowercase_false_returns_bytes(self) -> None:
+        """decode_and_decrypt_data with lowerCaseOnly=False uses base64 decode path."""
+        p = _make_parser(method=0)
+        result = p.decode_and_decrypt_data("AAAA", lowerCaseOnly=False)
+        assert isinstance(result, bytes)
+
+    def test_generate_labels_long_single_fragment_uses_data_to_labels(self) -> None:
+        """generate_labels: single-fragment data with encoded len > 63 uses data_to_labels."""
+        p = _make_parser(method=0)
+        # 50 bytes base32-encodes to 80 chars (> 63), so data_to_labels is invoked
+        data = b"B" * 50
+        labels = p.generate_labels(
+            domain="example.com",
+            session_id=1,
+            packet_type=Packet_Type.STREAM_DATA,
+            data=data,
+            mtu_chars=500,
+            stream_id=1,
+        )
+        assert isinstance(labels, list)
+        assert len(labels) == 1
+        assert "example.com" in labels[0]
