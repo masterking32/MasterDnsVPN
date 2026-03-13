@@ -8,9 +8,9 @@ import sys
 
 try:
     import tomllib
-except ImportError:
+except ImportError:  # pragma: no cover
     try:
-        import tomli as tomllib  # type: ignore[no-redef]
+        import tomli as tomllib  # type: ignore[no-redef,import-not-found]
     except ImportError:
         raise ImportError(
             "TOML support requires Python 3.11+ or the 'tomli' package. "
@@ -35,7 +35,7 @@ def get_config_path(config_filename: str) -> str:
     return os.path.join(get_app_dir(), config_filename)
 
 
-def load_config(config_filename: str) -> dict:
+def load_config(config_filename: str) -> dict:  # type: ignore[type-arg]
     """
     Load configuration from a TOML file located next to the executable or main script.
     Returns an empty dict if the file is not found or cannot be parsed.

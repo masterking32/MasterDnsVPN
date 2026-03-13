@@ -24,3 +24,5 @@ logs/
 *.tmp
 *.exe
 build/
+.hypothesis/
+.coverage
