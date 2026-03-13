@@ -22,13 +22,21 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-          allow-prereleases: true
+          cache: "pip"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
-          pip install loguru cryptography zstandard lz4
+
+      - name: Format check (black)
+        run: black --check .
+
+      - name: Import order check (isort)
+        run: isort --check-only .
+
+      - name: Type check (mypy)
+        run: python -m mypy dns_utils
 
       - name: Run tests with coverage
         run: |
