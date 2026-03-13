@@ -405,6 +405,10 @@ jobs:
               src = Path(src_name)
               if not src.exists():
                   continue
+              is_fa = src_name.lower() == "readme_fa.md"
+              html_lang = "fa" if is_fa else "en"
+              html_dir = "rtl" if is_fa else "ltr"
+              main_style = ' style="direction: rtl; text-align: right;"' if is_fa else ""
               md_text = src.read_text(encoding="utf-8", errors="ignore")
               body = markdown.markdown(
                   md_text,
@@ -412,7 +416,7 @@ jobs:
                   output_format="html5",
               )
               html = f"""<!doctype html>
-          <html lang="en">
+          <html lang="{html_lang}" dir="{html_dir}">
           <head>
             <meta charset="utf-8" />
             <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -420,7 +424,7 @@ jobs:
             <style>{css}</style>
           </head>
           <body>
-            <main class="wrap">
+            <main class="wrap"{main_style}>
               {body}
             </main>
           </body>
