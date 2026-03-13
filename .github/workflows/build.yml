@@ -82,7 +82,8 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install pyinstaller
-          pip install -r requirements.txt || true
+          pip install -r requirements.txt
+          pip check
 
       - name: Prepare build directory (Windows)
         if: ${{ matrix.os == 'windows-latest' }}
@@ -110,12 +111,13 @@ jobs:
       - name: Build client & server (Linux-Legacy via Docker)
         if: ${{ matrix.platform == 'Linux-Legacy' }}
         run: |
-          docker run --rm -v ${{ github.workspace }}:/work -w /work python:3.11-bullseye bash -c "pip install pyinstaller && pip install -r requirements.txt || true && pyinstaller --onefile --icon=assets/masterdnsvpn.ico --name 'MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}' client.py && pyinstaller --onefile --icon=assets/masterdnsvpn.ico --name 'MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}' server.py && chown -R $(id -u):$(id -g) dist/ build/ *.spec || true"
+          docker run --rm -v ${{ github.workspace }}:/work -w /work python:3.11-bullseye bash -c "pip install pyinstaller && pip install -r requirements.txt && pip check && pyinstaller --onefile --icon=assets/masterdnsvpn.ico --name 'MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}' client.py && pyinstaller --onefile --icon=assets/masterdnsvpn.ico --name 'MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}' server.py && chown -R $(id -u):$(id -g) dist/ build/ *.spec || true"
 
       - name: Bundle config templates with executables
         shell: bash
         run: |
           cp client_config.toml.simple dist/client_config.toml || true
+          cp client_resolvers.simple.txt dist/client_resolvers.txt || true
           cp server_config.toml.simple dist/server_config.toml || true
 
       - name: Package artifacts (Windows)
@@ -146,7 +148,7 @@ jobs:
             Rename-Item -Path $serverOrig -NewName $serverExeName -Force
           }
 
-          Compress-Archive -Path $clientExeName,"client_config.toml" -DestinationPath "${clientZipBase}.zip" -Force
+          Compress-Archive -Path $clientExeName,"client_config.toml","client_resolvers.txt" -DestinationPath "${clientZipBase}.zip" -Force
           Compress-Archive -Path $serverExeName,"server_config.toml" -DestinationPath "${serverZipBase}.zip" -Force
 
       - name: Package artifacts (non-Windows)
@@ -181,10 +183,11 @@ jobs:
           SERVER_TAR="${SERVER_ZIP_BASE}.tar.gz"
 
           CLIENT_TOML="client_config.toml"
+          CLIENT_RESOLVERS="client_resolvers.txt"
           SERVER_TOML="server_config.toml"
 
-          zip -j "${CLIENT_ZIP}" "${CLIENT_EXE_NAME}" "${CLIENT_TOML}" || true
-          tar -czf "${CLIENT_TAR}" "${CLIENT_EXE_NAME}" "${CLIENT_TOML}" || true
+          zip -j "${CLIENT_ZIP}" "${CLIENT_EXE_NAME}" "${CLIENT_TOML}" "${CLIENT_RESOLVERS}" || true
+          tar -czf "${CLIENT_TAR}" "${CLIENT_EXE_NAME}" "${CLIENT_TOML}" "${CLIENT_RESOLVERS}" || true
           zip -j "${SERVER_ZIP}" "${SERVER_EXE_NAME}" "${SERVER_TOML}" || true
           tar -czf "${SERVER_TAR}" "${SERVER_EXE_NAME}" "${SERVER_TOML}" || true
 

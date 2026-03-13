@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
-from dns_utils.DNS_ENUMS import Packet_Type, Stream_State
+from .DNS_ENUMS import Packet_Type, Stream_State
 
 
 @dataclass
