@@ -3,6 +3,7 @@ server_config.py
 client_config.py
 server_config.toml
 client_config.toml
+client_resolvers.txt
 encrypt_key.txt
 *.key
 *.pem

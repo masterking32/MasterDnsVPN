@@ -88,6 +88,10 @@ MAX_SESSIONS = 255
 # Max concurrent DNS request handlers.
 MAX_CONCURRENT_REQUESTS = 1000
 
+# CPU thread-pool size for parser/codec offload.
+# 0 = auto (recommended). Set a positive number to force size. Set -1 to disable.
+CPU_WORKER_THREADS = 0
+
 # Max packed control blocks per response cycle (user upper bound).
 # Runtime value = min(MAX_PACKETS_PER_BATCH, MTU-based download limit).
 # Download MTU limit uses 80% of negotiated download MTU: floor((MTU*0.80)/5).

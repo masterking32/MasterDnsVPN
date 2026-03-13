@@ -5,7 +5,7 @@
 
 import heapq
 
-from dns_utils.DNS_ENUMS import Packet_Type
+from .DNS_ENUMS import Packet_Type
 
 
 class PacketQueueMixin:

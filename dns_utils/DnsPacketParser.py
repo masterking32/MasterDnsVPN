@@ -10,7 +10,7 @@ import random
 import struct
 from typing import Any, Optional
 
-from dns_utils.DNS_ENUMS import DNS_QClass, DNS_Record_Type, Packet_Type
+from .DNS_ENUMS import DNS_QClass, DNS_Record_Type, Packet_Type
 
 
 class DnsPacketParser:
