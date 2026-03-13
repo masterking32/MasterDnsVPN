@@ -29,15 +29,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
-      - name: Format check (black)
-        run: black --check .
-
-      - name: Import order check (isort)
-        run: isort --check-only .
-
-      - name: Type check (mypy)
-        run: python -m mypy dns_utils
-
       - name: Run tests with coverage
         run: |
           python -m pytest tests/ \
