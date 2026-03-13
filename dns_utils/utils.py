@@ -173,7 +173,7 @@ def generate_random_hex_text(length: int) -> str:
 
 def getLogger(
     log_level: str = "DEBUG",
-    logFile: str = None,
+    logFile: Optional[str] = None,
     max_log_size: int = 1,
     backup_count: int = 3,
     is_server: bool = False,

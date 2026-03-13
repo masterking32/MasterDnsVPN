@@ -1,42 +1,18 @@
-name: Build and Release
+name: Build Test (Cython + Onefile, No Release)
 
 on:
   workflow_dispatch: {}
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
-  preflight:
-    name: Preflight - suggest secrets & generate tag
-    runs-on: ubuntu-latest
-    outputs:
-      release_tag: ${{ steps.get_tag.outputs.tag }}
-    steps:
-      - name: Print recommended secrets and guidance
-        run: |
-          echo "Recommended repository secrets for this workflow:"
-          echo " - GPG_SIGNING_KEY: (optional) ASCII-armored GPG private key for signing release artifacts"
-          echo " - CODE_SIGN_CERT: (optional) Windows code-signing certificate (base64)"
-          echo " - STORAGE_TOKEN: (optional) token for private artifact stores"
-          echo
-          echo "To add a secret: repository Settings → Secrets and variables → Actions → New repository secret"
-
-      - name: Generate Release Tag
-        id: get_tag
-        run: |
-          SHORT_SHA=$(echo ${GITHUB_SHA} | cut -c1-7)
-          TS=$(date -u +%Y.%m.%d.%H%M%S)
-          echo "tag=v${TS}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-          echo "Generated Tag: v${TS}-${SHORT_SHA}"
-
   build:
-    name: Build (matrix)
+    name: Build Test (matrix)
     runs-on: ${{ matrix.os }}
-    needs: preflight
     env:
       CODE_SIGN_CERT: ${{ secrets.CODE_SIGN_CERT }}
       CODE_SIGN_CERT_PASSWORD: ${{ secrets.CODE_SIGN_CERT_PASSWORD }}
@@ -48,27 +24,22 @@ jobs:
             platform: Windows
             arch: amd64
             ext: .exe
-            package: zip
           - os: ubuntu-22.04
             platform: Linux
             arch: amd64
             ext: ""
-            package: tar.gz
           - os: ubuntu-latest
             platform: Linux-Legacy
             arch: amd64
             ext: ""
-            package: tar.gz
           - os: ubuntu-24.04-arm
             platform: Linux
             arch: arm64
             ext: ""
-            package: tar.gz
           - os: macos-latest
             platform: MacOS
             arch: arm64
             ext: ""
-            package: tar.gz
 
     steps:
       - name: Checkout repository
@@ -175,6 +146,7 @@ jobs:
 
       - name: Prepare build directory (non-Windows)
         if: ${{ matrix.os != 'windows-latest' }}
+        shell: bash
         run: |
           rm -rf dist || true
           mkdir -p dist
@@ -204,23 +176,23 @@ jobs:
         shell: bash
         run: |
           docker run --rm \
-            -e HOST_UID="$(id -u)" \
-            -e HOST_GID="$(id -g)" \
-            -v "${{ github.workspace }}:/work" \
-            -w /work \
-            python:3.11-bullseye bash -c "
-            set -euo pipefail
-            apt-get update
-            apt-get install -y --no-install-recommends build-essential
-            pip install pyinstaller cython
-            pip install -r requirements.txt
-            pip check
-            python build_setup.py build_ext --inplace
-            python build_verify_extensions.py
-            pyinstaller --onefile --icon=assets/masterdnsvpn.ico --name 'MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}' build_client_entry.py
-            pyinstaller --onefile --icon=assets/masterdnsvpn.ico --name 'MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}' build_server_entry.py
-            chown -R \$HOST_UID:\$HOST_GID dist/ build/ *.spec || true
-            "
+          -e HOST_UID="$(id -u)" \
+          -e HOST_GID="$(id -g)" \
+          -v "${{ github.workspace }}:/work" \
+          -w /work \
+          python:3.11-bullseye bash -c "
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential
+          pip install pyinstaller cython
+          pip install -r requirements.txt
+          pip check
+          python build_setup.py build_ext --inplace
+          python build_verify_extensions.py
+          pyinstaller --onefile --icon=assets/masterdnsvpn.ico --name 'MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}' build_client_entry.py
+          pyinstaller --onefile --icon=assets/masterdnsvpn.ico --name 'MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}' build_server_entry.py
+          chown -R \$HOST_UID:\$HOST_GID dist/ build/ *.spec || true
+          "
 
       - name: Bundle config templates with executables
         shell: bash
@@ -442,17 +414,16 @@ jobs:
           $platform = '${{ matrix.platform }}'
           $arch = '${{ matrix.arch }}'
           $ext = '${{ matrix.ext }}'
-          $tag = '${{ needs.preflight.outputs.release_tag }}'
           $archUpper = $arch.ToUpper()
 
           $clientZipBase = "MasterDnsVPN_Client_${platform}_$archUpper"
           $serverZipBase = "MasterDnsVPN_Server_${platform}_$archUpper"
 
-          $clientExeName = "${clientZipBase}_${tag}${ext}"
-          $serverExeName = "${serverZipBase}_${tag}${ext}"
-
           $clientOrig = "MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }}"
           $serverOrig = "MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }}"
+
+          $clientExeName = "${clientZipBase}${ext}"
+          $serverExeName = "${serverZipBase}${ext}"
 
           if (Test-Path $clientOrig) {
             Rename-Item -Path $clientOrig -NewName $clientExeName -Force
@@ -479,13 +450,12 @@ jobs:
           cd dist
           ARCH_UPPER=$(echo "${{ matrix.arch }}" | tr '[:lower:]' '[:upper:]')
           PLATFORM="${{ matrix.platform }}"
-          TAG="${{ needs.preflight.outputs.release_tag }}"
 
           CLIENT_ZIP_BASE="MasterDnsVPN_Client_${PLATFORM}_${ARCH_UPPER}"
           SERVER_ZIP_BASE="MasterDnsVPN_Server_${PLATFORM}_${ARCH_UPPER}"
 
-          CLIENT_EXE_NAME="${CLIENT_ZIP_BASE}_${TAG}${{ matrix.ext }}"
-          SERVER_EXE_NAME="${SERVER_ZIP_BASE}_${TAG}${{ matrix.ext }}"
+          CLIENT_EXE_NAME="${CLIENT_ZIP_BASE}${{ matrix.ext }}"
+          SERVER_EXE_NAME="${SERVER_ZIP_BASE}${{ matrix.ext }}"
 
           CLIENT_ORIG="MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }}"
           SERVER_ORIG="MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }}"
@@ -520,6 +490,9 @@ jobs:
       - name: Code sign Windows executables (optional)
         if: ${{ env.CODE_SIGN_CERT != '' && matrix.os == 'windows-latest' }}
         shell: powershell
+        env:
+          CODE_SIGN_CERT: ${{ secrets.CODE_SIGN_CERT }}
+          CODE_SIGN_CERT_PASSWORD: ${{ secrets.CODE_SIGN_CERT_PASSWORD }}
         run: |
           Write-Host "Decoding CODE_SIGN_CERT to cert.pfx"
           [System.IO.File]::WriteAllBytes('cert.pfx', [Convert]::FromBase64String('${{ env.CODE_SIGN_CERT }}'))
@@ -538,6 +511,9 @@ jobs:
       - name: Code sign macOS executables (optional)
         if: ${{ env.CODE_SIGN_CERT != '' && startsWith(matrix.os, 'macos') }}
         shell: bash
+        env:
+          CODE_SIGN_CERT: ${{ secrets.CODE_SIGN_CERT }}
+          CODE_SIGN_CERT_PASSWORD: ${{ secrets.CODE_SIGN_CERT_PASSWORD }}
         run: |
           echo "Decoding CODE_SIGN_CERT to cert.pfx"
           echo "${{ env.CODE_SIGN_CERT }}" | base64 -d > cert.pfx
@@ -547,7 +523,7 @@ jobs:
             IDENTITY=$(security find-identity -v -p codesigning | head -n1 | awk -F '"' '{print $2}') || true
             if [ -n "$IDENTITY" ]; then
               echo "Found identity: $IDENTITY. Signing macOS binaries."
-              for f in ./dist/*${{ matrix.platform }}*${{ matrix.arch }}_v*; do
+              for f in ./dist/*${{ matrix.platform }}*${{ matrix.arch }}*; do
                 if [ -f "$f" ] && [[ "$f" != *.* ]]; then
                   codesign --sign "$IDENTITY" --options runtime --timestamp --force "$f" || true
                 fi
@@ -562,123 +538,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: build-artifacts-${{ matrix.platform }}-${{ matrix.arch }}
+          name: build-test-cython-${{ matrix.platform }}-${{ matrix.arch }}
           path: |
             dist/*.zip
             dist/*.tar.gz
-
-  release:
-    name: Create Release and attach artifacts
-    runs-on: ubuntu-latest
-    needs: [preflight, build]
-    steps:
-      - name: Checkout repository (fetch tags)
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Download all build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: release_assets
-
-      - name: List downloaded artifacts
-        run: |
-          echo "Contents of release_assets:" 
-          ls -la release_assets || true
-          echo "Recursive listing:" 
-          find release_assets -maxdepth 3 -print || true
-
-      - name: Build release notes body
-        id: create_release
-        uses: actions/github-script@v6
-        with:
-          script: |
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const head = process.env.GITHUB_SHA;
-
-            let prevTag = null;
-            try {
-              const latest = await github.rest.repos.getLatestRelease({ owner, repo });
-              prevTag = latest.data.tag_name;
-            } catch (e) {
-              prevTag = null;
-            }
-
-            let commits = [];
-            if (prevTag) {
-              const comp = await github.rest.repos.compareCommits({ owner, repo, base: prevTag, head });
-              commits = comp.data.commits || [];
-            } else {
-              const list = await github.rest.repos.listCommits({ owner, repo, sha: head, per_page: 250 });
-              commits = list.data || [];
-            }
-
-            const prSet = new Map();
-            const contributors = new Map();
-
-            for (const c of commits) {
-              const sha = c.sha;
-              const author = (c.author && c.author.login) ? `@${c.author.login}` : (c.commit && c.commit.author && c.commit.author.name) || 'unknown';
-              contributors.set(author, (contributors.get(author) || 0) + 1);
-              try {
-                const prs = await github.rest.repos.listPullRequestsAssociatedWithCommit({ owner, repo, commit_sha: sha });
-                for (const pr of prs.data) {
-                  if (pr.merged_at) {
-                    prSet.set(pr.number, { number: pr.number, title: pr.title, url: pr.html_url, user: pr.user ? `@${pr.user.login}` : '' });
-                  }
-                }
-              } catch (e) {}
-            }
-
-            let body = `Automated release created by workflow run ${context.runId} for commit ${head}\n\n`;
-            if (prevTag) body = `Changes since ${prevTag}:\n\n` + body;
-            body += '### Commits\n';
-            for (const c of commits.slice(-50)) {
-              const msg = c.commit.message.split('\n')[0];
-              body += `- ${msg} ([${c.sha.substring(0,7)}](https://github.com/${owner}/${repo}/commit/${c.sha}))\n`;
-            }
-            if (prSet.size > 0) {
-              body += '\n### Merged PRs\n';
-              for (const pr of prSet.values()) {
-                body += `- [#${pr.number}](${pr.url}) ${pr.title} ${pr.user}\n`;
-              }
-            }
-            if (contributors.size > 0) {
-              body += '\n### Contributors\n';
-              for (const [name, count] of contributors.entries()) {
-                body += `- ${name} — ${count} commit(s)\n`;
-              }
-            }
-            return { body };
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Debug release assets and planned tag
-        run: |
-          echo "Planned release tag: ${{ needs.preflight.outputs.release_tag }}"
-          echo "Contents of release_assets:"
-          find release_assets -maxdepth 5 -type f -print || true
-
-      - name: Fail if no artifacts downloaded
-        run: |
-          set -euo pipefail
-          cnt=$(find release_assets -type f | wc -l || true)
-          echo "Found $cnt artifact file(s) in release_assets"
-          if [ "$cnt" -eq 0 ]; then
-            echo "No artifacts found to upload. Aborting release." >&2
-            exit 1
-          fi
-
-      - name: Create GitHub Release and upload assets
-        uses: softprops/action-gh-release@v1
-        with:
-          files: |
-            release_assets/**/*.zip
-            release_assets/**/*.tar.gz
-          tag_name: ${{ needs.preflight.outputs.release_tag }}
-          name: Release ${{ needs.preflight.outputs.release_tag }}
-          body: ${{ fromJson(steps.create_release.outputs.result).body }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

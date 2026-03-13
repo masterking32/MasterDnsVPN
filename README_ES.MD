@@ -233,6 +233,7 @@ La siguiente tabla explica todas las opciones disponibles y sus funciones en el 
 | `DOMAINS` | `["v.domain.com"]` | Lista de valores (por ej., `["sub.site.com"]`) | El subdominio `NS` configurado en la Sección 1. Debe ser exactamente el mismo en el Cliente y en el Servidor. <br> ¡Por ahora, evitá agregar múltiples dominios! |
 | `DATA_ENCRYPTION_METHOD` | `1` | `0` a `5` | **Algoritmo de Cifrado:**<br><br>`0`: Desactivado (Sin seguridad)<br>`1`: Algoritmo XOR (Recomendado - Alta velocidad, seguridad media)<br>`2`: ChaCha20<br>`3`: AES-128-GCM<br>`4`: AES-192-GCM<br>`5`: AES-256-GCM (Máxima seguridad, menor velocidad) |
 | `ENCRYPTION_KEY` | `""` | Cadena de texto | Clave de cifrado que debe coincidir con el servidor. Las conexiones fallan sin esta clave. |
+| `BASE_ENCODE_DATA` | `false` | `true` o `false` | Aplica una codificación base compatible con DNS antes del transporte. Normalmente dejalo en `false`; activarlo agrega overhead y puede bajar el rendimiento. |
 | `LISTEN_IP` | `"0.0.0.0"` | IP válida (por ej., `127.0.0.1`) | Dirección IP local en la que escucha el cliente.<br><br>• `"127.0.0.1"`: Solo el dispositivo local (más seguro)<br>• `"0.0.0.0"`: Accesible por todos los dispositivos de tu red local |
 | `LISTEN_PORT` | `1080` | Número de puerto (por ej., `1080`) | El puerto en el que escucha el cliente para que tus apps (Navegador, Telegram) puedan conectarse. |
 | `SOCKS5_AUTH` | `true` | `true` o `false` | Habilita la autenticación local de `SOCKS5`. (Si es `false`, conectarse a tu proxy no requiere usuario/contraseña). **Nota:** Esta configuración es únicamente para la seguridad de tu máquina local y no tiene nada que ver con la conexión del túnel. Solo funciona si el protocolo está configurado en `SOCKS5`. |
@@ -255,6 +256,7 @@ La siguiente tabla explica todas las opciones disponibles y sus funciones en el 
 | `NUM_DNS_WORKERS` | `3` | Entero (por ej., `1`, `3`, `5`) | Cantidad de trabajadores TX que envían consultas DNS. Valores mayores mejoran la concurrencia pero consumen más CPU. |
 | `SOCKET_BUFFER_SIZE` | `8388608` | Entero (Bytes) | Tamaño del buffer del socket UDP. Determina cuántos datos entrantes almacena en buffer el sistema operativo antes de descartar paquetes. Se recomiendan valores altos para entornos de alto tráfico; requiere RAM suficiente. |
 | `LOG_LEVEL` | `"INFO"` | `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`, `"CRITICAL"` | Nivel de detalle de los registros del cliente. `DEBUG` ayuda a solucionar problemas pero genera registros masivos. `INFO` o `WARNING` es mejor para uso diario. |
+| `CONFIG_VERSION` | `3.0` | Número (float/int) | Versión del esquema de configuración usada para validar compatibilidad con los valores actuales del cliente. |
 
 ---
 
@@ -289,6 +291,8 @@ Estos cambios ya están reflejados en los archivos `.simple` y en el código act
 | `SOCKS5_AUTH` | `false` | `true` o `false` | Habilita la lógica de autenticación para el proxy SOCKS5 *Externo*. Solo se usa si `USE_EXTERNAL_SOCKS5=true`. |
 | `SOCKS5_USER` | `"admin"` | Cadena personalizada | Nombre de usuario para el proxy SOCKS externo. |
 | `SOCKS5_PASS` | `"123456"` | Cadena personalizada | Contraseña para el proxy SOCKS externo. |
+| `SUPPORTED_UPLOAD_COMPRESSION_TYPES` | `[0, 1, 2, 3]` | Lista de `0..3` | Tipos de compresión permitidos por el servidor para subida. Valores inválidos se eliminan y `0` (OFF) se garantiza siempre como fallback. |
+| `SUPPORTED_DOWNLOAD_COMPRESSION_TYPES` | `[0, 1, 2, 3]` | Lista de `0..3` | Tipos de compresión permitidos por el servidor para bajada. Valores inválidos se eliminan y `0` (OFF) se garantiza siempre como fallback. |
 | `ARQ_INITIAL_RTO` | `1.0` | Float (Segundos) | Timeout ARQ inicial. Ver tabla de configuración del cliente para más detalles. |
 | `ARQ_MAX_RTO` | `3.0` | Float (Segundos) | Límite máximo de retransmisión ARQ. Ver tabla del cliente. |
 | `ARQ_WINDOW_SIZE` | `3000` | Entero | Tamaño de ventana del lado del servidor. Debe escalar con la RAM del Servidor. |
@@ -298,6 +302,7 @@ Estos cambios ya están reflejados en los archivos `.simple` y en el código act
 | `LOG_LEVEL` | `"INFO"` | `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`, `"CRITICAL"` | Nivel de detalle de los registros del servidor. |
 | `SESSION_TIMEOUT` | `300` | Entero (Segundos) | Duración de inactividad antes de que una Sesión se considere expirada y se termine. 300 (5 minutos) es un buen equilibrio. |
 | `SESSION_CLEANUP_INTERVAL` | `60` | Entero (Segundos) | Frecuencia con la que el trabajador en segundo plano analiza y elimina sesiones muertas para liberar memoria. |
+| `CONFIG_VERSION` | `2.0` | Número (float/int) | Versión del esquema de configuración usada para validar compatibilidad con los valores actuales del servidor. |
 
 ---
 
