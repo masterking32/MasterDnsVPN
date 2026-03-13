@@ -11,4 +11,3 @@ black
 isort
 mypy
 pylint
-autopep8
