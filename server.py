@@ -489,6 +489,8 @@ class MasterDnsVPNServer(PacketQueueMixin):
             session.get("track_resend", set()).clear()
             session.get("track_types", set()).clear()
             session.get("track_data", set()).clear()
+            session.get("track_seq_packets", set()).clear()
+            session.get("track_fragment_packets", set()).clear()
             session.get("priority_counts", {}).clear()
             session.get("streams", {}).clear()
         except Exception:
@@ -2128,7 +2130,11 @@ class MasterDnsVPNServer(PacketQueueMixin):
                     and ptype != Packet_Type.SOCKS5_SYN
                 ):
                     if self._track_main_packet_once(
-                        session, int(item[3]), ptype, int(item[4])
+                        session,
+                        int(item[3]),
+                        ptype,
+                        int(item[4]),
+                        payload=item[5],
                     ):
                         heapq.heappush(main_q, item)
                         self._inc_priority_counter(session, item[0])
@@ -2142,6 +2148,8 @@ class MasterDnsVPNServer(PacketQueueMixin):
             stream_data["track_resend"].clear()
             stream_data["track_data"].clear()
             stream_data.get("track_types", set()).clear()
+            stream_data.get("track_seq_packets", set()).clear()
+            stream_data.get("track_fragment_packets", set()).clear()
             stream_data["priority_counts"].clear()
             stream_data["status"] = "TIME_WAIT"
             stream_data["close_time"] = time.monotonic()
@@ -2197,7 +2205,9 @@ class MasterDnsVPNServer(PacketQueueMixin):
 
         if stream_id == 0:
             # stream_id 0 is the session/main queue. Dedupe here must be session-aware.
-            if not self._track_main_packet_once(session, stream_id, ptype, sn):
+            if not self._track_main_packet_once(
+                session, stream_id, ptype, sn, payload=data
+            ):
                 return
             self._push_queue_item(session["main_queue"], session, queue_item)
             return
@@ -2211,7 +2221,9 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 Packet_Type.STREAM_RST_ACK,
                 Packet_Type.STREAM_FIN_ACK,
             ):
-                if not self._track_main_packet_once(session, stream_id, ptype, sn):
+                if not self._track_main_packet_once(
+                    session, stream_id, ptype, sn, payload=data
+                ):
                     return
                 self._push_queue_item(session["main_queue"], session, queue_item)
             return
@@ -2219,7 +2231,11 @@ class MasterDnsVPNServer(PacketQueueMixin):
         # Normal per-stream traffic uses stream-local dedupe so duplicate control/data
         # packets do not accumulate while the original copy is still queued.
         if not self._track_stream_packet_once(
-            stream_data, ptype, sn, data_packet_types=(Packet_Type.STREAM_DATA,)
+            stream_data,
+            ptype,
+            sn,
+            data_packet_types=(Packet_Type.STREAM_DATA,),
+            payload=data,
         ):
             return
         self._push_queue_item(stream_data["tx_queue"], stream_data, queue_item)

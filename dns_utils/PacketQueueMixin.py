@@ -36,6 +36,46 @@ class PacketQueueMixin:
         Packet_Type.STREAM_SYN_ACK,
         Packet_Type.SOCKS5_SYN_ACK,
     }
+    # These packets may appear multiple times over a stream lifetime, but only one
+    # queued copy per (packet_type, sequence_num) is useful at a time.
+    _SEQ_KEYED_QUEUE_TYPES = {
+        Packet_Type.STREAM_KEEPALIVE,
+        Packet_Type.STREAM_KEEPALIVE_ACK,
+        Packet_Type.STREAM_WINDOW_UPDATE,
+        Packet_Type.STREAM_WINDOW_UPDATE_ACK,
+        Packet_Type.STREAM_PROBE,
+        Packet_Type.STREAM_PROBE_ACK,
+        Packet_Type.SOCKS5_CONNECT_FAIL,
+        Packet_Type.SOCKS5_CONNECT_FAIL_ACK,
+        Packet_Type.SOCKS5_RULESET_DENIED,
+        Packet_Type.SOCKS5_RULESET_DENIED_ACK,
+        Packet_Type.SOCKS5_NETWORK_UNREACHABLE,
+        Packet_Type.SOCKS5_NETWORK_UNREACHABLE_ACK,
+        Packet_Type.SOCKS5_HOST_UNREACHABLE,
+        Packet_Type.SOCKS5_HOST_UNREACHABLE_ACK,
+        Packet_Type.SOCKS5_CONNECTION_REFUSED,
+        Packet_Type.SOCKS5_CONNECTION_REFUSED_ACK,
+        Packet_Type.SOCKS5_TTL_EXPIRED,
+        Packet_Type.SOCKS5_TTL_EXPIRED_ACK,
+        Packet_Type.SOCKS5_COMMAND_UNSUPPORTED,
+        Packet_Type.SOCKS5_COMMAND_UNSUPPORTED_ACK,
+        Packet_Type.SOCKS5_ADDRESS_TYPE_UNSUPPORTED,
+        Packet_Type.SOCKS5_ADDRESS_TYPE_UNSUPPORTED_ACK,
+        Packet_Type.SOCKS5_AUTH_FAILED,
+        Packet_Type.SOCKS5_AUTH_FAILED_ACK,
+        Packet_Type.SOCKS5_UPSTREAM_UNAVAILABLE,
+        Packet_Type.SOCKS5_UPSTREAM_UNAVAILABLE_ACK,
+    }
+    # SOCKS5_SYN can be fragmented; dedupe only exact duplicate fragments, not all
+    # packets that share the same sequence number.
+    _FRAGMENT_KEYED_QUEUE_TYPES = {
+        Packet_Type.SOCKS5_SYN,
+    }
+    # These packet types are never meant to live in tx queues directly.
+    _DROP_QUEUE_TYPES = {
+        Packet_Type.PACKED_CONTROL_BLOCKS,
+        Packet_Type.ERROR_DROP,
+    }
 
     def _compute_mtu_based_pack_limit(
         self, mtu_size: int, usage_percent: float, block_size: int = 5
@@ -81,6 +121,12 @@ class PacketQueueMixin:
             return value
         return (sid, value)
 
+    def _payload_track_value(self, payload) -> bytes:
+        # Payload-keyed dedupe is only used for small fragment/control packets.
+        if not payload:
+            return b""
+        return payload if isinstance(payload, bytes) else bytes(payload)
+
     def _release_tracking_on_pop(
         self, owner: dict, packet_type: int, stream_id: int, sn: int
     ) -> None:
@@ -89,7 +135,7 @@ class PacketQueueMixin:
         ptype = int(packet_type)
         sn_key = self._owner_track_key(owner, stream_id, sn)
         ptype_key = self._owner_track_key(owner, stream_id, ptype)
-        if ptype in (Packet_Type.STREAM_DATA, Packet_Type.SOCKS5_SYN):
+        if ptype == Packet_Type.STREAM_DATA:
             track_data = owner.get("track_data")
             if track_data is not None:
                 track_data.discard(sn_key)
@@ -135,11 +181,30 @@ class PacketQueueMixin:
                 track_types.discard(ptype_key)
                 if ptype_key != ptype:
                     track_types.discard(ptype)
+        elif ptype in self._SEQ_KEYED_QUEUE_TYPES:
+            track_seq_packets = owner.get("track_seq_packets")
+            if track_seq_packets is not None:
+                seq_key = self._owner_track_key(owner, stream_id, (ptype, int(sn)))
+                track_seq_packets.discard(seq_key)
+                if seq_key != (ptype, int(sn)):
+                    track_seq_packets.discard((ptype, int(sn)))
 
     def _on_queue_pop(self, owner: dict, queue_item: tuple) -> None:
         # A heap pop changes both the priority index and the packet-type tracking sets.
-        priority, _, ptype, stream_id, sn, _ = queue_item
+        priority, _, ptype, stream_id, sn, data = queue_item
         self._dec_priority_counter(owner, priority)
+        if int(ptype) in self._FRAGMENT_KEYED_QUEUE_TYPES:
+            track_fragment_packets = owner.get("track_fragment_packets")
+            if track_fragment_packets is not None:
+                frag_value = (
+                    int(ptype),
+                    int(sn),
+                    self._payload_track_value(data),
+                )
+                frag_key = self._owner_track_key(owner, stream_id, frag_value)
+                track_fragment_packets.discard(frag_key)
+                if frag_key != frag_value:
+                    track_fragment_packets.discard(frag_value)
         self._release_tracking_on_pop(owner, ptype, stream_id, sn)
 
     def _pop_packable_control_block(
@@ -211,8 +276,11 @@ class PacketQueueMixin:
         return eff
 
     def _track_main_packet_once(
-        self, owner: dict, stream_id: int, ptype: int, sn: int
+        self, owner: dict, stream_id: int, ptype: int, sn: int, payload=b""
     ) -> bool:
+        if ptype in self._DROP_QUEUE_TYPES:
+            return False
+
         # The main queue is shared by the whole session, so all dedupe keys must be
         # stream-aware unless they truly belong to stream 0 / session-wide traffic.
         sn_key = self._owner_track_key(owner, stream_id, sn)
@@ -243,6 +311,29 @@ class PacketQueueMixin:
                 return False
             track_ack.add(sn_key)
             return True
+        if ptype in self._SEQ_KEYED_QUEUE_TYPES:
+            track_seq_packets = owner.setdefault("track_seq_packets", set())
+            seq_value = (ptype, int(sn))
+            seq_key = self._owner_track_key(owner, stream_id, seq_value)
+            if seq_key in track_seq_packets or seq_value in track_seq_packets:
+                return False
+            track_seq_packets.add(seq_key)
+            return True
+        if ptype in self._FRAGMENT_KEYED_QUEUE_TYPES:
+            track_fragment_packets = owner.setdefault("track_fragment_packets", set())
+            frag_value = (
+                ptype,
+                int(sn),
+                self._payload_track_value(payload),
+            )
+            frag_key = self._owner_track_key(owner, stream_id, frag_value)
+            if (
+                frag_key in track_fragment_packets
+                or frag_value in track_fragment_packets
+            ):
+                return False
+            track_fragment_packets.add(frag_key)
+            return True
         if ptype == Packet_Type.STREAM_DATA:
             # DATA and RESEND are mutually exclusive per stream/sn while queued.
             track_resend = owner.get("track_resend")
@@ -263,7 +354,10 @@ class PacketQueueMixin:
         ptype: int,
         sn: int,
         data_packet_types=(Packet_Type.STREAM_DATA,),
+        payload=b"",
     ) -> bool:
+        if ptype in self._DROP_QUEUE_TYPES:
+            return False
         # Stream-local queues can track raw sequence/type values because stream_id is
         # already implicit in the owner dict.
         track_types = stream_data.setdefault("track_types", set())
@@ -272,6 +366,8 @@ class PacketQueueMixin:
         track_syn_ack = stream_data.setdefault("track_syn_ack", set())
         track_data = stream_data.setdefault("track_data", set())
         track_resend = stream_data.setdefault("track_resend", set())
+        track_seq_packets = stream_data.setdefault("track_seq_packets", set())
+        track_fragment_packets = stream_data.setdefault("track_fragment_packets", set())
 
         if ptype == Packet_Type.STREAM_RESEND:
             # Do not ask for resend if DATA is still waiting to be sent.
@@ -293,6 +389,22 @@ class PacketQueueMixin:
             if sn in track_ack:
                 return False
             track_ack.add(sn)
+            return True
+        if ptype in self._SEQ_KEYED_QUEUE_TYPES:
+            seq_key = (ptype, int(sn))
+            if seq_key in track_seq_packets:
+                return False
+            track_seq_packets.add(seq_key)
+            return True
+        if ptype in self._FRAGMENT_KEYED_QUEUE_TYPES:
+            frag_key = (
+                ptype,
+                int(sn),
+                self._payload_track_value(payload),
+            )
+            if frag_key in track_fragment_packets:
+                return False
+            track_fragment_packets.add(frag_key)
             return True
         if ptype in data_packet_types:
             # Prevent the queue from holding both DATA and RESEND for the same sn.
