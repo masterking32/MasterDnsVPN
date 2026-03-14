@@ -16,7 +16,16 @@ The primary goal of **MasterDnsVPN** is to provide a secure, reliable, and flexi
 
 ---
 
-⭐ If you use or like this project, please consider supporting us by giving the repository a Star! ⭐
+You can support this project by starring the repository on GitHub, which helps increase its visibility and reach. If you find this project useful or interesting, please consider giving it a star! ⭐
+
+If you are interested in providing financial support, you can do so through the following channels:
+
+TON: `masterking32.ton`
+
+EVM-compatible blockchains: `0x517f07305D6ED781A089322B6cD93d1461bF8652`
+
+TRC20 chain: `TLApdY8APWkFHHoxebxGY8JhMeChiETqFH`
+
 
 ---
 
@@ -100,7 +109,7 @@ This command downloads a script from GitHub and automatically handles the entire
 
 For your convenience, the client executables (and servers for other OSs) are pre-compiled. Simply download the correct version for your operating system and extract the ZIP file.
 
-> 💡 **Note:** Every Client ZIP file contains the client executable and a default configuration template named `client_config.toml`. 
+> 💡 **Note:** Every Client ZIP file contains the client executable, `client_config.toml`, and `client_resolvers.txt` (resolver list file). 
 
 #### MasterDnsVPN Client Download Links 📥
 
@@ -183,6 +192,7 @@ pip install -r requirements.txt
 # Copy configuration templates
 cp server_config.toml.simple server_config.toml
 cp client_config.toml.simple client_config.toml
+cp client_resolvers.simple.txt client_resolvers.txt
 
 # Edit configurations, then run server or client
 python server.py
@@ -199,7 +209,7 @@ If you launched your server using the Quick Install script (Step 2.1), you only 
 
 1. **`ENCRYPTION_KEY`**: Paste the encryption key displayed in your server terminal (or found in `encrypt_key.txt` on the server). The connection will be rejected without this key!
 2. **`DOMAINS`**: Enter your tunnel subdomain exactly (e.g., `["v.example.com"]`). **Note:** Currently, only provide ONE domain. Multi-domain support will be finalized in future updates.
-3. **`RESOLVER_DNS_SERVERS`**: A list of public DNS resolvers to route the tunnel traffic through (e.g., `["8.8.8.8", "1.1.1.1"]`).
+3. **`client_resolvers.txt`**: Resolver list file (one resolver IP per line, e.g., `8.8.8.8`). Empty/invalid lines are skipped. If the file is missing or has no valid IP, client startup fails.
 
 > ⚠️ **Important Note 1 (Encryption):** The quick install script defaults the server encryption to `XOR`. Ensure that `DATA_ENCRYPTION_METHOD` in your client config is also set to `1` to match the server.
 > 
@@ -225,12 +235,13 @@ The table below explains all available settings and their functions in the clien
 | `DOMAINS` | `["v.domain.com"]` | Array list (e.g., `["sub.site.com"]`) | The <br>NS<br> subdomain configured in Section 1. This must be exactly the same on both Client and Server. <br> Currently, avoid adding multiple domains! |
 | `DATA_ENCRYPTION_METHOD` | `1` | `0` to `5` | **Encryption Algorithm:**<br><br>`0`: Disabled (No security)<br>`1`: XOR algorithm (Recommended - High speed, Medium security)<br>`2`: ChaCha20<br>`3`: AES-128-GCM<br>`4`: AES-192-GCM<br>`5`: AES-256-GCM (Highest security, lowest speed) |
 | `ENCRYPTION_KEY` | `""` | String | Encryption key matched with the server. Connections fail without this. |
+| `BASE_ENCODE_DATA` | `false` | `true` or `false` | Adds DNS-safe base encoding before packet transport. Usually keep `false`; enabling it increases overhead and may reduce throughput. |
 | `LISTEN_IP` | `"0.0.0.0"` | Valid IP (e.g., `127.0.0.1`) | Local IP address the client listens on.<br><br>• `"127.0.0.1"`: Local device only (more secure)<br>• `"0.0.0.0"`: Accessible by all devices on your local network |
 | `LISTEN_PORT` | `1080` | Port number (e.g., `1080`) | The port the client listens on so your apps (Browser, Telegram) can connect. |
 | `SOCKS5_AUTH` | `true` | `true` or `false` | Enables local <br>SOCKS5<br> authentication. (If `false`, connecting to your proxy requires no user/pass). **Note:** This setting is solely for your local machine's security and has nothing to do with the tunnel connection. It only works if the protocol is set to <br>SOCKS5<br>. |
 | `SOCKS5_USER` | `"master_dns_vpn"` | Custom String | Username for the local SOCKS proxy (if `SOCKS5_AUTH` is active). |
 | `SOCKS5_PASS` | `"master_dns_vpn"` | Custom String | Password for the local SOCKS proxy (if `SOCKS5_AUTH` is active). |
-| `RESOLVER_DNS_SERVERS` | `["8.8.8.8", "1.1.1.1"]` | List of IPs | List of public DNS servers (like Google, Cloudflare) the tunnel sends traffic through. Add more IPs for increased stability. |
+| `client_resolvers.txt` (file) | Included in release ZIP | One IP per line | Resolver source moved from config to file. Invalid/empty lines are skipped. If file is missing or contains no valid IP, client exits with error. |
 | `PACKET_DUPLICATION_COUNT` | `3` | Positive integer (`1` for off, `2`, `3`+) | Number of times a packet is duplicated. E.g., `3` means every packet is sent simultaneously to 3 different resolvers. First response is accepted. Consumes bandwidth but minimizes drops on highly disrupted networks. |
 | `RESOLVER_BALANCING_STRATEGY` | `1` | `1`, `2`, `3` | **Load Balancing Strategy:**<br><br>`1`: **Random**: Randomly selects a server.<br>`2`: **Round-Robin**: Rotates sequentially through the list.<br>`3`: **Least Loss**: Intelligently selects the server with the lowest packet loss. |
 | `MIN_UPLOAD_MTU` | `40` | Integer (Bytes) | Minimum Upload <br>MTU<br> a resolver must have to be utilized. Resolvers below this threshold are dropped. Set to `0` to disable. See Section 3.5 for more details. |
@@ -247,8 +258,25 @@ The table below explains all available settings and their functions in the clien
 | `NUM_DNS_WORKERS` | `3` | Integer (e.g., `1`, `3`, `5`) | Number of TX workers sending DNS queries. Higher values improve concurrency but use more CPU. |
 | `SOCKET_BUFFER_SIZE` | `8388608` | Integer (Bytes) | UDP Socket buffer size. Determines how much incoming data the OS buffers before dropping packets. High values recommended for high-traffic environments, requires sufficient RAM. |
 | `LOG_LEVEL` | `"INFO"` | `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`, `"CRITICAL"` | Client logging verbosity. `DEBUG` helps troubleshooting but generates massive logs. `INFO` or `WARNING` is best for daily use. |
+| `CONFIG_VERSION` | `3.0` | Float/Number | Config schema version used for compatibility checks with current client defaults. |
 
 ---
+
+## Section 3.3.1: Recent Config & Runtime Updates (Important)
+
+The following items were added/changed in recent versions and are reflected in `.simple` files and current code paths:
+
+- Resolver source moved from `RESOLVER_DNS_SERVERS` (config) to `client_resolvers.txt` (one IP per line).
+- `MTU_TEST_PARALLELISM` controls parallel MTU checks during startup.
+- `AUTO_SCALE_PROFILES` can auto-tune MTU/recheck settings by resolver-domain list size.
+- Runtime resolver health controls were added: `AUTO_DISABLE_TIMEOUT_SERVERS`, `AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS`, `AUTO_DISABLE_TIMEOUT_MIN_OBSERVATIONS`, `AUTO_DISABLE_CHECK_INTERVAL_SECONDS`.
+- Background recheck controls were added: `RECHECK_INACTIVE_SERVERS_ENABLED`, `RECHECK_INACTIVE_INTERVAL_SECONDS`, `RECHECK_SERVER_INTERVAL_SECONDS`, `RECHECK_BATCH_SIZE`.
+- MTU result-file logging controls were added: `SAVE_MTU_SERVERS_TO_FILE`, `MTU_SERVERS_FILE_NAME`, `MTU_SERVERS_FILE_FORMAT`, `MTU_USING_SECTION_SEPARATOR_TEXT`, `MTU_REMOVED_SERVER_LOG_FORMAT`, `MTU_ADDED_SERVER_LOG_FORMAT`.
+- Packet compression controls are available: `UPLOAD_COMPRESSION_TYPE` and `DOWNLOAD_COMPRESSION_TYPE` (0=OFF, 1=ZSTD, 2=LZ4, 3=ZLIB).
+- Small control-packet packing is controlled by `MAX_PACKETS_PER_BATCH` to reduce DNS request count.
+- SOCKS/control overhead tuning includes `SOCKS_HANDSHAKE_TIMEOUT`, `ARQ_CONTROL_INITIAL_RTO`, `ARQ_CONTROL_MAX_RTO`, `ARQ_CONTROL_MAX_RETRIES`.
+- Runtime safety/resource controls include `CPU_WORKER_THREADS`, `RX_SEMAPHORE_LIMIT`, `MAX_CLOSED_STREAM_RECORDS`.
+- Server-side additions include `SOCKS_HANDSHAKE_TIMEOUT`, `ARQ_CONTROL_*`, `MAX_SESSIONS`, `CPU_WORKER_THREADS`, and improved compression negotiation fallback.
 
 ## Section 3.4: Server Configuration Variables (`server_config.toml`) 📖
 
@@ -267,6 +295,8 @@ The table below explains all available settings and their functions in the clien
 | `SOCKS5_PASS` | `"123456"` | Custom string | Password for the external SOCKS proxy. |
 | `ARQ_INITIAL_RTO` | `1.0` | Float (Seconds) | Initial ARQ Timeout. See client config table for details. |
 | `ARQ_MAX_RTO` | `3.0` | Float (Seconds) | Max ARQ Retransmission limit. See client config table. |
+| `SUPPORTED_UPLOAD_COMPRESSION_TYPES` | `[0, 1, 2, 3]` | List of `0..3` | Server-allowed upload compression types. Invalid values are dropped; `0` (OFF) is always enforced as fallback. |
+| `SUPPORTED_DOWNLOAD_COMPRESSION_TYPES` | `[0, 1, 2, 3]` | List of `0..3` | Server-allowed download compression types. Invalid values are dropped; `0` (OFF) is always enforced as fallback. |
 | `ARQ_WINDOW_SIZE` | `3000` | Integer | Server-side window size. Must scale with Server <br>RAM<br>. |
 | `MAX_CONCURRENT_REQUESTS` | `1000` | Integer | Max concurrent async DNS queries handled by the server. 5000 for strong servers, 1000 for weaker ones. |
 | `MAX_PACKETS_PER_BATCH` | `20` | Integer | Max number of small control packets merged together. 5-20 is ideal. `1` disables packing (reduces latency but increases CPU load). |
@@ -274,6 +304,7 @@ The table below explains all available settings and their functions in the clien
 | `LOG_LEVEL` | `"INFO"` | `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`, `"CRITICAL"` | Server logging verbosity. |
 | `SESSION_TIMEOUT` | `300` | Integer (Seconds) | Inactivity duration before a Session is considered expired and killed. 300 (5 mins) is a good balance. |
 | `SESSION_CLEANUP_INTERVAL` | `60` | Integer (Seconds) | Frequency the background worker scans for and purges dead sessions to free memory. |
+| `CONFIG_VERSION` | `2.0` | Float/Number | Config schema version used for compatibility checks with current server defaults. |
 
 ---
 
@@ -345,7 +376,7 @@ Calculating and assigning correct MTU values is vital in this project for both s
 ### Section 4.1: Severe Network Outages (National Intranet) ⚠️
 When the internet is completely cut off, packet loss is massive, and only DNS traffic is allowed, make the following tweaks in `client_config.toml` to guarantee connection:
 
-1. **Maximize Resolvers:** Find as many valid, public DNS IPs as possible and add them to `RESOLVER_DNS_SERVERS`. Mixing diverse resolvers (like Google `8.8.8.8`, Cloudflare `1.1.1.1`, Quad9 `9.9.9.9`, OpenDNS `208.67.222.222`) maximizes routing diversity.
+1. **Maximize Resolvers:** Find as many valid, public DNS IPs as possible and add them to `client_resolvers.txt` (one IP per line). Mixing diverse resolvers (like Google `8.8.8.8`, Cloudflare `1.1.1.1`, Quad9 `9.9.9.9`, OpenDNS `208.67.222.222`) maximizes routing diversity.
 
 2. **Increase Packet Duplication:** Raise the `PACKET_DUPLICATION_COUNT` parameter. This defines how many times every single payload chunk is sent **simultaneously** over different routes.
 - **Example:** Setting this to `5` means a packet is fired to 5 resolvers at once. Even if 4 routes are blocked or drop the packet, the 5th one delivers it! The server's ARQ layer natively detects and discards duplicates, keeping traffic smooth.

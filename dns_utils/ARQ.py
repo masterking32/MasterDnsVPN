@@ -9,7 +9,7 @@ import time
 import traceback
 from dataclasses import dataclass
 
-from dns_utils.DNS_ENUMS import Packet_Type, Stream_State
+from .DNS_ENUMS import Packet_Type, Stream_State
 
 
 @dataclass
@@ -201,7 +201,7 @@ class ARQ:
             self.rtx_task = None
 
     # Set stream lifecycle state (uses Stream_State enum).
-    def _set_state(self, new_state: str) -> None:
+    def _set_state(self, new_state: int) -> None:
         self.state = new_state
 
     # Normalize sequence number to uint16 (0..65535).

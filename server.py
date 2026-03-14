@@ -5,7 +5,9 @@
 
 
 import asyncio
+import concurrent.futures
 import ctypes
+import functools
 import heapq
 import os
 import random
@@ -15,22 +17,23 @@ import struct
 import sys
 import time
 from collections import deque
-from typing import Any, Optional
+from typing import Optional
 
-from dns_utils import ARQ, DnsPacketParser
-from dns_utils.config_loader import get_config_path, load_config
-from dns_utils.DNS_ENUMS import DNS_Record_Type, Packet_Type
-from dns_utils.PacketQueueMixin import PacketQueueMixin
-from dns_utils.utils import async_recvfrom, async_sendto, get_encrypt_key, getLogger
-
+from dns_utils.ARQ import ARQ
 from dns_utils.compression import (
     Compression_Type,
+    SUPPORTED_COMPRESSION_TYPES,
+    compress_payload,
+    get_compression_name,
     is_compression_type_available,
     normalize_compression_type,
-    get_compression_name,
-    compress_payload,
     try_decompress_payload,
 )
+from dns_utils.config_loader import get_config_path, load_config
+from dns_utils.DNS_ENUMS import DNS_Record_Type, Packet_Type
+from dns_utils.DnsPacketParser import DnsPacketParser
+from dns_utils.PacketQueueMixin import PacketQueueMixin
+from dns_utils.utils import async_recvfrom, async_sendto, get_encrypt_key, getLogger
 
 
 class Socks5ConnectError(Exception):
@@ -51,6 +54,14 @@ except Exception:
 
 class MasterDnsVPNServer(PacketQueueMixin):
     """MasterDnsVPN Server class to handle DNS requests over UDP."""
+
+    def _prompt_before_exit(self) -> None:
+        """Best-effort pause for interactive sessions; never fail in headless runs."""
+        try:
+            if sys.stdin and sys.stdin.isatty():
+                input("Press Enter to exit...")
+        except Exception:
+            pass
 
     def __init__(self) -> None:
         """Initialize the MasterDnsVPNServer with configuration and logger."""
@@ -75,7 +86,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
             self.logger.error(
                 "Please place it in the same directory as the executable and restart."
             )
-            input("Press Enter to exit...")
+            self._prompt_before_exit()
             sys.exit(1)
 
         self.logger = getLogger(
@@ -100,7 +111,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
             self.logger.error(
                 f"Invalid PROTOCOL_TYPE '{self.protocol_type}' in config. Must be 'SOCKS5' or 'TCP'."
             )
-            input("Press Enter to exit...")
+            self._prompt_before_exit()
             sys.exit(1)
 
         # ---------------------------------------------------------
@@ -140,6 +151,17 @@ class MasterDnsVPNServer(PacketQueueMixin):
             int(self.config.get("MAX_CONCURRENT_REQUESTS", 1000))
         )
 
+        self.supported_upload_compression_types = (
+            self._load_supported_compression_types_config(
+                "SUPPORTED_UPLOAD_COMPRESSION_TYPES"
+            )
+        )
+        self.supported_download_compression_types = (
+            self._load_supported_compression_types_config(
+                "SUPPORTED_DOWNLOAD_COMPRESSION_TYPES"
+            )
+        )
+
         # ---------------------------------------------------------
         # Session pools and server runtime state
         # ---------------------------------------------------------
@@ -151,6 +173,15 @@ class MasterDnsVPNServer(PacketQueueMixin):
         self._dns_task = None
         self._session_cleanup_task = None
         self._background_tasks = set()
+        self.cpu_executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
+        auto_cpu_workers = max(2, min(16, (os.cpu_count() or 1)))
+        raw_cpu_workers = int(self.config.get("CPU_WORKER_THREADS", 0))
+        if raw_cpu_workers < 0:
+            self.cpu_worker_threads = 0
+        elif raw_cpu_workers == 0:
+            self.cpu_worker_threads = auto_cpu_workers
+        else:
+            self.cpu_worker_threads = raw_cpu_workers
 
         # ---------------------------------------------------------
         # Packet metadata and dispatch maps
@@ -159,6 +190,13 @@ class MasterDnsVPNServer(PacketQueueMixin):
             v
             for k, v in Packet_Type.__dict__.items()
             if not k.startswith("__") and isinstance(v, int)
+        }
+
+        self._pre_session_packet_types = {
+            Packet_Type.SESSION_INIT,
+            Packet_Type.MTU_UP_REQ,
+            Packet_Type.MTU_DOWN_REQ,
+            Packet_Type.SET_MTU_REQ,
         }
         self._block_packer = DnsPacketParser.PACKED_CONTROL_BLOCK_STRUCT
         self._stream_packet_handlers = {
@@ -204,13 +242,9 @@ class MasterDnsVPNServer(PacketQueueMixin):
         # Heavy packet handlers are deferred to background tasks so DNS responses
         # can be returned immediately from queue without waiting on local I/O.
         self._deferred_handler_packet_types = {
-            Packet_Type.STREAM_SYN,
             Packet_Type.SOCKS5_SYN,
             Packet_Type.STREAM_DATA,
             Packet_Type.STREAM_RESEND,
-            Packet_Type.STREAM_FIN,
-            Packet_Type.STREAM_RST,
-            Packet_Type.STREAM_FIN_ACK,
             Packet_Type.PACKED_CONTROL_BLOCKS,
         }
         self._control_request_ack_map = {
@@ -283,6 +317,85 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 f"Please update your config file to the latest version ({self.min_config_version}) for best performance and new features."
             )
 
+    def _parse_compression_value(self, value) -> Optional[int]:
+        if isinstance(value, str):
+            v = value.strip()
+            if not v:
+                return None
+            if v.isdigit():
+                return int(v)
+            name_map = {
+                "OFF": Compression_Type.OFF,
+                "ZSTD": Compression_Type.ZSTD,
+                "LZ4": Compression_Type.LZ4,
+                "ZLIB": Compression_Type.ZLIB,
+            }
+            return name_map.get(v.upper())
+        try:
+            return int(value)
+        except Exception:
+            return None
+
+    def _load_supported_compression_types_config(self, key: str) -> tuple[int, ...]:
+        raw = self.config.get(key, list(SUPPORTED_COMPRESSION_TYPES))
+
+        if isinstance(raw, str):
+            items = [x.strip() for x in raw.split(",") if x.strip()]
+        elif isinstance(raw, (list, tuple)):
+            items = list(raw)
+        else:
+            items = [raw]
+
+        allowed_set = set(SUPPORTED_COMPRESSION_TYPES)
+        valid: list[int] = []
+        for item in items:
+            parsed = self._parse_compression_value(item)
+            if parsed is None:
+                self.logger.error(f"{key}: invalid compression value '{item}' removed.")
+                continue
+
+            if parsed < 0 or parsed > 3:
+                self.logger.error(
+                    f"{key}: compression value '{parsed}' is out of allowed range 0..3 and was removed."
+                )
+                continue
+
+            if parsed not in allowed_set:
+                self.logger.error(
+                    f"{key}: compression value '{parsed}' is not in SUPPORTED_COMPRESSION_TYPES and was removed."
+                )
+                continue
+
+            if parsed not in valid:
+                valid.append(parsed)
+
+        if Compression_Type.OFF not in valid:
+            valid.insert(0, Compression_Type.OFF)
+            self.logger.warning(f"{key}: OFF(0) was missing, added automatically.")
+
+        return tuple(valid)
+
+    def _resolve_session_compression_types(
+        self,
+        requested_upload_type: int,
+        requested_download_type: int,
+    ) -> tuple[int, int]:
+        if requested_upload_type not in self.supported_upload_compression_types:
+            self.logger.warning(
+                f"<yellow>Client requested upload compression <cyan>'{get_compression_name(requested_upload_type)}'</cyan> "
+                f"which is not allowed by server policy. Falling back to OFF.</yellow>"
+            )
+            requested_upload_type = Compression_Type.OFF
+
+        if requested_download_type not in self.supported_download_compression_types:
+            self.logger.warning(
+                f"<yellow>Client requested download compression <cyan>'{get_compression_name(requested_download_type)}'</cyan> "
+                f"which is not allowed by server policy. Falling back to OFF.</yellow>"
+            )
+            requested_download_type = Compression_Type.OFF
+
+        return requested_upload_type, requested_download_type
+
     # ---------------------------------------------------------
     # Session Management
     # ---------------------------------------------------------
@@ -295,35 +408,13 @@ class MasterDnsVPNServer(PacketQueueMixin):
     ) -> Optional[int]:
         try:
             if not self.free_session_ids:
-                self.logger.error(f"All {self._max_sessions} session slots are full!")
+                self.logger.error(
+                    f"<yellow>All {self._max_sessions} session slots are full!</yellow>"
+                )
                 return None
 
             session_id = self.free_session_ids.popleft()
             now = time.monotonic()
-            client_upload_compression_type = normalize_compression_type(
-                client_upload_compression_type
-            )
-            client_download_compression_type = normalize_compression_type(
-                client_download_compression_type
-            )
-
-            if (
-                client_upload_compression_type != Compression_Type.OFF
-                and not is_compression_type_available(client_upload_compression_type)
-            ):
-                self.logger.warning(
-                    f"Client requested unsupported upload compression type {client_upload_compression_type}. Falling back to OFF."
-                )
-                client_upload_compression_type = Compression_Type.OFF
-
-            if (
-                client_download_compression_type != Compression_Type.OFF
-                and not is_compression_type_available(client_download_compression_type)
-            ):
-                self.logger.warning(
-                    f"Client requested unsupported download compression type {client_download_compression_type}. Falling back to OFF."
-                )
-                client_download_compression_type = Compression_Type.OFF
 
             self.sessions[session_id] = {
                 "created_at": now,
@@ -342,10 +433,8 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 "download_mtu": 512,
                 "max_packed_blocks": 1,
                 "base_encode_responses": base_flag,
-                "client_upload_compression_type": int(client_upload_compression_type),
-                "client_download_compression_type": int(
-                    client_download_compression_type
-                ),
+                "client_upload_compression_type": client_upload_compression_type,
+                "client_download_compression_type": client_download_compression_type,
             }
 
             server_response_type = "Bytes"
@@ -357,7 +446,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
             )
             return session_id
         except Exception as e:
-            self.logger.error(f"Error creating new session: {e}")
+            self.logger.error(f"<red>Error creating new session: {e}</red>")
             return None
 
     async def _close_session(self, session_id: int) -> None:
@@ -425,28 +514,39 @@ class MasterDnsVPNServer(PacketQueueMixin):
         self, labels: str, extracted_header: Optional[dict]
     ) -> bytes:
         """Extract packet payload and apply optional decompression based on header flag."""
-        payload = self.dns_parser.extract_vpn_data_from_labels(labels)
-        if not payload or not extracted_header:
-            return payload
+        try:
+            if not labels or "." not in labels:
+                return b""
 
-        ptype = int(extracted_header.get("packet_type", -1))
-        if ptype not in self.dns_parser._PT_COMP_EXT:
-            return payload
+            payload = self.dns_parser.extract_vpn_data_from_labels(labels)
+            if not payload:
+                return b""
 
-        comp_type = int(
-            extracted_header.get("compression_type", Compression_Type.OFF)
-            or Compression_Type.OFF
-        )
-        if comp_type == Compression_Type.OFF:
-            return payload
+            if not extracted_header:
+                return payload
 
-        if not is_compression_type_available(comp_type):
+            ptype = extracted_header.get("packet_type", -1)
+            if ptype not in self.dns_parser._PT_COMP_EXT:
+                return payload
+
+            comp_type = (
+                extracted_header.get("compression_type", Compression_Type.OFF)
+                or Compression_Type.OFF
+            )
+            if comp_type == Compression_Type.OFF:
+                return payload
+
+            if not is_compression_type_available(comp_type):
+                return b""
+
+            decompressed, ok = try_decompress_payload(payload, comp_type)
+            if not ok:
+                return b""
+
+            return decompressed
+        except Exception as e:
+            self.logger.debug(f"Error extracting packet payload: {e}")
             return b""
-
-        decompressed, ok = try_decompress_payload(payload, comp_type)
-        if not ok:
-            return b""
-        return decompressed
 
     def _spawn_background_task(self, coro):
         """Create a tracked background task so shutdown can cancel and release it."""
@@ -479,76 +579,89 @@ class MasterDnsVPNServer(PacketQueueMixin):
         extracted_header=None,
     ) -> Optional[bytes]:
         """Handle NEW_SESSION VPN packet."""
-        client_payload = self._extract_packet_payload(labels, extracted_header)
-        if not client_payload or len(client_payload) < 17:
-            return None
+        try:
+            client_payload = self._extract_packet_payload(labels, extracted_header)
+            if not client_payload or len(client_payload) < 17:
+                return None
 
-        client_upload_compression_type = 0
-        client_download_compression_type = 0
-        if len(client_payload) >= 18:
-            flag = client_payload[-2]
-            compression_pref = client_payload[-1]
-            client_token = client_payload[:-2]
-            client_upload_compression_type = normalize_compression_type(
-                (compression_pref >> 4) & 0x0F
-            )
-            client_download_compression_type = normalize_compression_type(
-                compression_pref & 0x0F
-            )
-        else:
-            flag = client_payload[-1]
-            client_token = client_payload[:-1]
-
-        base_encode = flag == 1
-        now = time.monotonic()
-
-        existing_session_id = None
-        for sid, sess in self.sessions.items():
-            if (
-                now - sess.get("created_at", 0) <= 10.0
-                and sess.get("init_token") == client_token
-            ):
-                existing_session_id = sid
-                break
-
-        if existing_session_id is not None:
-            new_session_id = existing_session_id
-            self.logger.debug(
-                f"<yellow>Retransmit detected from {addr}. Reusing Session {new_session_id}</yellow>"
-            )
-            existing_session = self.sessions.get(new_session_id)
-            if existing_session is not None:
-                existing_session["client_upload_compression_type"] = (
-                    client_upload_compression_type
-                )
-                existing_session["client_download_compression_type"] = (
-                    client_download_compression_type
-                )
-        else:
-            new_session_id = await self.new_session(
-                base_encode,
-                client_token,
-                client_upload_compression_type,
-                client_download_compression_type,
-            )
-            if new_session_id is None:
+            client_upload_compression_type = 0
+            client_download_compression_type = 0
+            payload_len = len(client_payload)
+            if payload_len < 17:
                 self.logger.debug(
-                    f"<red>Failed to create new session from {addr}</red>"
+                    f"<yellow>Session init packet from {addr} has insufficient payload length ({payload_len} bytes). Expected at least 17 bytes for token and flags. Ignoring.</yellow>"
                 )
                 return None
 
-        response_bytes = (
-            client_token + b":" + str(new_session_id).encode("ascii", errors="ignore")
-        )
+            flag = client_payload[payload_len - 2]
+            compression_pref = client_payload[payload_len - 1]
+            client_token = client_payload[: payload_len - 2]
 
-        return self.dns_parser.generate_vpn_response_packet(
-            domain=request_domain,
-            session_id=new_session_id,
-            packet_type=Packet_Type.SESSION_ACCEPT,
-            data=response_bytes,
-            question_packet=data,
-            encode_data=base_encode,
-        )
+            (
+                client_upload_compression_type,
+                client_download_compression_type,
+            ) = self._resolve_session_compression_types(
+                normalize_compression_type((compression_pref >> 4) & 0x0F),
+                normalize_compression_type(compression_pref & 0x0F),
+            )
+
+            base_encode = flag == 1
+            now = time.monotonic()
+
+            existing_session_id = None
+            for sid, sess in self.sessions.items():
+                if (
+                    now - sess.get("created_at", 0) <= 10.0
+                    and sess.get("init_token") == client_token
+                ):
+                    existing_session_id = sid
+                    break
+
+            if existing_session_id is not None:
+                new_session_id = existing_session_id
+                self.logger.debug(
+                    f"<yellow>Retransmit detected from {addr}. Reusing Session {new_session_id}</yellow>"
+                )
+            else:
+                new_session_id = await self.new_session(
+                    base_encode,
+                    client_token,
+                    client_upload_compression_type,
+                    client_download_compression_type,
+                )
+                if new_session_id is None:
+                    self.logger.debug(
+                        f"<red>Failed to create new session from {addr}</red>"
+                    )
+                    return None
+
+            compression_pref_byte = bytes(
+                [
+                    ((client_upload_compression_type & 0x0F) << 4)
+                    | (client_download_compression_type & 0x0F)
+                ]
+            )
+            response_bytes = (
+                client_token
+                + b":"
+                + str(new_session_id).encode("ascii", errors="ignore")
+                + b":"
+                + compression_pref_byte
+            )
+
+            return self.dns_parser.generate_vpn_response_packet(
+                domain=request_domain,
+                session_id=new_session_id,
+                packet_type=Packet_Type.SESSION_ACCEPT,
+                data=response_bytes,
+                question_packet=data,
+                encode_data=base_encode,
+            )
+        except Exception as e:
+            self.logger.error(
+                f"<red>Error handling session init from {addr}: {e}</red>"
+            )
+            return None
 
     async def _session_cleanup_loop(self) -> None:
         """Background task to periodically cleanup inactive sessions (Crash-Proof)."""
@@ -637,12 +750,22 @@ class MasterDnsVPNServer(PacketQueueMixin):
 
         if packet_type == Packet_Type.STREAM_FIN:
             await self._enqueue_packet(
-                session_id, 0, stream_id, sn, Packet_Type.STREAM_FIN_ACK, b""
+                session_id,
+                0,
+                stream_id,
+                sn,
+                Packet_Type.STREAM_FIN_ACK,
+                b"FA" + os.urandom(4),
             )
             return True
         if packet_type == Packet_Type.STREAM_RST:
             await self._enqueue_packet(
-                session_id, 0, stream_id, sn, Packet_Type.STREAM_RST_ACK, b""
+                session_id,
+                0,
+                stream_id,
+                sn,
+                Packet_Type.STREAM_RST_ACK,
+                b"RA" + os.urandom(4),
             )
             return True
         if packet_type in (
@@ -656,7 +779,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 stream_id,
                 0,
                 Packet_Type.STREAM_RST,
-                b"RST:" + os.urandom(4),
+                b"RS" + os.urandom(4),
             )
             return True
         return False
@@ -1129,6 +1252,168 @@ class MasterDnsVPNServer(PacketQueueMixin):
             )
         return None
 
+    async def _process_session_packet(
+        self,
+        packet_type: int,
+        session_id: int,
+        stream_id: int,
+        sn: int,
+        labels: str,
+        extracted_header: Optional[dict],
+        now_mono: float,
+    ) -> None:
+        """Process a session packet without blocking response generation."""
+        handled_closed_stream = await self._handle_closed_stream_packet(
+            session_id, stream_id, packet_type, sn
+        )
+
+        if handled_closed_stream:
+            return
+
+        await self._dispatch_stream_packet_nonblocking(
+            packet_type=packet_type,
+            session_id=session_id,
+            stream_id=stream_id,
+            sn=sn,
+            labels=labels,
+            extracted_header=extracted_header,
+            now_mono=now_mono,
+        )
+
+    def _iter_active_response_queues(self, session: dict, streams: dict) -> list[tuple]:
+        """
+        Return active response queues as round-robin participants.
+        stream_id 0 represents the session main queue.
+        """
+        queue_entries = []
+
+        main_queue = session.get("main_queue")
+        if main_queue:
+            queue_entries.append((0, main_queue, session))
+
+        for sid, stream_data in streams.items():
+            if int(sid) <= 0:
+                continue
+            if stream_data and stream_data.get("tx_queue"):
+                queue_entries.append((sid, stream_data["tx_queue"], stream_data))
+
+        return queue_entries
+
+    def _pack_selected_response_blocks(
+        self,
+        selected_idx: int,
+        queue_entries: list[tuple],
+        first_item: tuple,
+        max_blocks: int,
+    ) -> bytes:
+        """
+        Pack same-priority control blocks starting from the selected queue, then
+        do a single pass over the remaining queues to fill the available slots.
+        """
+        if max_blocks <= 1:
+            return b""
+
+        target_priority = int(first_item[0])
+        target_ptype = int(first_item[2])
+        _pack = self._block_packer.pack
+        packed_buffer = bytearray(_pack(target_ptype, first_item[3], first_item[4]))
+        blocks = 1
+
+        _, selected_queue, selected_owner = queue_entries[selected_idx]
+
+        while blocks < max_blocks and self._owner_has_priority(
+            selected_owner, target_priority
+        ):
+            popped = self._pop_packable_control_block(
+                selected_queue,
+                selected_owner,
+                target_priority,
+                packet_type=target_ptype,
+            )
+            if popped is None:
+                break
+            packed_buffer.extend(_pack(popped[2], popped[3], popped[4]))
+            blocks += 1
+
+        if blocks >= max_blocks:
+            return bytes(packed_buffer)
+
+        num_queues = len(queue_entries)
+        for offset in range(1, num_queues):
+            if blocks >= max_blocks:
+                break
+            _, q_ref, owner = queue_entries[(selected_idx + offset) % num_queues]
+            if not self._owner_has_priority(owner, target_priority):
+                continue
+
+            while blocks < max_blocks:
+                popped = self._pop_packable_control_block(
+                    q_ref,
+                    owner,
+                    target_priority,
+                    packet_type=target_ptype,
+                )
+                if popped is None:
+                    break
+                packed_buffer.extend(_pack(popped[2], popped[3], popped[4]))
+                blocks += 1
+
+        return bytes(packed_buffer) if blocks > 1 else b""
+
+    def _dequeue_response_packet(self, session: dict, streams: dict):
+        """
+        Round-robin dequeue across all active response queues.
+        The session main queue participates as virtual stream 0.
+        """
+        res_data = None
+        res_stream_id = 0
+        res_sn = 0
+        res_ptype = Packet_Type.PONG
+
+        queue_entries = self._iter_active_response_queues(session, streams)
+        if not queue_entries:
+            return res_ptype, res_stream_id, res_sn, res_data
+
+        rr_index = int(session.get("round_robin_index", 0))
+        num_queues = len(queue_entries)
+        if rr_index >= num_queues:
+            rr_index = 0
+        elif rr_index < 0:
+            rr_index = 0
+
+        selected_idx = rr_index % num_queues
+        _, target_queue, pop_owner = queue_entries[selected_idx]
+
+        item = heapq.heappop(target_queue)
+        self._on_queue_pop(pop_owner, item)
+        session["round_robin_index"] = (selected_idx + 1) % num_queues
+
+        res_ptype, res_stream_id, res_sn, res_data = (
+            item[2],
+            item[3],
+            item[4],
+            item[5],
+        )
+
+        if (
+            res_ptype in self._packable_control_types
+            and not res_data
+            and session["max_packed_blocks"] > 1
+        ):
+            packed = self._pack_selected_response_blocks(
+                selected_idx=selected_idx,
+                queue_entries=queue_entries,
+                first_item=item,
+                max_blocks=session["max_packed_blocks"],
+            )
+            if packed:
+                res_ptype = Packet_Type.PACKED_CONTROL_BLOCKS
+                res_stream_id = 0
+                res_sn = 0
+                res_data = packed
+
+        return res_ptype, res_stream_id, res_sn, res_data
+
     def _build_invalid_session_error_response(
         self,
         session_id: int,
@@ -1136,17 +1421,26 @@ class MasterDnsVPNServer(PacketQueueMixin):
         question_packet: bytes,
         closed_info: Optional[dict],
     ) -> bytes:
-        is_base = (
-            closed_info["base_encode"] if closed_info else random.choice([True, False])
-        )
-        return self.dns_parser.generate_vpn_response_packet(
-            domain=request_domain,
-            session_id=session_id,
-            packet_type=Packet_Type.ERROR_DROP,
-            data=b"INVALID",
-            question_packet=question_packet,
-            encode_data=is_base,
-        )
+        try:
+            is_base = (
+                closed_info["base_encode"]
+                if closed_info
+                else random.choice([True, False])
+            )
+            invalid_response_data = b"INV" + os.urandom(5)
+            return self.dns_parser.generate_vpn_response_packet(
+                domain=request_domain,
+                session_id=session_id,
+                packet_type=Packet_Type.ERROR_DROP,
+                data=invalid_response_data,
+                question_packet=question_packet,
+                encode_data=is_base,
+            )
+        except Exception as e:
+            self.logger.debug(
+                f"<red>Error building invalid session response: {e}</red>"
+            )
+            return b""
 
     async def handle_vpn_packet(
         self,
@@ -1154,26 +1448,30 @@ class MasterDnsVPNServer(PacketQueueMixin):
         session_id: int,
         data: bytes = b"",
         labels: str = "",
-        parsed_packet: dict = None,
+        parsed_packet: Optional[dict] = None,
         addr=None,
         request_domain: str = "",
-        extracted_header: dict = None,
+        extracted_header: Optional[dict] = None,
     ) -> Optional[bytes]:
+        # First handle packets that don't require an active session (e.g. session init, MTU negotiation).
+        if packet_type in self._pre_session_packet_types:
+            pre_session_response = await self._handle_pre_session_packet(
+                packet_type=packet_type,
+                session_id=session_id,
+                data=data,
+                labels=labels,
+                request_domain=request_domain,
+                extracted_header=extracted_header,
+            )
 
-        pre_session_response = await self._handle_pre_session_packet(
-            packet_type=packet_type,
-            session_id=session_id,
-            data=data,
-            labels=labels,
-            request_domain=request_domain,
-            extracted_header=extracted_header,
-        )
-        if pre_session_response is not None:
-            return pre_session_response
+            if pre_session_response:
+                return pre_session_response
+            else:
+                return None
 
         session = self.sessions.get(session_id)
         if not session:
-            self.logger.warning(
+            self.logger.debug(
                 f"<yellow>Packet received for expired/invalid session <cyan>{session_id}</cyan> from <cyan>{addr}</cyan>. Dropping.</yellow>"
             )
 
@@ -1184,132 +1482,31 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 question_packet=data,
                 closed_info=closed_info,
             )
+
         now_mono = time.monotonic()
         self._touch_session(session_id)
 
         stream_id = extracted_header.get("stream_id", 0) if extracted_header else 0
         sn = extracted_header.get("sequence_num", 0) if extracted_header else 0
 
-        handled_closed_stream = await self._handle_closed_stream_packet(
-            session_id, stream_id, packet_type, sn
-        )
-
         streams = session.get("streams")
         if streams is None:
             session["streams"] = {}
             streams = session["streams"]
 
-        # If this packet belongs to a closed stream, we already generated the
-        # proper ACK/RST response and must avoid re-dispatching it.
-        if not handled_closed_stream:
-            await self._dispatch_stream_packet_nonblocking(
-                packet_type=packet_type,
-                session_id=session_id,
-                stream_id=stream_id,
-                sn=sn,
-                labels=labels,
-                extracted_header=extracted_header,
-                now_mono=now_mono,
-            )
-        res_data = None
-        res_stream_id = 0
-        res_sn = 0
-        res_ptype = Packet_Type.PONG
+        await self._process_session_packet(
+            packet_type=packet_type,
+            session_id=session_id,
+            stream_id=stream_id,
+            sn=sn,
+            labels=labels,
+            extracted_header=extracted_header,
+            now_mono=now_mono,
+        )
 
-        target_queue = None
-        is_main = False
-        selected_stream_data = None
-
-        main_queue = session.get("main_queue")
-
-        active_stream_ids = [
-            sid for sid, sdata in streams.items() if sdata.get("tx_queue")
-        ]
-        selected_stream_id = None
-
-        if active_stream_ids:
-            num_active = len(active_stream_ids)
-            rr_index = int(session.get("round_robin_index", 0))
-            if rr_index >= num_active:
-                rr_index = 0
-
-            selected_stream_id = active_stream_ids[rr_index]
-            selected_stream_data = streams[selected_stream_id]
-            t_queue = selected_stream_data["tx_queue"]
-
-            if main_queue and main_queue[0][0] < t_queue[0][0]:
-                target_queue = main_queue
-                is_main = True
-            else:
-                target_queue = t_queue
-                session["round_robin_index"] = (rr_index + 1) % num_active
-        elif main_queue:
-            target_queue = main_queue
-            is_main = True
-        if target_queue:
-            item = heapq.heappop(target_queue)
-            q_ptype, q_stream_id, q_sn = item[2], item[3], item[4]
-
-            pop_owner = session if is_main else selected_stream_data
-            if pop_owner is not None:
-                self._on_queue_pop(pop_owner, item)
-            res_ptype, res_stream_id, res_sn, res_data = (
-                q_ptype,
-                q_stream_id,
-                q_sn,
-                item[5],
-            )
-
-            if (
-                res_ptype in self._packable_control_types
-                and not res_data
-                and session["max_packed_blocks"] > 1
-            ):
-                _pack = self._block_packer.pack
-                packed_buffer = bytearray(_pack(res_ptype, res_stream_id, res_sn))
-                blocks = 1
-                max_blocks = session["max_packed_blocks"]
-                target_priority = int(item[0])
-
-                candidate_queues = []
-                ordered_stream_ids = active_stream_ids
-                if (not is_main) and selected_stream_id in active_stream_ids:
-                    start_idx = active_stream_ids.index(selected_stream_id)
-                    ordered_stream_ids = (
-                        active_stream_ids[start_idx:] + active_stream_ids[:start_idx]
-                    )
-
-                for sid in ordered_stream_ids:
-                    sdata = streams.get(sid)
-                    if sdata and sdata.get("tx_queue"):
-                        candidate_queues.append((sdata["tx_queue"], sdata))
-
-                # main_queue is fallback/source for same-priority compact controls.
-                if main_queue:
-                    candidate_queues.append((main_queue, session))
-                while blocks < max_blocks:
-                    packed_any = False
-                    for q_ref, owner in candidate_queues:
-                        popped = self._pop_packable_control_block(
-                            q_ref, owner, target_priority
-                        )
-                        if popped is None:
-                            continue
-
-                        packed_buffer.extend(_pack(popped[2], popped[3], popped[4]))
-                        blocks += 1
-                        packed_any = True
-                        if blocks >= max_blocks:
-                            break
-
-                    if not packed_any:
-                        break
-
-                if blocks > 1:
-                    res_ptype = Packet_Type.PACKED_CONTROL_BLOCKS
-                    res_stream_id = 0
-                    res_sn = 0
-                    res_data = bytes(packed_buffer)
+        res_ptype, res_stream_id, res_sn, res_data = self._dequeue_response_packet(
+            session, streams
+        )
 
         if res_ptype == Packet_Type.PONG:
             res_data = b"PO:" + os.urandom(4)
@@ -1509,75 +1706,153 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 session_id, stream_id, reason=f"SOCKS target unreachable: {e}"
             )
 
+    async def _send_parser_response(self, builder, data, addr=None):
+        if addr is None:
+            self.logger.debug("<red>Cannot send parser response: addr is None.</red>")
+            return
+
+        response = await self._run_cpu_task(builder, data)
+        if response:
+            await self.send_udp_response(response, addr)
+
     async def handle_single_request(self, data, addr):
         """Handle a single DNS request efficiently."""
-        if not data or not addr:
-            return
+        try:
+            if not data or not addr:
+                return
 
-        parsed_packet = self.dns_parser.parse_dns_packet(data)
-        if not parsed_packet or not parsed_packet.get("questions"):
-            return
+            parsed_packet = await self._run_cpu_task(
+                self.dns_parser.parse_dns_packet, data
+            )
 
-        q0 = parsed_packet["questions"][0]
-        request_domain = q0.get("qName")
-        if not request_domain:
-            return
+            if not parsed_packet or not parsed_packet.get("questions"):
+                self.logger.debug(
+                    f"Received invalid DNS request from {addr}. Ignoring."
+                )
+                await self._send_parser_response(
+                    self.dns_parser.format_error_response, data, addr
+                )
+                return
 
-        packet_domain = request_domain.lower()
+            q0 = parsed_packet["questions"][0]
+            request_domain = q0.get("qName")
+            if not request_domain:
+                self.logger.debug(
+                    f"Received DNS request with empty qName from {addr}. Ignoring."
+                )
+                await self._send_parser_response(
+                    self.dns_parser.format_error_response, data, addr
+                )
+                return
 
-        if not packet_domain.endswith(self.allowed_domains_lower):
-            return
+            packet_domain = request_domain.lower()
 
-        packet_main_domain = ""
-        for d in self.allowed_domains_lower:
-            if packet_domain.endswith(d):
-                packet_main_domain = d
-                break
+            packet_main_domain = next(
+                (d for d in self.allowed_domains_lower if packet_domain.endswith(d)),
+                "",
+            )
 
-        vpn_response = None
-        if q0.get("qType") == DNS_Record_Type.TXT and packet_domain.count(".") >= 2:
+            if not packet_main_domain:
+                self.logger.debug(
+                    f"Received DNS request for unauthorized domain '{request_domain}' from {addr}. Ignoring."
+                )
+                await self._send_parser_response(
+                    self.dns_parser.refused_response, data, addr
+                )
+                return
+
+            if q0.get("qType") != DNS_Record_Type.TXT:
+                await self._send_parser_response(
+                    self.dns_parser.empty_noerror_response, data, addr
+                )
+                return
+
             labels = (
                 packet_domain[: -len("." + packet_main_domain)]
                 if packet_main_domain
-                else packet_domain
+                else ""
             )
 
-            try:
-                extracted_header = self.dns_parser.extract_vpn_header_from_labels(
-                    labels
+            if not labels:
+                await self._send_parser_response(
+                    self.dns_parser.empty_noerror_response, data, addr
                 )
-            except Exception:
+                return
+
+            if len(labels) < 3:
+                self.logger.debug(
+                    f"Received DNS request with insufficient labels '{labels}' from {addr}. Ignoring."
+                )
+                await self._send_parser_response(
+                    self.dns_parser.empty_noerror_response, data, addr
+                )
+                return
+
+            try:
+                extracted_header = await self._run_cpu_task(
+                    self.dns_parser.extract_vpn_header_from_labels, labels
+                )
+            except Exception as e:
+                self.logger.debug(
+                    f"Error extracting VPN header from labels '{labels}': {e}"
+                )
                 extracted_header = None
 
-            if extracted_header:
-                packet_type = extracted_header.get("packet_type")
-                session_id = extracted_header.get("session_id")
+            if not extracted_header:
+                self.logger.debug(
+                    f"Failed to extract VPN header from labels '{labels}' in request from {addr}. Ignoring."
+                )
+                await self._send_parser_response(
+                    self.dns_parser.empty_noerror_response, data, addr
+                )
+                return
 
-                if packet_type in self._valid_packet_types:
-                    try:
-                        vpn_response = await self.handle_vpn_packet(
-                            packet_type=packet_type,
-                            session_id=session_id,
-                            data=data,
-                            labels=labels,
-                            parsed_packet=parsed_packet,
-                            addr=addr,
-                            request_domain=request_domain,
-                            extracted_header=extracted_header,
-                        )
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as e:
-                        self.logger.error(f"Error handling VPN packet: {e}")
-                        vpn_response = None
+            packet_type = extracted_header.get("packet_type")
+            session_id = extracted_header.get("session_id")
 
-        if vpn_response:
-            await self.send_udp_response(vpn_response, addr)
+            if packet_type in self._valid_packet_types:
+                try:
+                    vpn_response = await self.handle_vpn_packet(
+                        packet_type=packet_type,
+                        session_id=session_id,
+                        data=data,
+                        labels=labels,
+                        parsed_packet=parsed_packet,
+                        addr=addr,
+                        request_domain=request_domain,
+                        extracted_header=extracted_header,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    self.logger.debug(
+                        f"Error handling VPN packet for session_id '{session_id}' from {addr}: {e}"
+                    )
+                    vpn_response = None
+
+            if vpn_response:
+                await self.send_udp_response(vpn_response, addr)
+                return
+
+            await self._send_parser_response(
+                self.dns_parser.empty_noerror_response, data, addr
+            )
+        except Exception as error:
+            self.logger.debug(
+                f"Unexpected error in handle_single_request from {addr}: {error}"
+            )
             return
 
-        response = self.dns_parser.server_fail_response(data)
-        if response:
-            await self.send_udp_response(response, addr)
+    async def _run_cpu_task(self, func, *args, **kwargs):
+        """Run CPU-heavy pure parser/codec work off-loop without touching session state."""
+        if not self.cpu_executor:
+            return func(*args, **kwargs)
+        loop = self.loop or asyncio.get_running_loop()
+        if kwargs:
+            return await loop.run_in_executor(
+                self.cpu_executor, functools.partial(func, *args, **kwargs)
+            )
+        return await loop.run_in_executor(self.cpu_executor, func, *args)
 
     async def handle_dns_requests(self) -> None:
         """Asynchronously handle incoming DNS requests and spawn a new task for each."""
@@ -1611,10 +1886,10 @@ class MasterDnsVPNServer(PacketQueueMixin):
             except OSError as e:
                 if getattr(e, "winerror", None) == 10054:
                     continue
-                self.logger.error(f"Socket error: {e}")
+                self.logger.debug(f"Socket error: {e}")
                 await asyncio.sleep(0.1)
             except Exception as e:
-                self.logger.exception(f"Unexpected error receiving DNS request: {e}")
+                self.logger.debug(f"Unexpected error receiving DNS request: {e}")
                 await asyncio.sleep(0.1)
 
     # ---------------------------------------------------------
@@ -1631,54 +1906,58 @@ class MasterDnsVPNServer(PacketQueueMixin):
         extracted_header=None,
     ) -> Optional[bytes]:
         """Handle SET_MTU_REQ VPN packet and save it to the session."""
-        session = self.sessions.get(session_id)
-        if not session:
-            self.logger.warning(
-                f"SET_MTU_REQ received for invalid session_id: {session_id} from {addr}"
+        try:
+            session = self.sessions.get(session_id)
+            if not session:
+                self.logger.debug(
+                    f"SET_MTU_REQ received for invalid session_id: {session_id} from {addr}"
+                )
+                return None
+
+            extracted_data = self._extract_packet_payload(labels, extracted_header)
+
+            if not extracted_data or len(extracted_data) < 8:
+                self.logger.debug(f"Invalid or missing SET_MTU_REQ data from {addr}")
+                return None
+
+            upload_mtu = int.from_bytes(extracted_data[:4], "big")
+            download_mtu = int.from_bytes(extracted_data[4:8], "big")
+            sync_token = extracted_data[8:] if len(extracted_data) > 8 else b"OK"
+
+            safe_upload_mtu = min(upload_mtu, 4096)
+            safe_download_mtu = min(download_mtu, 4096)
+
+            safe_downlink_mtu = safe_download_mtu - self.crypto_overhead
+            session["upload_mtu"] = safe_upload_mtu - self.crypto_overhead
+            session["download_mtu"] = safe_downlink_mtu
+
+            download_pack_limit = self._compute_mtu_based_pack_limit(
+                safe_download_mtu,
+                80.0,
+                self._block_packer.size,
             )
+            session["max_packed_blocks"] = max(
+                1,
+                min(download_pack_limit, self.max_packets_per_batch),
+            )
+            self._touch_session(session_id)
+
+            self.logger.info(
+                f"<green>Session <cyan>{session_id}</cyan> MTU synced - Upload: <cyan>{safe_upload_mtu}</cyan>, Download: <cyan>{safe_download_mtu}</cyan></green>"
+            )
+
+            base_encode = session.get("base_encode_responses", False)
+            return self.dns_parser.generate_vpn_response_packet(
+                domain=request_domain,
+                session_id=session_id,
+                packet_type=Packet_Type.SET_MTU_RES,
+                data=sync_token,
+                question_packet=data,
+                encode_data=base_encode,
+            )
+        except Exception as e:
+            self.logger.debug(f"Error handling SET_MTU_REQ from {addr}: {e}")
             return None
-
-        extracted_data = self._extract_packet_payload(labels, extracted_header)
-
-        if not extracted_data or len(extracted_data) < 8:
-            self.logger.warning(f"Invalid or missing SET_MTU_REQ data from {addr}")
-            return None
-
-        upload_mtu = int.from_bytes(extracted_data[:4], "big")
-        download_mtu = int.from_bytes(extracted_data[4:8], "big")
-        sync_token = extracted_data[8:] if len(extracted_data) > 8 else b"OK"
-
-        safe_upload_mtu = min(upload_mtu, 4096)
-        safe_download_mtu = min(download_mtu, 4096)
-
-        safe_downlink_mtu = safe_download_mtu - self.crypto_overhead
-        session["upload_mtu"] = safe_upload_mtu - self.crypto_overhead
-        session["download_mtu"] = safe_downlink_mtu
-
-        download_pack_limit = self._compute_mtu_based_pack_limit(
-            safe_download_mtu,
-            80.0,
-            self._block_packer.size,
-        )
-        session["max_packed_blocks"] = max(
-            1,
-            min(download_pack_limit, self.max_packets_per_batch),
-        )
-        self._touch_session(session_id)
-
-        self.logger.info(
-            f"<green>Session <cyan>{session_id}</cyan> MTU synced - Upload: <cyan>{safe_upload_mtu}</cyan>, Download: <cyan>{safe_download_mtu}</cyan></green>"
-        )
-
-        base_encode = session.get("base_encode_responses", False)
-        return self.dns_parser.generate_vpn_response_packet(
-            domain=request_domain,
-            session_id=session_id,
-            packet_type=Packet_Type.SET_MTU_RES,
-            data=sync_token,
-            question_packet=data,
-            encode_data=base_encode,
-        )
 
     async def _handle_mtu_down(
         self,
@@ -1691,39 +1970,42 @@ class MasterDnsVPNServer(PacketQueueMixin):
         extracted_header=None,
     ) -> Optional[bytes]:
         """Handle MTU_DOWN_REQ (download MTU test) VPN packet."""
+        try:
+            download_size_bytes = self._extract_packet_payload(labels, extracted_header)
 
-        download_size_bytes = self._extract_packet_payload(labels, extracted_header)
+            if not download_size_bytes or len(download_size_bytes) < 5:
+                self.logger.warning(
+                    f"Failed to decode download size in SERVER_DOWNLOAD_TEST packet from {addr}"
+                )
+                return None
 
-        if not download_size_bytes or len(download_size_bytes) < 5:
-            self.logger.warning(
-                f"Failed to decode download size in SERVER_DOWNLOAD_TEST packet from {addr}"
+            flag = download_size_bytes[0]
+            base_encode = flag == 1
+            download_size = int.from_bytes(download_size_bytes[1:5], "big")
+
+            if download_size < 29:
+                self.logger.warning(
+                    f"Download size too small in packet from {addr}: {download_size}"
+                )
+                return None
+
+            if download_size > len(download_size_bytes) - 1:
+                padding_len = download_size - (len(download_size_bytes) - 1)
+                raw_plaintext = download_size_bytes[1:] + os.urandom(padding_len)
+            else:
+                raw_plaintext = download_size_bytes[1 : 1 + download_size]
+
+            return self.dns_parser.generate_vpn_response_packet(
+                domain=request_domain,
+                session_id=session_id if session_id is not None else 255,
+                packet_type=Packet_Type.MTU_DOWN_RES,
+                data=raw_plaintext,
+                question_packet=data,
+                encode_data=base_encode,
             )
+        except Exception as e:
+            self.logger.debug(f"Error handling MTU_DOWN_REQ from {addr}: {e}")
             return None
-
-        flag = download_size_bytes[0]
-        base_encode = flag == 1
-        download_size = int.from_bytes(download_size_bytes[1:5], "big")
-
-        if download_size < 29:
-            self.logger.warning(
-                f"Download size too small in packet from {addr}: {download_size}"
-            )
-            return None
-
-        if download_size > len(download_size_bytes) - 1:
-            padding_len = download_size - (len(download_size_bytes) - 1)
-            raw_plaintext = download_size_bytes[1:] + os.urandom(padding_len)
-        else:
-            raw_plaintext = download_size_bytes[1 : 1 + download_size]
-
-        return self.dns_parser.generate_vpn_response_packet(
-            domain=request_domain,
-            session_id=session_id if session_id is not None else 255,
-            packet_type=Packet_Type.MTU_DOWN_RES,
-            data=raw_plaintext,
-            question_packet=data,
-            encode_data=base_encode,
-        )
 
     async def _handle_mtu_up(
         self,
@@ -1736,17 +2018,21 @@ class MasterDnsVPNServer(PacketQueueMixin):
         extracted_header=None,
     ) -> Optional[bytes]:
         """Handle SERVER_UPLOAD_TEST VPN packet."""
-        raw_label = labels.split(".")[0] if "." in labels else labels
-        base_encode = raw_label.startswith("1")
+        try:
+            raw_label = labels.split(".")[0] if "." in labels else labels
+            base_encode = raw_label.startswith("1")
 
-        return self.dns_parser.generate_vpn_response_packet(
-            domain=request_domain,
-            session_id=session_id if session_id is not None else 255,
-            packet_type=Packet_Type.MTU_UP_RES,
-            data=b"1",
-            question_packet=data,
-            encode_data=base_encode,
-        )
+            return self.dns_parser.generate_vpn_response_packet(
+                domain=request_domain,
+                session_id=session_id if session_id is not None else 255,
+                packet_type=Packet_Type.MTU_UP_RES,
+                data=b"1",
+                question_packet=data,
+                encode_data=base_encode,
+            )
+        except Exception as e:
+            self.logger.debug(f"Error handling MTU_UP_REQ from {addr}: {e}")
+            return None
 
     # ---------------------------------------------------------
     # TCP Forwarding Logic & Server Retransmits
@@ -2050,7 +2336,9 @@ class MasterDnsVPNServer(PacketQueueMixin):
                             arq_obj = stream_data.get("arq_obj")
                             control_reliable = bool(
                                 arq_obj
-                                and getattr(arq_obj, "enable_control_reliability", False)
+                                and getattr(
+                                    arq_obj, "enable_control_reliability", False
+                                )
                             )
 
                             rst_sent = (
@@ -2169,7 +2457,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                self.logger.error(f"Unexpected error in retransmit loop: {e}")
+                self.logger.debug(f"Unexpected error in retransmit loop: {e}")
                 await asyncio.sleep(0.5)
 
     # ---------------------------------------------------------
@@ -2208,11 +2496,33 @@ class MasterDnsVPNServer(PacketQueueMixin):
             self.logger.info(
                 f"<green>UDP socket bound on <blue>{host}:{port}</blue></green>"
             )
+            self.logger.info(
+                f"<green>Runtime CPU cores detected: <cyan>{os.cpu_count() or 1}</cyan> | MAX_CONCURRENT_REQUESTS: <cyan>{int(self.config.get('MAX_CONCURRENT_REQUESTS', 1000))}</cyan></green>"
+            )
+            if self.cpu_worker_threads > 0:
+                self.cpu_executor = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=self.cpu_worker_threads,
+                    thread_name_prefix="mdns-cpu",
+                )
+                self.logger.info(
+                    f"<green>CPU worker threads enabled: <cyan>{self.cpu_worker_threads}</cyan></green>"
+                )
+            else:
+                self.logger.info("<yellow>CPU worker threads disabled.</yellow>")
 
             if sys.platform == "win32":
                 try:
-                    SIO_UDP_CONNRESET = -1744830452
-                    self.udp_sock.ioctl(SIO_UDP_CONNRESET, False)
+                    sio_udp_connreset = getattr(socket, "SIO_UDP_CONNRESET", 0x9800000C)
+                    if hasattr(self.udp_sock, "ioctl"):
+                        self.udp_sock.ioctl(sio_udp_connreset, 0)
+                except OSError as e:
+                    msg = str(e).lower()
+                    if "invalid ioctl command" in msg or "not supported" in msg:
+                        self.logger.debug(
+                            "SIO_UDP_CONNRESET is not supported in this runtime; continuing without it."
+                        )
+                    else:
+                        self.logger.debug(f"Failed to set SIO_UDP_CONNRESET: {e}")
                 except Exception as e:
                     self.logger.debug(f"Failed to set SIO_UDP_CONNRESET: {e}")
 
@@ -2272,11 +2582,17 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 self.udp_sock.close()
             except Exception:
                 pass
+        if self.cpu_executor:
+            try:
+                self.cpu_executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+            self.cpu_executor = None
 
         self.logger.info("<magenta>MasterDnsVPN Server stopped.</magenta>")
         os._exit(0)
 
-    def _signal_handler(self, signum: int, frame: Any = None) -> None:
+    def _signal_handler(self, signum, frame=None):
         """
         Handle termination signals for graceful shutdown.
         """
@@ -2309,7 +2625,9 @@ def main():
 
                 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
             except ImportError:
-                pass
+                print(
+                    "[MasterDnsVPN] uvloop is not available; using default asyncio loop."
+                )
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -2382,7 +2700,7 @@ def main():
         os._exit(0)
     except Exception as e:
         print(f"Error while stopping the server: {e}")
-        exit()
+        sys.exit(1)
 
 
 if __name__ == "__main__":

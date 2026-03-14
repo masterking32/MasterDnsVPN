@@ -48,8 +48,8 @@ SOCKS_HANDSHAKE_TIMEOUT = 240.0
 # 3) Resolver Selection & DNS Strategy
 # ------------------------------------------------------------------------------
 
-# Resolver pool queried by client.
-RESOLVER_DNS_SERVERS = ["8.8.8.8", "8.8.4.4", "1.1.1.1"]
+# Resolver pool moved to client_resolvers.txt (one IP per line).
+# This file must exist next to client executable/config file.
 
 # Send each DNS query N times for reliability in lossy networks.
 # 1 = no duplication.
@@ -74,27 +74,41 @@ DNS_QUERY_TIMEOUT = 5.0
 # Compression for client -> server payloads (upload direction).
 # 0=OFF, 1=ZSTD, 2=LZ4, 3=ZLIB
 # Payloads <=100 bytes are never compressed to reduce CPU usage.
-UPLOAD_COMPRESSION_TYPE = 3
+# Note: If your CPU usage is high, try setting this to 0 (OFF) or 1 (ZSTD). If you have very powerful CPU and want max compression, try 3 (ZLIB).
+UPLOAD_COMPRESSION_TYPE = 0
 
 # Compression for server -> client payloads (download direction).
 # Use same enum values as UPLOAD_COMPRESSION_TYPE.
-DOWNLOAD_COMPRESSION_TYPE = 3
+# Note: If your CPU usage is high, try setting this to 0 (OFF) or 1 (ZSTD). If you have very powerful CPU and want max compression, try 3 (ZLIB).
+DOWNLOAD_COMPRESSION_TYPE = 0
 
 # ------------------------------------------------------------------------------
 # 4) MTU Discovery & Successful Result Export
 # ------------------------------------------------------------------------------
 
 # Minimum accepted MTU values during resolver validation (0 disables each bound).
+# Please set these according to your network conditions.
+# Note: The software will suggest the best MTUs for you based on your domain.
 MIN_UPLOAD_MTU = 100
 MIN_DOWNLOAD_MTU = 100
 
 # Initial upper bounds for MTU probing.
+# Note: The software will suggest the best MTUs for you based on your domain.
 MAX_UPLOAD_MTU = 220
 MAX_DOWNLOAD_MTU = 200
 
 # MTU test aggressiveness.
 MTU_TEST_RETRIES = 2
-MTU_TEST_TIMEOUT = 1.0
+MTU_TEST_TIMEOUT = 2.0
+
+# Auto profile scaling by resolver-domain count (small/medium/large).
+# If true, runtime tuning for MTU/recheck is adjusted automatically.
+AUTO_SCALE_PROFILES = true
+
+# Number of resolver-domain pairs tested in parallel during initial MTU scan.
+# Note: when AUTO_SCALE_PROFILES=true, runtime value is auto-tuned by list size.
+# Higher values speed up startup but increase temporary CPU/network usage.
+MTU_TEST_PARALLELISM = 10
 
 # If true, successful MTU-tested resolvers are saved to file.
 SAVE_MTU_SERVERS_TO_FILE = false
@@ -149,6 +163,10 @@ RECHECK_INACTIVE_INTERVAL_SECONDS = 1800
 # Minimum is always enforced as 3 seconds.
 RECHECK_SERVER_INTERVAL_SECONDS = 3.0
 
+# Number of inactive resolver-domain pairs checked per background recheck cycle.
+# Note: when AUTO_SCALE_PROFILES=true, runtime value is auto-tuned by list size.
+RECHECK_BATCH_SIZE = 5
+
 # ------------------------------------------------------------------------------
 # 5) ARQ / Reliability
 # ------------------------------------------------------------------------------
@@ -157,6 +175,7 @@ RECHECK_SERVER_INTERVAL_SECONDS = 3.0
 MAX_CONNECTION_ATTEMPTS = 10
 
 # Data-plane ARQ settings.
+# Rediuce ARQ_WINDOW_SIZE if your RAM is limited or if you have very high MTUs and want to reduce memory usage.
 ARQ_WINDOW_SIZE = 1000
 ARQ_INITIAL_RTO = 0.2
 ARQ_MAX_RTO = 1.0
@@ -174,6 +193,10 @@ ARQ_CONTROL_MAX_RETRIES = 180
 NUM_RX_WORKERS = 2
 NUM_DNS_WORKERS = 3
 
+# CPU thread-pool size for parser/codec offload.
+# 0 = auto (recommended). Set a positive number to force size. Set -1 to disable.
+CPU_WORKER_THREADS = 0
+
 # Max in-flight RX packet processing tasks.
 RX_SEMAPHORE_LIMIT = 1000
 
@@ -189,5 +212,5 @@ LOG_LEVEL = "INFO"
 # ------------------------------------------------------------------------------
 # 7) Version Marker
 # ------------------------------------------------------------------------------
-CONFIG_VERSION = 2.0
+CONFIG_VERSION = 3.0
 

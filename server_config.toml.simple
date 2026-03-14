@@ -54,6 +54,12 @@ SOCKS_HANDSHAKE_TIMEOUT = 120.0
 # Must match client DATA_ENCRYPTION_METHOD. (1 is recommended for best performance with reasonable obfuscation)
 DATA_ENCRYPTION_METHOD = 1
 
+# Supported compression types accept for upload/download (0=OFF, 1=ZSTD, 2=LZ4, 3=ZLIB) based on client requests.
+# You can disable compression by setting the lists to [0]. Compression is negotiated per-session based on these lists.
+# 0=OFF, 1=ZSTD, 2=LZ4, 3=ZLIB
+SUPPORTED_UPLOAD_COMPRESSION_TYPES = [0, 1, 2, 3]
+SUPPORTED_DOWNLOAD_COMPRESSION_TYPES = [0, 1, 2, 3]
+
 # ------------------------------------------------------------------------------
 # 4) ARQ / Reliability
 # ------------------------------------------------------------------------------
@@ -87,6 +93,10 @@ MAX_SESSIONS = 255
 
 # Max concurrent DNS request handlers.
 MAX_CONCURRENT_REQUESTS = 1000
+
+# CPU thread-pool size for parser/codec offload.
+# 0 = auto (recommended). Set a positive number to force size. Set -1 to disable.
+CPU_WORKER_THREADS = 0
 
 # Max packed control blocks per response cycle (user upper bound).
 # Runtime value = min(MAX_PACKETS_PER_BATCH, MTU-based download limit).

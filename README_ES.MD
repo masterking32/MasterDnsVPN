@@ -15,7 +15,15 @@ Para las últimas noticias, actualizaciones y cambios relacionados con este proy
 
 ---
 
-⭐ ¡Si utilizas o te gusta este proyecto, por favor apóyanos dándole una estrella al repositorio! ⭐
+Si usás o te gusta este proyecto, por favor considerá apoyarnos dando una estrella al repositorio en GitHub. Esto ayuda a aumentar su visibilidad y alcance. ¡Si encontrás este proyecto útil o interesante, por favor considerá darle una estrella! ⭐
+
+Si estás interesado en brindar apoyo financiero, puedes hacerlo a través de los siguientes canales:
+
+TON: `masterking32.ton`
+
+Cadenas compatibles con EVM: `0x517f07305D6ED781A089322B6cD93d1461bF8652`
+
+Cadena TRC20: `TLApdY8APWkFHHoxebxGY8JhMeChiETqFH`
 
 ---
 
@@ -99,7 +107,7 @@ Este comando descarga un script de GitHub y gestiona automáticamente todo el pr
 
 Para tu comodidad, los ejecutables del cliente (y servidores para otros sistemas operativos) están precompilados. Simplemente descargá la versión correcta para tu sistema operativo y extraé el archivo ZIP.
 
-> 💡 **Nota:** Cada archivo ZIP del Cliente contiene el ejecutable del cliente y una plantilla de configuración predeterminada llamada `client_config.toml`.
+> 💡 **Nota:** Cada ZIP del Cliente incluye el ejecutable, `client_config.toml` y `client_resolvers.txt` (archivo de resolutores).
 
 #### Enlaces de Descarga del Cliente MasterDnsVPN 📥
 
@@ -182,6 +190,7 @@ pip install -r requirements.txt
 # Copiar plantillas de configuración
 cp server_config.toml.simple server_config.toml
 cp client_config.toml.simple client_config.toml
+cp client_resolvers.simple.txt client_resolvers.txt
 
 # Editar las configuraciones y luego ejecutar el servidor o cliente
 python server.py
@@ -198,7 +207,7 @@ Si iniciaste tu servidor usando el script de Instalación Rápida (Paso 2.1), so
 
 1. **`ENCRYPTION_KEY`**: Pegá la clave de cifrado que se mostró en la terminal de tu servidor (o que se encuentra en `encrypt_key.txt` en el servidor). ¡La conexión será rechazada sin esta clave!
 2. **`DOMAINS`**: Ingresá tu subdominio de túnel exactamente (por ej., `["v.example.com"]`). **Nota:** Por ahora, proporcioná únicamente UN dominio. El soporte para múltiples dominios se finalizará en futuras actualizaciones.
-3. **`RESOLVER_DNS_SERVERS`**: Una lista de resolutores DNS públicos a través de los cuales enrutar el tráfico del túnel (por ej., `["8.8.8.8", "1.1.1.1"]`).
+3. **`client_resolvers.txt`**: Archivo de resolutores (una IP por línea, por ej. `8.8.8.8`). Las líneas vacías o inválidas se omiten. Si falta el archivo o no contiene IPs válidas, el cliente no inicia.
 
 > ⚠️ **Nota Importante 1 (Cifrado):** El script de instalación rápida configura el cifrado del servidor en `XOR` por defecto. Asegurate de que `DATA_ENCRYPTION_METHOD` en la configuración de tu cliente también esté en `1` para que coincida con el servidor.
 >
@@ -224,12 +233,13 @@ La siguiente tabla explica todas las opciones disponibles y sus funciones en el 
 | `DOMAINS` | `["v.domain.com"]` | Lista de valores (por ej., `["sub.site.com"]`) | El subdominio `NS` configurado en la Sección 1. Debe ser exactamente el mismo en el Cliente y en el Servidor. <br> ¡Por ahora, evitá agregar múltiples dominios! |
 | `DATA_ENCRYPTION_METHOD` | `1` | `0` a `5` | **Algoritmo de Cifrado:**<br><br>`0`: Desactivado (Sin seguridad)<br>`1`: Algoritmo XOR (Recomendado - Alta velocidad, seguridad media)<br>`2`: ChaCha20<br>`3`: AES-128-GCM<br>`4`: AES-192-GCM<br>`5`: AES-256-GCM (Máxima seguridad, menor velocidad) |
 | `ENCRYPTION_KEY` | `""` | Cadena de texto | Clave de cifrado que debe coincidir con el servidor. Las conexiones fallan sin esta clave. |
+| `BASE_ENCODE_DATA` | `false` | `true` o `false` | Aplica una codificación base compatible con DNS antes del transporte. Normalmente dejalo en `false`; activarlo agrega overhead y puede bajar el rendimiento. |
 | `LISTEN_IP` | `"0.0.0.0"` | IP válida (por ej., `127.0.0.1`) | Dirección IP local en la que escucha el cliente.<br><br>• `"127.0.0.1"`: Solo el dispositivo local (más seguro)<br>• `"0.0.0.0"`: Accesible por todos los dispositivos de tu red local |
 | `LISTEN_PORT` | `1080` | Número de puerto (por ej., `1080`) | El puerto en el que escucha el cliente para que tus apps (Navegador, Telegram) puedan conectarse. |
 | `SOCKS5_AUTH` | `true` | `true` o `false` | Habilita la autenticación local de `SOCKS5`. (Si es `false`, conectarse a tu proxy no requiere usuario/contraseña). **Nota:** Esta configuración es únicamente para la seguridad de tu máquina local y no tiene nada que ver con la conexión del túnel. Solo funciona si el protocolo está configurado en `SOCKS5`. |
 | `SOCKS5_USER` | `"master_dns_vpn"` | Cadena personalizada | Nombre de usuario para el proxy SOCKS local (si `SOCKS5_AUTH` está activo). |
 | `SOCKS5_PASS` | `"master_dns_vpn"` | Cadena personalizada | Contraseña para el proxy SOCKS local (si `SOCKS5_AUTH` está activo). |
-| `RESOLVER_DNS_SERVERS` | `["8.8.8.8", "1.1.1.1"]` | Lista de IPs | Lista de servidores DNS públicos (como Google, Cloudflare) a través de los cuales el túnel envía tráfico. Agregá más IPs para mayor estabilidad. |
+| `client_resolvers.txt` (archivo) | Incluido en ZIP release | Una IP por línea | La fuente de resolutores se movió del config al archivo. Las líneas vacías/inválidas se omiten. Si falta el archivo o no hay IPs válidas, el cliente finaliza con error. |
 | `PACKET_DUPLICATION_COUNT` | `3` | Entero positivo (`1` para desactivar, `2`, `3`+) | Cantidad de veces que se duplica un paquete. Por ejemplo, `3` significa que cada paquete se envía simultáneamente a 3 resolutores distintos. Se acepta la primera respuesta. Consume ancho de banda pero minimiza las pérdidas en redes muy perturbadas. |
 | `RESOLVER_BALANCING_STRATEGY` | `1` | `1`, `2`, `3` | **Estrategia de Balanceo de Carga:**<br><br>`1`: **Aleatorio**: Selecciona un servidor al azar.<br>`2`: **Round-Robin**: Rota secuencialmente por la lista.<br>`3`: **Menor Pérdida**: Selecciona de forma inteligente el servidor con menor pérdida de paquetes. |
 | `MIN_UPLOAD_MTU` | `40` | Entero (Bytes) | MTU mínimo de subida que debe tener un resolutor para ser utilizado. Los resolutores por debajo de este umbral son descartados. Establecé en `0` para desactivar. Ver Sección 3.5 para más detalles. |
@@ -246,8 +256,25 @@ La siguiente tabla explica todas las opciones disponibles y sus funciones en el 
 | `NUM_DNS_WORKERS` | `3` | Entero (por ej., `1`, `3`, `5`) | Cantidad de trabajadores TX que envían consultas DNS. Valores mayores mejoran la concurrencia pero consumen más CPU. |
 | `SOCKET_BUFFER_SIZE` | `8388608` | Entero (Bytes) | Tamaño del buffer del socket UDP. Determina cuántos datos entrantes almacena en buffer el sistema operativo antes de descartar paquetes. Se recomiendan valores altos para entornos de alto tráfico; requiere RAM suficiente. |
 | `LOG_LEVEL` | `"INFO"` | `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`, `"CRITICAL"` | Nivel de detalle de los registros del cliente. `DEBUG` ayuda a solucionar problemas pero genera registros masivos. `INFO` o `WARNING` es mejor para uso diario. |
+| `CONFIG_VERSION` | `3.0` | Número (float/int) | Versión del esquema de configuración usada para validar compatibilidad con los valores actuales del cliente. |
 
 ---
+
+## Sección 3.3.1: Actualizaciones Recientes de Config y Runtime (Importante)
+
+Estos cambios ya están reflejados en los archivos `.simple` y en el código actual:
+
+- La fuente de resolutores se movió de `RESOLVER_DNS_SERVERS` a `client_resolvers.txt` (una IP por línea).
+- `MTU_TEST_PARALLELISM` permite pruebas MTU en paralelo durante el inicio.
+- `AUTO_SCALE_PROFILES` ajusta automáticamente parámetros MTU/recheck según el tamaño de la lista.
+- Controles de salud de resolutores en runtime: `AUTO_DISABLE_TIMEOUT_SERVERS`, `AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS`, `AUTO_DISABLE_TIMEOUT_MIN_OBSERVATIONS`, `AUTO_DISABLE_CHECK_INTERVAL_SECONDS`.
+- Rechequeo en segundo plano: `RECHECK_INACTIVE_SERVERS_ENABLED`, `RECHECK_INACTIVE_INTERVAL_SECONDS`, `RECHECK_SERVER_INTERVAL_SECONDS`, `RECHECK_BATCH_SIZE`.
+- Logs de resultados MTU en archivo: `SAVE_MTU_SERVERS_TO_FILE`, `MTU_SERVERS_FILE_NAME`, `MTU_SERVERS_FILE_FORMAT`, `MTU_USING_SECTION_SEPARATOR_TEXT`, `MTU_REMOVED_SERVER_LOG_FORMAT`, `MTU_ADDED_SERVER_LOG_FORMAT`.
+- Compresión de paquetes: `UPLOAD_COMPRESSION_TYPE` y `DOWNLOAD_COMPRESSION_TYPE` (0=OFF, 1=ZSTD, 2=LZ4, 3=ZLIB).
+- Empaquetado de paquetes de control pequeños con `MAX_PACKETS_PER_BATCH` para reducir consultas DNS.
+- Ajustes de overhead SOCKS/control: `SOCKS_HANDSHAKE_TIMEOUT`, `ARQ_CONTROL_INITIAL_RTO`, `ARQ_CONTROL_MAX_RTO`, `ARQ_CONTROL_MAX_RETRIES`.
+- Controles de recursos: `CPU_WORKER_THREADS`, `RX_SEMAPHORE_LIMIT`, `MAX_CLOSED_STREAM_RECORDS`.
+- En servidor se añadieron/expandieron `SOCKS_HANDSHAKE_TIMEOUT`, `ARQ_CONTROL_*`, `MAX_SESSIONS`, `CPU_WORKER_THREADS` y fallback seguro de compresión.
 
 ## Sección 3.4: Variables de Configuración del Servidor (`server_config.toml`) 📖
 
@@ -264,6 +291,8 @@ La siguiente tabla explica todas las opciones disponibles y sus funciones en el 
 | `SOCKS5_AUTH` | `false` | `true` o `false` | Habilita la lógica de autenticación para el proxy SOCKS5 *Externo*. Solo se usa si `USE_EXTERNAL_SOCKS5=true`. |
 | `SOCKS5_USER` | `"admin"` | Cadena personalizada | Nombre de usuario para el proxy SOCKS externo. |
 | `SOCKS5_PASS` | `"123456"` | Cadena personalizada | Contraseña para el proxy SOCKS externo. |
+| `SUPPORTED_UPLOAD_COMPRESSION_TYPES` | `[0, 1, 2, 3]` | Lista de `0..3` | Tipos de compresión permitidos por el servidor para subida. Valores inválidos se eliminan y `0` (OFF) se garantiza siempre como fallback. |
+| `SUPPORTED_DOWNLOAD_COMPRESSION_TYPES` | `[0, 1, 2, 3]` | Lista de `0..3` | Tipos de compresión permitidos por el servidor para bajada. Valores inválidos se eliminan y `0` (OFF) se garantiza siempre como fallback. |
 | `ARQ_INITIAL_RTO` | `1.0` | Float (Segundos) | Timeout ARQ inicial. Ver tabla de configuración del cliente para más detalles. |
 | `ARQ_MAX_RTO` | `3.0` | Float (Segundos) | Límite máximo de retransmisión ARQ. Ver tabla del cliente. |
 | `ARQ_WINDOW_SIZE` | `3000` | Entero | Tamaño de ventana del lado del servidor. Debe escalar con la RAM del Servidor. |
@@ -273,6 +302,7 @@ La siguiente tabla explica todas las opciones disponibles y sus funciones en el 
 | `LOG_LEVEL` | `"INFO"` | `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`, `"CRITICAL"` | Nivel de detalle de los registros del servidor. |
 | `SESSION_TIMEOUT` | `300` | Entero (Segundos) | Duración de inactividad antes de que una Sesión se considere expirada y se termine. 300 (5 minutos) es un buen equilibrio. |
 | `SESSION_CLEANUP_INTERVAL` | `60` | Entero (Segundos) | Frecuencia con la que el trabajador en segundo plano analiza y elimina sesiones muertas para liberar memoria. |
+| `CONFIG_VERSION` | `2.0` | Número (float/int) | Versión del esquema de configuración usada para validar compatibilidad con los valores actuales del servidor. |
 
 ---
 
@@ -344,7 +374,7 @@ Calcular y asignar correctamente los valores de MTU es vital en este proyecto ta
 ### Sección 4.1: Cortes Graves de Red (Intranet Nacional) ⚠️
 Cuando internet esté completamente cortado, la pérdida de paquetes sea masiva y solo se permita el tráfico DNS, hacé los siguientes ajustes en `client_config.toml` para garantizar la conexión:
 
-1. **Maximizar Resolutores:** Encontrá tantas IPs de DNS públicos válidos como sea posible y agregálas a `RESOLVER_DNS_SERVERS`. Combinar resolutores diversos (como Google `8.8.8.8`, Cloudflare `1.1.1.1`, Quad9 `9.9.9.9`, OpenDNS `208.67.222.222`) maximiza la diversidad de enrutamiento.
+1. **Maximizar Resolutores:** Encontrá tantas IPs DNS públicas válidas como sea posible y agregalas a `client_resolvers.txt` (una IP por línea). Combinar resolutores diversos (como Google `8.8.8.8`, Cloudflare `1.1.1.1`, Quad9 `9.9.9.9`, OpenDNS `208.67.222.222`) maximiza la diversidad de enrutamiento.
 
 2. **Aumentar la Duplicación de Paquetes:** Subí el parámetro `PACKET_DUPLICATION_COUNT`. Este define cuántas veces cada fragmento de payload se envía **simultáneamente** por rutas diferentes.
 - **Ejemplo:** Configurar esto en `5` significa que un paquete se lanza a 5 resolutores a la vez. ¡Incluso si 4 rutas están bloqueadas o pierden el paquete, la 5ª lo entrega! La capa ARQ del servidor detecta y descarta nativamente los duplicados, manteniendo el tráfico fluido.
@@ -468,3 +498,4 @@ Este proyecto está publicado bajo la licencia **MIT**. El uso, la modificación
 
 ## 👨‍💻 Desarrollador
 Desarrollado con ❤️ por: [**MasterkinG32**](https://github.com/masterking32)
+
