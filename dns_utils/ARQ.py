@@ -201,7 +201,7 @@ class ARQ:
             self.rtx_task = None
 
     # Set stream lifecycle state (uses Stream_State enum).
-    def _set_state(self, new_state: str) -> None:
+    def _set_state(self, new_state: int) -> None:
         self.state = new_state
 
     # Normalize sequence number to uint16 (0..65535).

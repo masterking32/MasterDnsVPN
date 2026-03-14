@@ -75,12 +75,12 @@ DNS_QUERY_TIMEOUT = 5.0
 # 0=OFF, 1=ZSTD, 2=LZ4, 3=ZLIB
 # Payloads <=100 bytes are never compressed to reduce CPU usage.
 # Note: If your CPU usage is high, try setting this to 0 (OFF) or 1 (ZSTD). If you have very powerful CPU and want max compression, try 3 (ZLIB).
-UPLOAD_COMPRESSION_TYPE = 3
+UPLOAD_COMPRESSION_TYPE = 0
 
 # Compression for server -> client payloads (download direction).
 # Use same enum values as UPLOAD_COMPRESSION_TYPE.
 # Note: If your CPU usage is high, try setting this to 0 (OFF) or 1 (ZSTD). If you have very powerful CPU and want max compression, try 3 (ZLIB).
-DOWNLOAD_COMPRESSION_TYPE = 3
+DOWNLOAD_COMPRESSION_TYPE = 0
 
 # ------------------------------------------------------------------------------
 # 4) MTU Discovery & Successful Result Export

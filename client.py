@@ -50,6 +50,14 @@ except Exception:
 class MasterDnsVPNClient(PacketQueueMixin):
     """MasterDnsVPN Client class to handle DNS requests over UDP."""
 
+    def _prompt_before_exit(self) -> None:
+        """Best-effort pause for interactive users; never fail in non-interactive runs."""
+        try:
+            if sys.stdin and sys.stdin.isatty():
+                input("Press Enter to exit...")
+        except Exception:
+            pass
+
     def __init__(self) -> None:
         # ---------------------------------------------------------
         # Runtime and lifecycle primitives
@@ -58,7 +66,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
         self.should_stop: asyncio.Event = asyncio.Event()
         self.session_restart_event = None
         self.rx_tasks = set()
-        self.cpu_executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
+        self.cpu_executor: concurrent.futures.ThreadPoolExecutor | None = None
 
         # ---------------------------------------------------------
         # Config and logger bootstrap
@@ -72,7 +80,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
             self.logger.error(
                 "Please place it in the same directory as the executable and restart."
             )
-            input("Press Enter to exit...")
+            self._prompt_before_exit()
             sys.exit(1)
 
         self.logger = getLogger(log_level=self.config.get("LOG_LEVEL", "INFO"))
@@ -100,7 +108,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
             self.logger.error(
                 f"Invalid PROTOCOL_TYPE '{self.protocol_type}' in config. Must be 'SOCKS5' or 'TCP'."
             )
-            input("Press Enter to exit...")
+            self._prompt_before_exit()
             sys.exit(1)
 
         # ---------------------------------------------------------
@@ -215,14 +223,14 @@ class MasterDnsVPNClient(PacketQueueMixin):
         # ---------------------------------------------------------
         self.base_encode_responses: bool = self.config.get("BASE_ENCODE_DATA", False)
         self.encryption_method: int = self.config.get("DATA_ENCRYPTION_METHOD", 1)
-        self.encryption_key: str = self.config.get("ENCRYPTION_KEY", None)
+        self.encryption_key: str | None = self.config.get("ENCRYPTION_KEY", None)
 
         if not self.encryption_key:
             self.logger.error(
                 "No encryption key provided. "
                 "Please set <yellow>ENCRYPTION_KEY</yellow> in <yellow>client_config.toml</yellow>."
             )
-            input("Press Enter to exit...")
+            self._prompt_before_exit()
             sys.exit(1)
 
         self.crypto_overhead = 0
@@ -352,7 +360,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
                 "Resolver file '<cyan>client_resolvers.txt</cyan>' not found."
             )
             self.logger.error("Please place it next to the executable and restart.")
-            input("Press Enter to exit...")
+            self._prompt_before_exit()
             sys.exit(1)
 
         resolvers = []
@@ -375,7 +383,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
             self.logger.error(
                 f"Failed to read resolver file '<cyan>client_resolvers.txt</cyan>': {exc}"
             )
-            input("Press Enter to exit...")
+            self._prompt_before_exit()
             sys.exit(1)
 
         if not resolvers:
@@ -383,7 +391,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
                 "No valid resolver IP found in '<cyan>client_resolvers.txt</cyan>'."
             )
             self.logger.error("Add at least one valid IPv4/IPv6 per line and restart.")
-            input("Press Enter to exit...")
+            self._prompt_before_exit()
             sys.exit(1)
 
         return resolvers
@@ -633,7 +641,9 @@ class MasterDnsVPNClient(PacketQueueMixin):
             return False
         if len(events) < max(1, self.auto_disable_min_observations):
             return False
-        if (events[-1][0] - events[0][0]) < max(
+        last_event_ts = events[len(events) - 1][0]
+        first_event_ts = events[0][0]
+        if (last_event_ts - first_event_ts) < max(
             1.0, self.auto_disable_timeout_window_seconds
         ):
             return False
@@ -860,11 +870,11 @@ class MasterDnsVPNClient(PacketQueueMixin):
     async def _binary_search_mtu(
         self,
         test_callable,
-        min_mtu: int,
-        max_mtu: int,
-        min_threshold: int = 30,
-        allowed_min_mtu: int = 0,
-    ) -> int:
+        min_mtu,
+        max_mtu,
+        min_threshold=30,
+        allowed_min_mtu=0,
+    ):
         if max_mtu <= 0:
             return 0
 
@@ -949,12 +959,12 @@ class MasterDnsVPNClient(PacketQueueMixin):
 
     async def send_upload_mtu_test(
         self,
-        domain: str,
-        dns_server: str,
-        dns_port: int,
-        mtu_size: int,
-        is_retry: bool = False,
-    ) -> bool:
+        domain,
+        dns_server,
+        dns_port,
+        mtu_size,
+        is_retry=False,
+    ):
         if not is_retry:
             self.logger.debug(
                 f"<magenta>[MTU Probe]</magenta> Testing Upload MTU: <yellow>{mtu_size}</yellow> bytes via <cyan>{dns_server}</cyan>"
@@ -1020,13 +1030,13 @@ class MasterDnsVPNClient(PacketQueueMixin):
 
     async def send_download_mtu_test(
         self,
-        domain: str,
-        dns_server: str,
-        dns_port: int,
-        mtu_size: int,
-        up_mtu_bytes: int,
-        is_retry: bool = False,
-    ) -> bool:
+        domain,
+        dns_server,
+        dns_port,
+        mtu_size,
+        up_mtu_bytes,
+        is_retry=False,
+    ):
         if not is_retry:
             self.logger.debug(
                 f"<magenta>[MTU Probe]</magenta> Testing Download MTU: <yellow>{mtu_size}</yellow> bytes via <cyan>{dns_server}</cyan>"
@@ -1096,9 +1106,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
         )
         return False
 
-    async def test_upload_mtu_size(
-        self, domain: str, dns_server: str, dns_port: int, default_mtu: int
-    ) -> tuple:
+    async def test_upload_mtu_size(self, domain, dns_server, dns_port, default_mtu):
         try:
             self.logger.debug(f"<cyan>[MTU]</cyan> Testing upload MTU for {domain}")
             mtu_char_len, mtu_bytes = self.dns_parser.calculate_upload_mtu(
@@ -1133,12 +1141,12 @@ class MasterDnsVPNClient(PacketQueueMixin):
 
     async def test_download_mtu_size(
         self,
-        domain: str,
-        dns_server: str,
-        dns_port: int,
-        default_mtu: int,
-        up_mtu_bytes: int,
-    ) -> tuple:
+        domain,
+        dns_server,
+        dns_port,
+        default_mtu,
+        up_mtu_bytes,
+    ):
         try:
             self.logger.debug(f"<cyan>[MTU]</cyan> Testing download MTU for {domain}")
 
@@ -1970,19 +1978,90 @@ class MasterDnsVPNClient(PacketQueueMixin):
                         and parsed_header["packet_type"] == Packet_Type.SESSION_ACCEPT
                     ):
                         try:
-                            decoded_str = returned_data.decode("utf-8", errors="ignore")
-                            if ":" in decoded_str:
-                                received_token, received_sid = decoded_str.split(":", 1)
-                                if received_token == init_token.decode("ascii"):
-                                    self.session_id = int(received_sid)
-                                    self.logger.success(
-                                        f"<g>Validated Session ID: {self.session_id}</g>"
-                                    )
-                                    return True
+                            if isinstance(returned_data, str):
+                                returned_data = returned_data.encode(
+                                    "ascii", errors="ignore"
+                                )
+                            elif not isinstance(returned_data, (bytes, bytearray)):
+                                returned_data = bytes(returned_data or b"")
+
+                            parts = bytes(returned_data).split(b":", 2)
+                            if len(parts) < 2:
+                                return False
+
+                            received_token = parts[0].decode("ascii", errors="ignore")
+                            raw_sid = bytes(parts[1] or b"")
+                            compression_pref = 0
+                            if len(parts) >= 3:
+                                raw_comp = bytes(parts[2] or b"")
+                                if len(raw_comp) == 1:
+                                    compression_pref = raw_comp[0]
                                 else:
-                                    self.logger.warning(
-                                        "Token mismatch! Ignoring old session response."
+                                    comp_txt = (
+                                        raw_comp.decode("ascii", errors="ignore")
+                                        .strip()
+                                        .strip("\x00")
                                     )
+                                    if comp_txt.isdigit():
+                                        compression_pref = int(comp_txt)
+                                    elif raw_comp:
+                                        compression_pref = raw_comp[0]
+                                        self.logger.warning(
+                                            f"Unexpected compression payload format from server: {raw_comp!r}. Falling back to first byte value {compression_pref}."
+                                        )
+
+                            if received_token != init_token.decode("ascii"):
+                                self.logger.warning(
+                                    "Token mismatch! Ignoring old session response."
+                                )
+                                return False
+
+                            new_upload_compression_type = normalize_compression_type(
+                                (compression_pref >> 4) & 0x0F
+                            )
+
+                            if (
+                                new_upload_compression_type
+                                != self.upload_compression_type
+                            ):
+                                self.upload_compression_type = (
+                                    new_upload_compression_type
+                                )
+                                self.logger.warning(
+                                    f"<yellow>Server requested upload compression change. New Upload Compression: <cyan>{get_compression_name(self.upload_compression_type)}</cyan></yellow>"
+                                )
+
+                            new_download_compression_type = normalize_compression_type(
+                                compression_pref & 0x0F
+                            )
+                            if (
+                                new_download_compression_type
+                                != self.download_compression_type
+                            ):
+                                self.download_compression_type = (
+                                    new_download_compression_type
+                                )
+                                self.logger.warning(
+                                    f"<yellow>Server requested download compression change. New Download Compression: <cyan>{get_compression_name(self.download_compression_type)}</cyan></yellow>"
+                                )
+                            sid_txt = (
+                                raw_sid.decode("ascii", errors="ignore")
+                                .strip()
+                                .strip("\x00")
+                            )
+                            if sid_txt.isdigit():
+                                self.session_id = int(sid_txt)
+                            elif len(raw_sid) == 1:
+                                # Backward-compatible fallback for binary SID payloads.
+                                self.session_id = raw_sid[0]
+                            else:
+                                raise ValueError(
+                                    f"Invalid session id payload: {raw_sid!r}"
+                                )
+                            self.logger.success(
+                                f"<green>Validated Session ID: <cyan>{self.session_id}</cyan>, Upload Compression: <cyan>{get_compression_name(self.upload_compression_type)}</cyan>, Download Compression: <cyan>{get_compression_name(self.download_compression_type)}</cyan></green>"
+                            )
+                            return True
                         except Exception as e:
                             self.logger.error(f"Session parse error: {e}")
 
@@ -3527,7 +3606,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
         except asyncio.TimeoutError:
             pass
 
-    def _signal_handler(self, signum, frame=None) -> None:
+    def _signal_handler(self, signum, frame=None):
         """Handle termination signals to stop the client gracefully (Thread-Safe)."""
 
         if getattr(self, "_force_quit_flag", False):
@@ -3662,7 +3741,7 @@ def main():
         os._exit(0)
     except Exception as e:
         print(f"Error while stopping the client: {e}")
-        exit()
+        sys.exit(1)
 
 
 if __name__ == "__main__":

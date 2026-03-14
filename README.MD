@@ -235,6 +235,7 @@ The table below explains all available settings and their functions in the clien
 | `DOMAINS` | `["v.domain.com"]` | Array list (e.g., `["sub.site.com"]`) | The <br>NS<br> subdomain configured in Section 1. This must be exactly the same on both Client and Server. <br> Currently, avoid adding multiple domains! |
 | `DATA_ENCRYPTION_METHOD` | `1` | `0` to `5` | **Encryption Algorithm:**<br><br>`0`: Disabled (No security)<br>`1`: XOR algorithm (Recommended - High speed, Medium security)<br>`2`: ChaCha20<br>`3`: AES-128-GCM<br>`4`: AES-192-GCM<br>`5`: AES-256-GCM (Highest security, lowest speed) |
 | `ENCRYPTION_KEY` | `""` | String | Encryption key matched with the server. Connections fail without this. |
+| `BASE_ENCODE_DATA` | `false` | `true` or `false` | Adds DNS-safe base encoding before packet transport. Usually keep `false`; enabling it increases overhead and may reduce throughput. |
 | `LISTEN_IP` | `"0.0.0.0"` | Valid IP (e.g., `127.0.0.1`) | Local IP address the client listens on.<br><br>• `"127.0.0.1"`: Local device only (more secure)<br>• `"0.0.0.0"`: Accessible by all devices on your local network |
 | `LISTEN_PORT` | `1080` | Port number (e.g., `1080`) | The port the client listens on so your apps (Browser, Telegram) can connect. |
 | `SOCKS5_AUTH` | `true` | `true` or `false` | Enables local <br>SOCKS5<br> authentication. (If `false`, connecting to your proxy requires no user/pass). **Note:** This setting is solely for your local machine's security and has nothing to do with the tunnel connection. It only works if the protocol is set to <br>SOCKS5<br>. |
@@ -257,6 +258,7 @@ The table below explains all available settings and their functions in the clien
 | `NUM_DNS_WORKERS` | `3` | Integer (e.g., `1`, `3`, `5`) | Number of TX workers sending DNS queries. Higher values improve concurrency but use more CPU. |
 | `SOCKET_BUFFER_SIZE` | `8388608` | Integer (Bytes) | UDP Socket buffer size. Determines how much incoming data the OS buffers before dropping packets. High values recommended for high-traffic environments, requires sufficient RAM. |
 | `LOG_LEVEL` | `"INFO"` | `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`, `"CRITICAL"` | Client logging verbosity. `DEBUG` helps troubleshooting but generates massive logs. `INFO` or `WARNING` is best for daily use. |
+| `CONFIG_VERSION` | `3.0` | Float/Number | Config schema version used for compatibility checks with current client defaults. |
 
 ---
 
@@ -293,6 +295,8 @@ The following items were added/changed in recent versions and are reflected in `
 | `SOCKS5_PASS` | `"123456"` | Custom string | Password for the external SOCKS proxy. |
 | `ARQ_INITIAL_RTO` | `1.0` | Float (Seconds) | Initial ARQ Timeout. See client config table for details. |
 | `ARQ_MAX_RTO` | `3.0` | Float (Seconds) | Max ARQ Retransmission limit. See client config table. |
+| `SUPPORTED_UPLOAD_COMPRESSION_TYPES` | `[0, 1, 2, 3]` | List of `0..3` | Server-allowed upload compression types. Invalid values are dropped; `0` (OFF) is always enforced as fallback. |
+| `SUPPORTED_DOWNLOAD_COMPRESSION_TYPES` | `[0, 1, 2, 3]` | List of `0..3` | Server-allowed download compression types. Invalid values are dropped; `0` (OFF) is always enforced as fallback. |
 | `ARQ_WINDOW_SIZE` | `3000` | Integer | Server-side window size. Must scale with Server <br>RAM<br>. |
 | `MAX_CONCURRENT_REQUESTS` | `1000` | Integer | Max concurrent async DNS queries handled by the server. 5000 for strong servers, 1000 for weaker ones. |
 | `MAX_PACKETS_PER_BATCH` | `20` | Integer | Max number of small control packets merged together. 5-20 is ideal. `1` disables packing (reduces latency but increases CPU load). |
@@ -300,6 +304,7 @@ The following items were added/changed in recent versions and are reflected in `
 | `LOG_LEVEL` | `"INFO"` | `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`, `"CRITICAL"` | Server logging verbosity. |
 | `SESSION_TIMEOUT` | `300` | Integer (Seconds) | Inactivity duration before a Session is considered expired and killed. 300 (5 mins) is a good balance. |
 | `SESSION_CLEANUP_INTERVAL` | `60` | Integer (Seconds) | Frequency the background worker scans for and purges dead sessions to free memory. |
+| `CONFIG_VERSION` | `2.0` | Float/Number | Config schema version used for compatibility checks with current server defaults. |
 
 ---
 

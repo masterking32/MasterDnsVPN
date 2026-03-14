@@ -92,19 +92,33 @@ class PacketQueueMixin:
         self._dec_priority_counter(owner, priority)
         self._release_tracking_on_pop(owner, ptype, sn)
 
-    def _pop_packable_control_block(self, queue, owner: dict, priority: int):
+    def _pop_packable_control_block(
+        self,
+        queue,
+        owner: dict,
+        priority: int,
+        packet_type: int | None = None,
+    ):
         if not queue:
             return None
         item = queue[0]
         if int(item[0]) != int(priority):
             return None
         ptype = int(item[2])
+        if packet_type is not None and ptype != int(packet_type):
+            return None
         payload = item[5]
         if ptype not in self._packable_control_types or payload:
             return None
         popped = heapq.heappop(queue)
         self._on_queue_pop(owner, popped)
         return popped
+
+    def _owner_has_priority(self, owner: dict, priority: int) -> bool:
+        counters = owner.get("priority_counts")
+        if not counters:
+            return False
+        return counters.get(int(priority), 0) > 0
 
     def _resolve_arq_packet_type(self, **flags) -> int:
         if flags.get("is_ack"):
