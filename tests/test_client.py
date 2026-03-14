@@ -50,7 +50,8 @@ def make_client(config: dict | None = None):
     cfg = config or MINIMAL_CLIENT_CONFIG
     with patch("client.load_config", return_value=cfg), \
          patch("client.os.path.isfile", return_value=True), \
-         patch("client.getLogger", return_value=_MOCK_LOGGER):
+         patch("client.getLogger", return_value=_MOCK_LOGGER), \
+         patch.object(MasterDnsVPNClient, "_load_resolvers_from_file", return_value=["8.8.8.8"]):
         return MasterDnsVPNClient()
 
 

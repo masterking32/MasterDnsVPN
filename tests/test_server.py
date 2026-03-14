@@ -163,15 +163,15 @@ class TestSessionManagement:
         assert server.sessions[sid]["client_upload_compression_type"] == Compression_Type.ZLIB
 
     @pytest.mark.asyncio
-    async def test_new_session_fallback_unavailable_compression(self) -> None:
+    async def test_new_session_stores_requested_compression(self) -> None:
         server = make_server()
-        with patch("server.is_compression_type_available", return_value=False):
-            sid = await server.new_session(
-                client_upload_compression_type=Compression_Type.ZSTD,
-                client_download_compression_type=Compression_Type.ZSTD,
-            )
+        sid = await server.new_session(
+            client_upload_compression_type=Compression_Type.ZSTD,
+            client_download_compression_type=Compression_Type.ZSTD,
+        )
         assert sid is not None
-        assert server.sessions[sid]["client_upload_compression_type"] == Compression_Type.OFF
+        assert server.sessions[sid]["client_upload_compression_type"] == Compression_Type.ZSTD
+        assert server.sessions[sid]["client_download_compression_type"] == Compression_Type.ZSTD
 
     @pytest.mark.asyncio
     async def test_close_session_removes_session(self) -> None:

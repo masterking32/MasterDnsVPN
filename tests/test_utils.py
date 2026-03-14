@@ -129,25 +129,27 @@ class TestGetEncryptKey:
         result = get_encrypt_key(5)
         assert len(result) == 32
 
-    def test_persists_key_to_disk(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.chdir(tmp_path)
-        key1 = get_encrypt_key(5)
-        key2 = get_encrypt_key(5)
+    def test_persists_key_to_disk(self, tmp_path: Path) -> None:
+        key_file = str(tmp_path / "encrypt_key.txt")
+        with patch("dns_utils.config_loader.get_config_path", return_value=key_file):
+            key1 = get_encrypt_key(5)
+            key2 = get_encrypt_key(5)
         assert key1 == key2
-        key_file = tmp_path / "encrypt_key.txt"
-        assert key_file.exists()
+        assert (tmp_path / "encrypt_key.txt").exists()
 
-    def test_uses_existing_valid_key(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.chdir(tmp_path)
+    def test_uses_existing_valid_key(self, tmp_path: Path) -> None:
         existing_key = "abcdef0123456789abcdef0123456789"  # 32 valid hex chars
+        key_file = str(tmp_path / "encrypt_key.txt")
         (tmp_path / "encrypt_key.txt").write_text(existing_key, encoding="utf-8")
-        result = get_encrypt_key(5)
+        with patch("dns_utils.config_loader.get_config_path", return_value=key_file):
+            result = get_encrypt_key(5)
         assert result == existing_key
 
-    def test_regenerates_key_if_wrong_length(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.chdir(tmp_path)
+    def test_regenerates_key_if_wrong_length(self, tmp_path: Path) -> None:
+        key_file = str(tmp_path / "encrypt_key.txt")
         (tmp_path / "encrypt_key.txt").write_text("tooshort", encoding="utf-8")
-        result = get_encrypt_key(5)
+        with patch("dns_utils.config_loader.get_config_path", return_value=key_file):
+            result = get_encrypt_key(5)
         assert len(result) == 32
 
 

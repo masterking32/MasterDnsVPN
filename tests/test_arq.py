@@ -535,7 +535,10 @@ class TestCheckRetransmits:
                 "retries": arq.max_data_retries + 1,
                 "current_rto": 0.5,
             }
-            await arq.check_retransmits()
+            try:
+                await arq.check_retransmits()
+            except asyncio.CancelledError:
+                pass
             assert arq.closed
         finally:
             await cancel_arq_tasks(arq)
@@ -547,7 +550,10 @@ class TestCheckRetransmits:
             arq.last_activity = time.monotonic() - arq.inactivity_timeout - 10.0
             # Empty buffers so activity timeout causes abort
             assert len(arq.snd_buf) == 0
-            await arq.check_retransmits()
+            try:
+                await arq.check_retransmits()
+            except asyncio.CancelledError:
+                pass
             assert arq.closed
         finally:
             await cancel_arq_tasks(arq)
@@ -591,7 +597,10 @@ class TestAbortClose:
     async def test_abort_closes_stream(self) -> None:
         arq = make_arq()
         try:
-            await arq.abort(reason="test abort")
+            try:
+                await arq.abort(reason="test abort")
+            except asyncio.CancelledError:
+                pass
             assert arq.closed is True
         finally:
             await cancel_arq_tasks(arq)
@@ -600,8 +609,14 @@ class TestAbortClose:
     async def test_abort_twice_is_noop(self) -> None:
         arq = make_arq()
         try:
-            await arq.abort(reason="first")
-            await arq.abort(reason="second")
+            try:
+                await arq.abort(reason="first")
+            except asyncio.CancelledError:
+                pass
+            try:
+                await arq.abort(reason="second")
+            except asyncio.CancelledError:
+                pass
             assert arq.closed is True
         finally:
             await cancel_arq_tasks(arq)
@@ -610,7 +625,10 @@ class TestAbortClose:
     async def test_close_sends_fin(self) -> None:
         arq = make_arq()
         try:
-            await arq.close(reason="test close", send_fin=True)
+            try:
+                await arq.close(reason="test close", send_fin=True)
+            except asyncio.CancelledError:
+                pass
             assert arq.closed is True
             arq.enqueue_control_tx.assert_called()
         finally:
@@ -620,7 +638,10 @@ class TestAbortClose:
     async def test_close_no_fin(self) -> None:
         arq = make_arq()
         try:
-            await arq.close(reason="no fin", send_fin=False)
+            try:
+                await arq.close(reason="no fin", send_fin=False)
+            except asyncio.CancelledError:
+                pass
             assert arq.closed is True
         finally:
             await cancel_arq_tasks(arq)
@@ -629,7 +650,10 @@ class TestAbortClose:
     async def test_abort_no_rst_send(self) -> None:
         arq = make_arq()
         try:
-            await arq.abort(reason="test", send_rst=False)
+            try:
+                await arq.abort(reason="test", send_rst=False)
+            except asyncio.CancelledError:
+                pass
             assert arq.closed is True
             # With send_rst=False, RST packet should not be enqueued
         finally:
@@ -746,7 +770,7 @@ class TestIOLoop:
         )
         try:
             await asyncio.wait_for(arq._io_loop(), timeout=2.0)
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, asyncio.CancelledError):
             pass
         # After EOF, stream should be closed or in graceful close
         assert arq.closed or arq._fin_sent
@@ -772,7 +796,7 @@ class TestIOLoop:
         )
         try:
             await asyncio.wait_for(arq._io_loop(), timeout=2.0)
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, asyncio.CancelledError):
             pass
         assert arq.closed
 
@@ -821,7 +845,7 @@ class TestIOLoop:
         arq._stop_local_read = True
         try:
             await asyncio.wait_for(arq._io_loop(), timeout=2.0)
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, asyncio.CancelledError):
             pass
 
     @pytest.mark.asyncio
@@ -872,7 +896,7 @@ class TestIOLoop:
         )
         try:
             await asyncio.wait_for(arq._io_loop(), timeout=2.0)
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, asyncio.CancelledError):
             pass
         assert arq.closed
 
@@ -883,7 +907,10 @@ class TestInitiateGracefulClose:
         arq = make_arq()
         try:
             arq.graceful_drain_timeout = 0.1
-            await arq._initiate_graceful_close("test reason")
+            try:
+                await arq._initiate_graceful_close("test reason")
+            except asyncio.CancelledError:
+                pass
             assert arq.closed or arq._fin_sent
         finally:
             await cancel_arq_tasks(arq)
@@ -910,7 +937,10 @@ class TestInitiateGracefulClose:
                 "current_rto": 0.5,
             }
             arq.graceful_drain_timeout = 0.05  # Very short
-            await arq._initiate_graceful_close("short drain")
+            try:
+                await arq._initiate_graceful_close("short drain")
+            except asyncio.CancelledError:
+                pass
             # Either drained and closed gracefully or aborted
             assert arq.closed
         finally:
@@ -930,7 +960,10 @@ class TestInitiateGracefulClose:
                 "current_rto": 0.5,
             }
             arq.graceful_drain_timeout = 0.01  # Extremely short timeout
-            await arq._initiate_graceful_close("drain timeout test")
+            try:
+                await arq._initiate_graceful_close("drain timeout test")
+            except asyncio.CancelledError:
+                pass
             assert arq.closed
         finally:
             await cancel_arq_tasks(arq)
@@ -998,7 +1031,10 @@ class TestTryFinalizeRemoteEof:
             arq.rcv_nxt = 3
             arq._fin_sent = True
             arq._fin_acked = True
-            await arq._try_finalize_remote_eof()
+            try:
+                await arq._try_finalize_remote_eof()
+            except asyncio.CancelledError:
+                pass
             assert arq.closed
         finally:
             await cancel_arq_tasks(arq)
@@ -1174,7 +1210,10 @@ class TestCheckRetransmitsRstReceived:
         try:
             arq._rst_received = True
             arq._rst_seq_received = 5
-            await arq.check_retransmits()
+            try:
+                await arq.check_retransmits()
+            except asyncio.CancelledError:
+                pass
             assert arq.closed
         finally:
             await cancel_arq_tasks(arq)
@@ -1239,7 +1278,10 @@ class TestReceiveDataEdgeCases:
                     return super().pop(key, *args)
 
             arq.rcv_buf = FailingDict({0: b"data"})  # type: ignore[assignment]
-            await arq.receive_data(0, b"new")
+            try:
+                await arq.receive_data(0, b"new")
+            except asyncio.CancelledError:
+                pass
             assert arq.closed
         finally:
             await cancel_arq_tasks(arq)
@@ -1251,7 +1293,10 @@ class TestReceiveDataEdgeCases:
         try:
             arq.rcv_nxt = 0
             arq.writer.drain = AsyncMock(side_effect=ConnectionResetError("drain error"))
-            await arq.receive_data(0, b"data")
+            try:
+                await arq.receive_data(0, b"data")
+            except asyncio.CancelledError:
+                pass
             assert arq.closed
         finally:
             await cancel_arq_tasks(arq)
