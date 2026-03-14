@@ -1,0 +1,14 @@
+-r requirements.txt
+
+pytest
+pytest-asyncio
+pytest-timeout
+pytest-xdist
+pytest-mock
+pytest-cov
+hypothesis
+black
+isort
+mypy
+pylint
+autopep8
