@@ -384,6 +384,8 @@ class ARQ:
             pass
         except Exception as e:
             self.logger.debug(f"Stream {self.stream_id} IO loop error: {e}")
+            reset_required = True
+            error_reason = str(e)
         finally:
             if self.closed:
                 pass
@@ -869,7 +871,9 @@ class ARQ:
                     f"did not finish within 0.2 s after cancel during close()"
                 )
             except asyncio.CancelledError:
-                pass
+                current = asyncio.current_task()
+                if current is not None and current.cancelling() > 0:
+                    raise
             except Exception as exc:
                 self.logger.debug(
                     f"Stream {self.stream_id}: unexpected exception while awaiting "
