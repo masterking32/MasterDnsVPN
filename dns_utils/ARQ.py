@@ -868,7 +868,9 @@ class ARQ:
                     f"Stream {self.stream_id}: task {task.get_name()!r} "
                     f"did not finish within 0.2 s after cancel during close()"
                 )
-            except BaseException as exc:
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
                 self.logger.debug(
                     f"Stream {self.stream_id}: unexpected exception while awaiting "
                     f"cancelled task {task.get_name()!r} during close():\n"
