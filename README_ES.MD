@@ -10,6 +10,10 @@ El objetivo principal de **MasterDnsVPN** es proveer un túnel seguro, confiable
 
 ---
 
+❌ Descargo de responsabilidad: Este proyecto está destinado únicamente a fines educativos e investigativos. Su uso puede alterar las estructuras de la red, y está prohibido utilizarlo para eludir las leyes de los países. No asumimos ninguna responsabilidad por tales acciones.
+
+---
+
 # Canal de Anuncios 📢
 Para las últimas noticias, actualizaciones y cambios relacionados con este proyecto, por favor seguí nuestro canal de Telegram: [Canal de Telegram](https://t.me/masterdnsvpn)
 

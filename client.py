@@ -15,6 +15,7 @@ import signal
 import socket
 import sys
 import time
+from bisect import bisect_left, bisect_right, insort
 from collections import defaultdict, deque
 
 from dns_utils.ARQ import ARQ
@@ -246,6 +247,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
         self.max_packed_blocks: int = 1
         self.connections_map: list = []
         self.session_id = 0
+        self.session_cookie = 0
         self.synced_upload_mtu = 0
         self.synced_upload_mtu_chars = 0
         self.synced_download_mtu = 0
@@ -330,6 +332,11 @@ class MasterDnsVPNClient(PacketQueueMixin):
                 Packet_Type.STREAM_RST,
             }
         )
+        self._packet_type_names = {
+            v: k
+            for k, v in Packet_Type.__dict__.items()
+            if not k.startswith("__") and isinstance(v, int)
+        }
         self._socks5_error_reply_map = {
             Packet_Type.SOCKS5_CONNECT_FAIL: 0x01,
             Packet_Type.SOCKS5_RULESET_DENIED: 0x02,
@@ -757,14 +764,50 @@ class MasterDnsVPNClient(PacketQueueMixin):
 
         try:
             self.enqueue_seq = (self.enqueue_seq + 1) & 0x7FFFFFFF
-            heapq.heappush(
+            queue_item = (4, self.enqueue_seq, Packet_Type.PING, 0, 0, payload)
+            was_empty = not self.main_queue
+            self._push_queue_item(
                 self.main_queue,
-                (4, self.enqueue_seq, Packet_Type.PING, 0, 0, payload),
+                self.__dict__,
+                queue_item,
+                self.tx_event,
             )
             self.count_ping += 1
-            self.tx_event.set()
+            if was_empty:
+                self._activate_response_queue(0)
         except Exception:
             pass
+
+    def _activate_response_queue(self, stream_id: int) -> None:
+        sid = int(stream_id)
+        if sid in self.active_response_set:
+            return
+        self.active_response_set.add(sid)
+        insort(self.active_response_ids, sid)
+
+    def _deactivate_response_queue(self, stream_id: int) -> None:
+        sid = int(stream_id)
+        if sid not in self.active_response_set:
+            return
+        self.active_response_set.discard(sid)
+        idx = bisect_left(self.active_response_ids, sid)
+        if idx < len(self.active_response_ids) and self.active_response_ids[idx] == sid:
+            self.active_response_ids.pop(idx)
+
+    def _get_active_response_queue(self, stream_id: int):
+        sid = int(stream_id)
+        if sid == 0:
+            if self.main_queue:
+                return self.main_queue, self.__dict__
+        else:
+            stream_data = self.active_streams.get(sid)
+            if stream_data:
+                tx_queue = stream_data.get("tx_queue")
+                if tx_queue:
+                    return tx_queue, stream_data
+
+        self._deactivate_response_queue(sid)
+        return None, None
 
     def _match_allowed_domain_suffix(self, qname: str) -> str | None:
         """Return the matched allowed domain suffix for qname, if any."""
@@ -847,11 +890,22 @@ class MasterDnsVPNClient(PacketQueueMixin):
         except Exception:
             return None, b""
 
-        return await self._run_cpu_task(
+        parsed_header, returned_data = await self._run_cpu_task(
             self.dns_parser.extract_vpn_response,
             parsed,
             is_encoded=self.base_encode_responses,
         )
+        if not parsed_header:
+            return None, b""
+
+        packet_cookie = int(parsed_header.get("session_cookie", 0) or 0)
+        expected_cookie = self._expected_inbound_session_cookie(
+            int(parsed_header.get("packet_type", -1))
+        )
+        if packet_cookie != expected_cookie:
+            return None, b""
+
+        return parsed_header, returned_data
 
     async def _run_cpu_task(self, func, *args, **kwargs):
         """Run CPU-heavy parser/codec work on a thread pool while preserving single state owner."""
@@ -1042,9 +1096,14 @@ class MasterDnsVPNClient(PacketQueueMixin):
                 f"<magenta>[MTU Probe]</magenta> Testing Download MTU: <yellow>{mtu_size}</yellow> bytes via <cyan>{dns_server}</cyan>"
             )
 
+        worst_header = self.dns_parser.get_max_vpn_header_raw_size()
+        test_header = self.dns_parser.get_vpn_header_raw_size(Packet_Type.MTU_DOWN_RES)
+        header_reserve = max(0, worst_header - test_header)
+        effective_download_size = mtu_size + header_reserve
+
         target_length = max(5, up_mtu_bytes)
         flag_byte = b"\x01" if self.base_encode_responses else b"\x00"
-        data_bytes = flag_byte + mtu_size.to_bytes(4, "big")
+        data_bytes = flag_byte + effective_download_size.to_bytes(4, "big")
 
         if target_length > 5:
             data_bytes += os.urandom(target_length - 5)
@@ -1084,7 +1143,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
         packet_type = parsed_header["packet_type"] if parsed_header else None
 
         if packet_type == Packet_Type.MTU_DOWN_RES:
-            if returned_data and len(returned_data) == mtu_size:
+            if returned_data and len(returned_data) == effective_download_size:
                 self._log_mtu_probe(
                     f"<yellow>🟢 Download test passed: Download MTU <green>{mtu_size}</green> bytes via <cyan>{dns_server}</cyan> for <cyan>{domain}</cyan></yellow>",
                     level="success",
@@ -1356,7 +1415,12 @@ class MasterDnsVPNClient(PacketQueueMixin):
                     )  # Base64 inflation (4 chars per 3 bytes)
                 else:
                     raw_cap = available
-                return max(0, raw_cap - self.crypto_overhead - 8)  # 8 for VPN header
+                return max(
+                    0,
+                    raw_cap
+                    - self.crypto_overhead
+                    - self.dns_parser.get_max_vpn_header_raw_size(),
+                )
 
             down_512 = calc_down_capacity(512)
             min_down_512 = max(0, down_512 - 10)
@@ -1866,6 +1930,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
                 mtu_chars=self.synced_upload_mtu_chars,
                 encode_data=True,
                 qType=DNS_Record_Type.TXT,
+                session_cookie=self.session_cookie,
             )
 
             if not dns_queries:
@@ -1992,10 +2057,13 @@ class MasterDnsVPNClient(PacketQueueMixin):
                             received_token = parts[0].decode("ascii", errors="ignore")
                             raw_sid = bytes(parts[1] or b"")
                             compression_pref = 0
+                            session_cookie = 0
                             if len(parts) >= 3:
                                 raw_comp = bytes(parts[2] or b"")
-                                if len(raw_comp) == 1:
+                                if len(raw_comp) >= 1:
                                     compression_pref = raw_comp[0]
+                                    if len(raw_comp) >= 2:
+                                        session_cookie = raw_comp[1]
                                 else:
                                     comp_txt = (
                                         raw_comp.decode("ascii", errors="ignore")
@@ -2058,6 +2126,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
                                 raise ValueError(
                                     f"Invalid session id payload: {raw_sid!r}"
                                 )
+                            self.session_cookie = int(session_cookie) & 0xFF
                             self.logger.success(
                                 f"<green>Validated Session ID: <cyan>{self.session_id}</cyan>, Upload Compression: <cyan>{get_compression_name(self.upload_compression_type)}</cyan>, Download Compression: <cyan>{get_compression_name(self.download_compression_type)}</cyan></green>"
                             )
@@ -2190,17 +2259,21 @@ class MasterDnsVPNClient(PacketQueueMixin):
     # ---------------------------------------------------------
     # TCP Multiplexing Logic & Handlers
     # ---------------------------------------------------------
-    def _reset_tunnel_runtime_state(self) -> None:
+    def _reset_tunnel_runtime_state(self, reset_session_cookie: bool = True) -> None:
         """
         Reset reconnect-sensitive runtime state.
         IMPORTANT: MTU discovery fields are intentionally preserved.
         """
         self.count_ping = 0
         self.enqueue_seq = 0
-        self.round_robin_index = 0
+        self.round_robin_stream_id = -1
         self.last_stream_id = 0
+        if reset_session_cookie:
+            self.session_cookie = 0
 
         self.main_queue = []
+        self.active_response_ids = []
+        self.active_response_set = set()
         self.tx_event = asyncio.Event()
 
         self.active_streams = {}
@@ -2210,6 +2283,8 @@ class MasterDnsVPNClient(PacketQueueMixin):
         self.track_resend = set()
         self.track_types = set()
         self.track_data = set()
+        self.track_seq_packets = set()
+        self.track_fragment_packets = set()
         self.rx_tasks = set()
         self.server_rtt_tracker.clear()
         self.server_health.clear()
@@ -2232,7 +2307,11 @@ class MasterDnsVPNClient(PacketQueueMixin):
             self.track_resend.clear()
             self.track_types.clear()
             self.track_data.clear()
+            self.track_seq_packets.clear()
+            self.track_fragment_packets.clear()
             self.priority_counts.clear()
+            self.active_response_ids.clear()
+            self.active_response_set.clear()
             self.active_streams.clear()
             self.closed_streams.clear()
             self.rx_tasks.clear()
@@ -2253,7 +2332,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
     async def _main_tunnel_loop(self):
         """Start local TCP server and main worker tasks."""
         self.logger.info("<blue>Entering VPN Tunnel Main Loop...</blue>")
-        self._reset_tunnel_runtime_state()
+        self._reset_tunnel_runtime_state(reset_session_cookie=False)
         self.tunnel_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             buffer_size = int(self.config.get("SOCKET_BUFFER_SIZE", 8388608))
@@ -2519,6 +2598,16 @@ class MasterDnsVPNClient(PacketQueueMixin):
         rep = self._packet_type_to_socks5_rep(packet_type)
         return bytes([0x05, rep, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
 
+    def _expected_inbound_session_cookie(self, packet_type: int) -> int:
+        if int(packet_type) in (
+            Packet_Type.SESSION_ACCEPT,
+            Packet_Type.MTU_UP_RES,
+            Packet_Type.MTU_DOWN_RES,
+            Packet_Type.ERROR_DROP,
+        ):
+            return 0
+        return int(self.session_cookie or 0)
+
     def _create_client_arq_stream(
         self,
         stream_id: int,
@@ -2694,9 +2783,10 @@ class MasterDnsVPNClient(PacketQueueMixin):
         )
 
         now_mono = time.monotonic()
-        syn_data = b"SY:" + os.urandom(4)
+        syn_data = b""
 
         self.active_streams[stream_id] = {
+            "stream_id": stream_id,
             "reader": reader,
             "writer": writer,
             "create_time": now_mono,
@@ -2704,6 +2794,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
             "status": "PENDING",
             "stream": None,
             "stream_creating": False,
+            "pending_inbound_data": {},
             "tx_queue": [],
             "initial_payload": target_payload,
             "priority_counts": {},
@@ -2712,6 +2803,9 @@ class MasterDnsVPNClient(PacketQueueMixin):
             "track_fin": set(),
             "track_syn_ack": set(),
             "track_data": set(),
+            "track_types": set(),
+            "track_seq_packets": set(),
+            "track_fragment_packets": set(),
         }
 
         if not is_socks5:
@@ -2735,7 +2829,10 @@ class MasterDnsVPNClient(PacketQueueMixin):
 
                 socks_err_ptype = stream_data.get("socks_error_packet")
                 if socks_err_ptype is not None:
-                    raise ConnectionError(f"SOCKS handshake failed ({socks_err_ptype})")
+                    packet_name = self._packet_type_names.get(
+                        int(socks_err_ptype), str(socks_err_ptype)
+                    )
+                    raise ConnectionError(f"SOCKS handshake failed ({packet_name})")
 
                 if stream_data.get("status") == "ACTIVE":
                     if writer and not writer.is_closing():
@@ -2888,35 +2985,184 @@ class MasterDnsVPNClient(PacketQueueMixin):
         )
 
         if stream_id == 0:
-            if not self._track_main_packet_once(self.__dict__, ptype, sn):
+            if not self._track_main_packet_once(
+                self.__dict__,
+                stream_id,
+                ptype,
+                sn,
+                payload=data,
+            ):
                 return
+            was_empty = not self.main_queue
             self._push_queue_item(
                 self.main_queue, self.__dict__, queue_item, self.tx_event
             )
+            if was_empty:
+                self._activate_response_queue(0)
             return
 
         stream_data = self.active_streams.get(stream_id)
         if not stream_data:
-            if ptype in (
-                Packet_Type.STREAM_RST,
-                Packet_Type.STREAM_RST_ACK,
-                Packet_Type.STREAM_FIN_ACK,
+            if (
+                ptype
+                in (
+                    Packet_Type.STREAM_RST,
+                    Packet_Type.STREAM_RST_ACK,
+                    Packet_Type.STREAM_FIN_ACK,
+                )
+                or ptype in self._control_request_ack_map.values()
             ):
+                if not self._track_main_packet_once(
+                    self.__dict__,
+                    stream_id,
+                    ptype,
+                    sn,
+                    payload=data,
+                ):
+                    return
+                was_empty = not self.main_queue
                 self._push_queue_item(
                     self.main_queue, self.__dict__, queue_item, self.tx_event
                 )
+                if was_empty:
+                    self._activate_response_queue(0)
             return
 
         if not self._track_stream_packet_once(
             stream_data,
             ptype,
             sn,
-            data_packet_types=(Packet_Type.STREAM_DATA, Packet_Type.SOCKS5_SYN),
+            data_packet_types=(Packet_Type.STREAM_DATA,),
+            payload=data,
         ):
             return
+        was_empty = not stream_data["tx_queue"]
         self._push_queue_item(
             stream_data["tx_queue"], stream_data, queue_item, self.tx_event
         )
+        if was_empty:
+            self._activate_response_queue(stream_id)
+
+    def _pack_selected_response_blocks(
+        self,
+        selected_stream_id: int,
+        selected_queue,
+        selected_owner: dict,
+        first_item: tuple,
+    ) -> bytes:
+        if self.max_packed_blocks <= 1:
+            return b""
+
+        target_priority = int(first_item[0])
+        _pack = self._block_packer.pack
+        _pop_packable = self._pop_packable_control_block
+        _owner_has_priority = self._owner_has_priority
+        packed_buffer = bytearray(_pack(first_item[2], first_item[3], first_item[4]))
+        blocks = 1
+
+        while blocks < self.max_packed_blocks:
+            popped = _pop_packable(selected_queue, selected_owner, target_priority)
+            if popped is None:
+                break
+            packed_buffer.extend(_pack(popped[2], popped[3], popped[4]))
+            blocks += 1
+            if not selected_queue:
+                self._deactivate_response_queue(selected_stream_id)
+                break
+
+        if blocks >= self.max_packed_blocks:
+            return bytes(packed_buffer)
+
+        active_ids = tuple(self.active_response_ids)
+        if not active_ids:
+            return bytes(packed_buffer)
+
+        num_queues = len(active_ids)
+        start_pos = bisect_right(active_ids, selected_stream_id)
+        if start_pos >= num_queues:
+            start_pos = 0
+
+        for offset in range(num_queues):
+            if blocks >= self.max_packed_blocks:
+                break
+            sid = active_ids[(start_pos + offset) % num_queues]
+            if sid == selected_stream_id:
+                continue
+            q_ref, owner = self._get_active_response_queue(sid)
+            if not q_ref or not owner:
+                continue
+            if not _owner_has_priority(owner, target_priority):
+                continue
+
+            while blocks < self.max_packed_blocks:
+                popped = _pop_packable(q_ref, owner, target_priority)
+                if popped is None:
+                    break
+                packed_buffer.extend(_pack(popped[2], popped[3], popped[4]))
+                blocks += 1
+                if not q_ref:
+                    self._deactivate_response_queue(sid)
+                    break
+
+        return bytes(packed_buffer) if blocks > 1 else b""
+
+    def _dequeue_response_packet(self):
+        if not self.active_response_ids:
+            return None
+
+        last_stream_id = int(self.round_robin_stream_id)
+        selected_pos = bisect_right(self.active_response_ids, last_stream_id)
+        attempts = len(self.active_response_ids)
+        target_queue = None
+        pop_owner = None
+        selected_stream_id = 0
+
+        while attempts > 0 and self.active_response_ids:
+            if selected_pos >= len(self.active_response_ids):
+                selected_pos = 0
+            candidate_stream_id = self.active_response_ids[selected_pos]
+            target_queue, pop_owner = self._get_active_response_queue(
+                candidate_stream_id
+            )
+            if target_queue and pop_owner:
+                selected_stream_id = candidate_stream_id
+                break
+            attempts -= 1
+
+        if not target_queue or not pop_owner:
+            return None
+
+        item = heapq.heappop(target_queue)
+        self._on_queue_pop(pop_owner, item)
+        if not target_queue:
+            self._deactivate_response_queue(selected_stream_id)
+        self.round_robin_stream_id = selected_stream_id
+
+        if item[2] == Packet_Type.PING and self.count_ping > 0:
+            self.count_ping -= 1
+
+        if (
+            item[2] in self._packable_control_types
+            and not item[5]
+            and self.max_packed_blocks > 1
+        ):
+            packed = self._pack_selected_response_blocks(
+                selected_stream_id=selected_stream_id,
+                selected_queue=target_queue,
+                selected_owner=pop_owner,
+                first_item=item,
+            )
+            if packed:
+                return (
+                    item[0],
+                    item[1],
+                    Packet_Type.PACKED_CONTROL_BLOCKS,
+                    0,
+                    0,
+                    packed,
+                )
+
+        return item
 
     async def _tx_worker(self):
         while not self.should_stop.is_set() and not self.session_restart_event.is_set():
@@ -2927,102 +3173,9 @@ class MasterDnsVPNClient(PacketQueueMixin):
             except Exception:
                 continue
 
-            item = None
-            target_queue = None
-            is_main = False
-            selected_stream_data = None
-            selected_sid = None
-
-            active_sids = [
-                sid for sid, s in self.active_streams.items() if s.get("tx_queue")
-            ]
-
-            if active_sids:
-                num_active = len(active_sids)
-                if self.round_robin_index >= num_active:
-                    self.round_robin_index = 0
-
-                selected_sid = active_sids[self.round_robin_index]
-                selected_stream_data = self.active_streams[selected_sid]
-                t_queue = selected_stream_data["tx_queue"]
-
-                if self.main_queue and self.main_queue[0][0] < t_queue[0][0]:
-                    target_queue = self.main_queue
-                    is_main = True
-                else:
-                    target_queue = t_queue
-                    self.round_robin_index = (self.round_robin_index + 1) % num_active
-            elif self.main_queue:
-                target_queue = self.main_queue
-                is_main = True
-            else:
-                self.tx_event.clear()
-                continue
-
-            if target_queue:
-                item = heapq.heappop(target_queue)
-                q_ptype = item[2]
-
-                if is_main:
-                    self._on_queue_pop(self.__dict__, item)
-                    if q_ptype == Packet_Type.PING and self.count_ping > 0:
-                        self.count_ping -= 1
-                elif selected_stream_data is not None:
-                    self._on_queue_pop(selected_stream_data, item)
-
-            if (
-                item
-                and item[2] in self._packable_control_types
-                and not item[5]
-                and self.max_packed_blocks > 1
-            ):
-                _pack = self._block_packer.pack
-                packed_buffer = bytearray(_pack(item[2], item[3], item[4]))
-                blocks = 1
-                max_blocks = self.max_packed_blocks
-                target_priority = int(item[0])
-
-                candidate_queues = []
-                ordered_sids = active_sids
-                if (not is_main) and selected_sid in active_sids:
-                    start_idx = active_sids.index(selected_sid)
-                    ordered_sids = active_sids[start_idx:] + active_sids[:start_idx]
-
-                for sid in ordered_sids:
-                    s_data = self.active_streams.get(sid)
-                    if s_data and s_data.get("tx_queue"):
-                        candidate_queues.append((s_data["tx_queue"], s_data))
-
-                # main_queue is a fallback/source for same-priority compact controls.
-                if self.main_queue:
-                    candidate_queues.append((self.main_queue, self.__dict__))
-                while blocks < max_blocks:
-                    packed_any = False
-                    for q_ref, owner in candidate_queues:
-                        popped = self._pop_packable_control_block(
-                            q_ref, owner, target_priority
-                        )
-                        if popped is None:
-                            continue
-                        packed_buffer.extend(_pack(popped[2], popped[3], popped[4]))
-                        blocks += 1
-                        packed_any = True
-                        if blocks >= max_blocks:
-                            break
-                    if not packed_any:
-                        break
-
-                if blocks > 1:
-                    item = (
-                        item[0],
-                        item[1],
-                        Packet_Type.PACKED_CONTROL_BLOCKS,
-                        0,
-                        0,
-                        bytes(packed_buffer),
-                    )
-
+            item = self._dequeue_response_packet()
             if not item:
+                self.tx_event.clear()
                 continue
 
             try:
@@ -3082,6 +3235,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
                     stream_id=stream_id,
                     sequence_num=sn,
                     compression_type=actual_comp_type,
+                    session_cookie=self.session_cookie,
                 )
 
                 if not query_packets:
@@ -3126,7 +3280,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
                 stream_id,
                 0,
                 Packet_Type.STREAM_RST,
-                b"RST:" + os.urandom(4),
+                b"",
             )
             return True
         return False
@@ -3162,15 +3316,18 @@ class MasterDnsVPNClient(PacketQueueMixin):
 
         if ptype == Packet_Type.PACKED_CONTROL_BLOCKS and data:
             _unpack_from = self._block_packer.unpack_from
-            block_tasks = []
             block_size = self._block_packer.size
+            inline_batch = []
             for i in range(0, len(data), block_size):
                 if i + block_size > len(data):
                     break
                 b_ptype, b_stream_id, b_sn = _unpack_from(data, i)
-                if b_ptype not in self._valid_packet_types:
+                if (
+                    b_ptype not in self._valid_packet_types
+                    or b_ptype == Packet_Type.PACKED_CONTROL_BLOCKS
+                ):
                     continue
-                block_tasks.append(
+                inline_batch.append(
                     self._handle_server_response(
                         {
                             "packet_type": b_ptype,
@@ -3181,11 +3338,13 @@ class MasterDnsVPNClient(PacketQueueMixin):
                         b"",
                     )
                 )
+                if len(inline_batch) >= 8:
+                    await asyncio.gather(*inline_batch, return_exceptions=True)
+                    inline_batch.clear()
 
-            # Process packed controls in bounded parallel batches for lower latency.
-            for idx in range(0, len(block_tasks), 8):
+            if inline_batch:
                 await asyncio.gather(
-                    *block_tasks[idx : idx + 8],
+                    *inline_batch,
                     return_exceptions=True,
                 )
 
@@ -3216,6 +3375,12 @@ class MasterDnsVPNClient(PacketQueueMixin):
                 )
                 stream_data["stream"] = stream
                 stream_data.pop("socks_error_packet", None)
+                pending_inbound = stream_data.pop("pending_inbound_data", {})
+                if pending_inbound:
+                    for pending_sn in sorted(pending_inbound):
+                        pending_payload = pending_inbound.get(pending_sn, b"")
+                        if pending_payload:
+                            await stream.receive_data(pending_sn, pending_payload)
                 self.logger.debug(
                     f"<blue>Stream <cyan>{stream_id}</cyan> Established with server.</blue>"
                 )
@@ -3235,10 +3400,15 @@ class MasterDnsVPNClient(PacketQueueMixin):
             return
 
         if ptype in self._control_ack_types and stream_id_exists:
+            is_socks_fragment_ack = ptype == Packet_Type.SOCKS5_SYN_ACK and bool(data)
             arq = stream_data.get("stream")
-            if arq:
+            if arq and not is_socks_fragment_ack:
                 await arq.receive_control_ack(ptype, sn)
-            if ptype == Packet_Type.SOCKS5_SYN_ACK and "handshake_event" in stream_data:
+            if (
+                ptype == Packet_Type.SOCKS5_SYN_ACK
+                and not is_socks_fragment_ack
+                and "handshake_event" in stream_data
+            ):
                 stream_data["handshake_event"].set()
             self._send_ping_packet()
             return
@@ -3249,14 +3419,29 @@ class MasterDnsVPNClient(PacketQueueMixin):
             and data
         ):
             arq = stream_data.get("stream")
-            if arq:
+            status = stream_data.get("status")
+            if arq and status in (
+                "ACTIVE",
+                "DRAINING",
+                "CLOSING",
+                "TIME_WAIT",
+            ):
                 await arq.receive_data(sn, data)
+            elif not arq and status == "PENDING":
+                stream_data.setdefault("pending_inbound_data", {}).setdefault(sn, data)
+            else:
+                await self._enqueue_packet(0, stream_id, 0, Packet_Type.STREAM_RST, b"")
             self._send_ping_packet()
             return
 
         if ptype == Packet_Type.STREAM_DATA_ACK and stream_id_exists:
             arq = stream_data.get("stream")
-            if arq:
+            if arq and stream_data.get("status") in (
+                "ACTIVE",
+                "DRAINING",
+                "CLOSING",
+                "TIME_WAIT",
+            ):
                 await arq.receive_ack(sn)
             self._send_ping_packet()
             return
@@ -3264,6 +3449,15 @@ class MasterDnsVPNClient(PacketQueueMixin):
         if ptype == Packet_Type.STREAM_FIN and stream_id_exists:
             arq = stream_data.get("stream")
             if not arq or getattr(arq, "closed", False):
+                await self._enqueue_packet(
+                    0, stream_id, sn, Packet_Type.STREAM_FIN_ACK, b""
+                )
+                return
+
+            if (
+                getattr(arq, "_remote_write_closed", False)
+                and getattr(arq, "_fin_seq_received", None) == sn
+            ):
                 await self._enqueue_packet(
                     0, stream_id, sn, Packet_Type.STREAM_FIN_ACK, b""
                 )
@@ -3304,9 +3498,12 @@ class MasterDnsVPNClient(PacketQueueMixin):
 
         if ptype == Packet_Type.STREAM_RST_ACK and stream_id_exists:
             arq = stream_data.get("stream")
-            if arq:
+            if arq and getattr(arq, "_rst_seq_sent", None) == sn:
                 await arq.receive_control_ack(Packet_Type.STREAM_RST_ACK, sn)
-            stream_data["rst_retries"] = 99
+                stream_data["rst_retries"] = 99
+            elif stream_data.get("rst_seq_sent") == sn:
+                stream_data["rst_acked"] = True
+                stream_data["rst_retries"] = 99
             self._send_ping_packet()
             return
 
@@ -3387,16 +3584,29 @@ class MasterDnsVPNClient(PacketQueueMixin):
 
         pending_tx = stream_data.get("tx_queue", [])
         if pending_tx:
+            main_was_empty = not self.main_queue
+            moved_any = False
             for item in pending_tx:
                 ptype = int(item[2])
                 if (
                     ptype in self._packable_control_types
                     and ptype != Packet_Type.SOCKS5_SYN
                 ):
-                    heapq.heappush(self.main_queue, item)
-                    self._inc_priority_counter(self.__dict__, item[0])
+                    if self._track_main_packet_once(
+                        self.__dict__,
+                        int(item[3]),
+                        ptype,
+                        int(item[4]),
+                        payload=item[5],
+                    ):
+                        self._push_queue_item(
+                            self.main_queue, self.__dict__, item, self.tx_event
+                        )
+                        moved_any = True
                     self._dec_priority_counter(stream_data, item[0])
-            self.tx_event.set()
+
+            if main_was_empty and moved_any:
+                self._activate_response_queue(0)
 
         try:
             stream_data.get("tx_queue", []).clear()
@@ -3405,9 +3615,14 @@ class MasterDnsVPNClient(PacketQueueMixin):
             stream_data.get("track_ack", set()).clear()
             stream_data.get("track_fin", set()).clear()
             stream_data.get("track_syn_ack", set()).clear()
+            stream_data.get("track_types", set()).clear()
+            stream_data.get("track_seq_packets", set()).clear()
+            stream_data.get("track_fragment_packets", set()).clear()
             stream_data.get("priority_counts", {}).clear()
+            stream_data.get("pending_inbound_data", {}).clear()
             stream_data["status"] = "TIME_WAIT"
             stream_data["close_time"] = time.monotonic()
+            self._deactivate_response_queue(stream_id)
         except Exception:
             pass
 
@@ -3427,8 +3642,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
 
                     if status == "PENDING" and (now - last_act) > 1.5:
                         s["last_activity_time"] = now
-                        self.track_types.discard(Packet_Type.STREAM_SYN)
-                        syn_data = b"SY:" + os.urandom(4)
+                        syn_data = b""
                         await self._enqueue_packet(
                             0, sid, 0, Packet_Type.STREAM_SYN, syn_data
                         )
@@ -3458,7 +3672,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
                                     0,
                                     sid,
                                     rst_sn,
-                                    b"RST:" + os.urandom(4),
+                                    b"",
                                     is_rst=True,
                                 )
 
@@ -3484,7 +3698,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
                         ):
                             s["last_activity_time"] = now
                             s["fin_retries"] = s.get("fin_retries", 0) + 1
-                            fin_data = b"FIN:" + os.urandom(4)
+                            fin_data = b""
 
                             fin_sn = 0
                             if (

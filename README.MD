@@ -10,6 +10,10 @@ The primary goal of **MasterDnsVPN** is to provide a secure, reliable, and flexi
 
 ---
 
+❌ Disclaimer: This project is intended for educational and research purposes only. Its use may disrupt network structures, and using it to bypass country laws is prohibited. We take no responsibility for any such actions.
+
+---
+
 # Announcement Channel 📢
 
 ### For the latest news, updates, and changes regarding this project, please follow our Telegram channel: [Telegram Channel](https://t.me/masterdnsvpn)

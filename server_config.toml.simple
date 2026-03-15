@@ -65,13 +65,13 @@ SUPPORTED_DOWNLOAD_COMPRESSION_TYPES = [0, 1, 2, 3]
 # ------------------------------------------------------------------------------
 
 # Data-plane ARQ profile.
-ARQ_WINDOW_SIZE = 1000
+ARQ_WINDOW_SIZE = 256
 ARQ_INITIAL_RTO = 0.5
-ARQ_MAX_RTO = 1.2
+ARQ_MAX_RTO = 1.5
 
 # Control-plane ARQ profile.
-ARQ_CONTROL_INITIAL_RTO = 0.4
-ARQ_CONTROL_MAX_RTO = 1.2
+ARQ_CONTROL_INITIAL_RTO = 0.5
+ARQ_CONTROL_MAX_RTO = 1.5
 ARQ_CONTROL_MAX_RETRIES = 180
 
 # ------------------------------------------------------------------------------
@@ -92,7 +92,7 @@ MAX_SESSIONS = 255
 # ------------------------------------------------------------------------------
 
 # Max concurrent DNS request handlers.
-MAX_CONCURRENT_REQUESTS = 1000
+MAX_CONCURRENT_REQUESTS = 500
 
 # CPU thread-pool size for parser/codec offload.
 # 0 = auto (recommended). Set a positive number to force size. Set -1 to disable.
@@ -112,4 +112,4 @@ LOG_LEVEL = "INFO"
 # ------------------------------------------------------------------------------
 # 7) Version Marker
 # ------------------------------------------------------------------------------
-CONFIG_VERSION = 2.0
+CONFIG_VERSION = 3.0
