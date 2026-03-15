@@ -33,7 +33,6 @@ if not extensions:
 
 setup(
     name="masterdnsvpn_cython_build",
-    python_requires=">=3.10",
     ext_modules=cythonize(
         extensions,
         compiler_directives={
