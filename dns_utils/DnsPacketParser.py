@@ -197,9 +197,9 @@ class DnsPacketParser:
                 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
                 self._aesgcm = AESGCM(self.key)
-            except ImportError:
-                if self.logger:
-                    self.logger.error("AES-GCM missing.")
+            except ImportError:  # pragma: no cover
+                if self.logger:  # pragma: no cover
+                    self.logger.error("AES-GCM missing.")  # pragma: no cover
 
         elif self.encryption_method == 2:
             try:
@@ -209,8 +209,8 @@ class DnsPacketParser:
                 self._Cipher = Cipher
                 self._default_backend = default_backend
                 self._chacha_algo = algorithms.ChaCha20
-            except ImportError:
-                pass
+            except ImportError:  # pragma: no cover
+                pass  # pragma: no cover
 
         self._setup_crypto_dispatch()
         self._alphabet_cache = {}

@@ -381,7 +381,9 @@ class ARQ:
                 await _enqueue(3, self.stream_id, sn, raw_data)
 
         except asyncio.CancelledError:
-            pass
+            _ct = asyncio.current_task()
+            if _ct is not None and hasattr(_ct, "uncancel"):
+                _ct.uncancel()
         except Exception as e:
             self.logger.debug(f"Stream {self.stream_id} IO loop error: {e}")
         finally:
@@ -512,7 +514,9 @@ class ARQ:
                         f"Retransmit check error on stream {self.stream_id}: {e}"
                     )
         except asyncio.CancelledError:
-            pass
+            _ct = asyncio.current_task()
+            if _ct is not None and hasattr(_ct, "uncancel"):
+                _ct.uncancel()
 
     # ---------------------------------------------------------------------
     # Data plane
@@ -867,7 +871,7 @@ class ARQ:
                 task.cancel()
                 try:
                     await asyncio.wait_for(task, timeout=0.2)
-                except Exception:
+                except BaseException:
                     pass
 
         try:
@@ -879,9 +883,9 @@ class ARQ:
                 self.writer.close()
                 try:
                     await asyncio.wait_for(self.writer.wait_closed(), timeout=0.5)
-                except Exception:
+                except BaseException:
                     pass
-        except Exception:
+        except BaseException:
             pass
 
         self._clear_all_queues()

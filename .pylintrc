@@ -1,0 +1,55 @@
+[MAIN]
+jobs = 0
+py-version = 3.10
+
+[MESSAGES CONTROL]
+disable =
+    line-too-long,
+    missing-module-docstring,
+    missing-class-docstring,
+    missing-function-docstring,
+    too-many-arguments,
+    too-many-instance-attributes,
+    too-many-locals,
+    too-few-public-methods,
+    too-many-branches,
+    too-many-return-statements,
+    too-many-statements,
+    too-many-lines,
+    too-many-nested-blocks,
+    too-many-public-methods,
+    too-many-positional-arguments,
+    fixme,
+    redefined-outer-name,
+    attribute-defined-outside-init,
+    deprecated-class,
+    consider-using-sys-exit,
+    unnecessary-lambda,
+    no-else-return,
+    raise-missing-from,
+    try-except-raise,
+    condition-evals-to-constant,
+    use-implicit-booleaness-not-comparison,
+    chained-comparison,
+    pointless-string-statement,
+    simplifiable-if-expression,
+    consider-using-min-builtin,
+    consider-using-f-string,
+    unnecessary-pass,
+    unreachable,
+    unused-argument,
+    unused-variable,
+    unused-import,
+    reimported,
+    superfluous-parens
+
+[FORMAT]
+max-line-length = 100
+
+[BASIC]
+good-names = i,j,k,n,e,f,p,q,r,s,t,fd,cb,sn,ok,hb,an,ns,ar,qd
+
+[DESIGN]
+max-args = 20
+max-attributes = 30
+max-bool-expr = 10

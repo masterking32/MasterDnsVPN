@@ -6,15 +6,15 @@ try:
     import zstandard as zstd
 
     ZSTD_AVAILABLE = True
-except ImportError:
-    ZSTD_AVAILABLE = False
+except ImportError:  # pragma: no cover
+    ZSTD_AVAILABLE = False  # pragma: no cover
 
 try:
     import lz4.block as lz4block
 
     LZ4_AVAILABLE = True
-except ImportError:
-    LZ4_AVAILABLE = False
+except ImportError:  # pragma: no cover
+    LZ4_AVAILABLE = False  # pragma: no cover
 
 
 class Compression_Type:

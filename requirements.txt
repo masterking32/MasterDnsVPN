@@ -1,7 +1,6 @@
 loguru
-cryptography
-tomli; python_version < "3.11"
-uvloop; sys_platform != "win32"
 cryptography>=41.0.0
+tomli; python_version < "3.11"
 zstandard>=0.22.0
 lz4>=4.3.2
+uvloop; sys_platform != "win32"

@@ -1,0 +1,15 @@
+[run]
+source = dns_utils
+omit =
+    build_setup.py
+    tests/*
+branch = true
+
+[report]
+fail_under = 90
+show_missing = true
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise NotImplementedError
+    if __name__ == .__main__.:
