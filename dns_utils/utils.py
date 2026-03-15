@@ -4,7 +4,6 @@
 # Year: 2026
 from loguru import logger
 import sys
-from typing import Optional
 import secrets
 import asyncio
 import socket
@@ -118,7 +117,7 @@ async def async_sendto(loop, sock: socket.socket, data: bytes, addr):
         raise
 
 
-def load_text(file_path: str) -> Optional[str]:
+def load_text(file_path: str) -> str | None:
     """
     Load and return the contents of a text file, stripped of leading/trailing whitespace.
     Returns None if the file does not exist or error occurs.
