@@ -170,7 +170,7 @@ RECHECK_INACTIVE_SERVERS_ENABLED = true
 
 # A full recheck cycle starts this many seconds after initial scan completion,
 # then repeats with the same interval.
-RECHECK_INACTIVE_INTERVAL_SECONDS = 1800
+RECHECK_INACTIVE_INTERVAL_SECONDS = 300
 
 # Delay between testing two inactive servers in background mode.
 # Minimum is always enforced as 3 seconds.
@@ -178,7 +178,7 @@ RECHECK_SERVER_INTERVAL_SECONDS = 3.0
 
 # Number of inactive resolver-domain pairs checked per background recheck cycle.
 # Note: when AUTO_SCALE_PROFILES=true, runtime value is auto-tuned by list size.
-RECHECK_BATCH_SIZE = 3
+RECHECK_BATCH_SIZE = 5
 
 # ------------------------------------------------------------------------------
 # 5) ARQ / Reliability
