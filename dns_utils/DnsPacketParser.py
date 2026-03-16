@@ -8,7 +8,7 @@ import math
 import os
 import random
 import struct
-from typing import Any
+from typing import Any, Optional
 
 from .DNS_ENUMS import DNS_QClass, DNS_Record_Type, Packet_Type, DNS_rCode
 
@@ -167,7 +167,7 @@ class DnsPacketParser:
 
     def __init__(
         self,
-        logger: Any | None = None,
+        logger: Optional[Any] = None,
         encryption_key: str = "",
         encryption_method: int = 1,
     ):
@@ -194,7 +194,7 @@ class DnsPacketParser:
 
         if self.encryption_method in (3, 4, 5):
             try:
-                from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # pylint: disable=import-outside-toplevel
+                from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
                 self._aesgcm = AESGCM(self.key)
             except ImportError:
@@ -203,8 +203,8 @@ class DnsPacketParser:
 
         elif self.encryption_method == 2:
             try:
-                from cryptography.hazmat.backends import default_backend  # pylint: disable=import-outside-toplevel
-                from cryptography.hazmat.primitives.ciphers import Cipher, algorithms  # pylint: disable=import-outside-toplevel
+                from cryptography.hazmat.backends import default_backend
+                from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
 
                 self._Cipher = Cipher
                 self._default_backend = default_backend

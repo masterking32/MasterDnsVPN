@@ -1,4 +1,4 @@
-# MasterDnsVPN Client
+﻿# MasterDnsVPN Client
 # Author: MasterkinG32
 # Github: https://github.com/masterking32
 # Year: 2026
@@ -17,6 +17,7 @@ import sys
 import time
 from bisect import bisect_left, bisect_right, insort
 from collections import defaultdict, deque
+from typing import Optional
 
 from dns_utils.ARQ import ARQ
 from dns_utils.compression import (
@@ -63,11 +64,11 @@ class MasterDnsVPNClient(PacketQueueMixin):
         # ---------------------------------------------------------
         # Runtime and lifecycle primitives
         # ---------------------------------------------------------
-        self.loop: asyncio.AbstractEventLoop | None = None
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.should_stop: asyncio.Event = asyncio.Event()
         self.session_restart_event = None
         self.rx_tasks = set()
-        self.cpu_executor: concurrent.futures.ThreadPoolExecutor | None = None
+        self.cpu_executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
 
         # ---------------------------------------------------------
         # Config and logger bootstrap
@@ -224,7 +225,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
         # ---------------------------------------------------------
         self.base_encode_responses: bool = self.config.get("BASE_ENCODE_DATA", False)
         self.encryption_method: int = self.config.get("DATA_ENCRYPTION_METHOD", 1)
-        self.encryption_key: str | None = self.config.get("ENCRYPTION_KEY", None)
+        self.encryption_key: Optional[str] = self.config.get("ENCRYPTION_KEY", None)
 
         if not self.encryption_key:
             self.logger.error(
@@ -503,7 +504,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
     def _format_mtu_log_line(
         self,
         template: str,
-        connection: dict | None = None,
+        connection: Optional[dict] = None,
         cause: str = "",
     ) -> str:
         if not template:
@@ -545,7 +546,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
     def _append_mtu_log_line(
         self,
         template: str,
-        connection: dict | None = None,
+        connection: Optional[dict] = None,
         cause: str = "",
         output_path: str = "",
     ) -> None:
@@ -728,7 +729,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
         port: int,
         timeout: float = 10,
         buffer_size: int = 0,
-    ) -> bytes | None:
+    ) -> Optional[bytes]:
         """Send a UDP packet and wait for the response."""
         buf_size = buffer_size or self.buffer_size
 
@@ -809,7 +810,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
         self._deactivate_response_queue(sid)
         return None, None
 
-    def _match_allowed_domain_suffix(self, qname: str) -> str | None:
+    def _match_allowed_domain_suffix(self, qname: str) -> Optional[str]:
         """Return the matched allowed domain suffix for qname, if any."""
         if not qname:
             return None
@@ -853,9 +854,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
             f"<cyan>[Compression]</cyan> <green>Effective Compression - Upload: <yellow>{get_compression_name(up)}</yellow>, Download: <yellow>{get_compression_name(down)}</yellow></green>"
         )
 
-    async def _process_received_packet(
-        self, response_bytes: bytes, addr=None
-    ) -> tuple[dict | None, bytes]:
+    async def _process_received_packet(self, response_bytes, addr=None):
         """Parse DNS response, validate source/domain once, then extract VPN payload."""
         if not response_bytes:
             return None, b""
@@ -3876,7 +3875,7 @@ def main():
             pass
         else:
             try:
-                import uvloop  # pylint: disable=import-outside-toplevel
+                import uvloop
 
                 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
             except ImportError:
@@ -3922,7 +3921,7 @@ def main():
         # On Windows, register a Console Ctrl Handler early so Ctrl+C is handled
         if sys.platform == "win32":
             try:
-                from ctypes import wintypes  # pylint: disable=import-outside-toplevel
+                from ctypes import wintypes
 
                 HandlerRoutine = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
 

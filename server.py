@@ -18,6 +18,7 @@ import sys
 import time
 from bisect import bisect_left, bisect_right, insort
 from collections import deque
+from typing import Optional
 
 from dns_utils.ARQ import ARQ
 from dns_utils.compression import (
@@ -68,8 +69,8 @@ class MasterDnsVPNServer(PacketQueueMixin):
         # ---------------------------------------------------------
         # Runtime primitives
         # ---------------------------------------------------------
-        self.udp_sock: socket.socket | None = None
-        self.loop: asyncio.AbstractEventLoop | None = None
+        self.udp_sock: Optional[socket.socket] = None
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.should_stop = asyncio.Event()
 
         # ---------------------------------------------------------
@@ -184,7 +185,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
         self._dns_task = None
         self._session_cleanup_task = None
         self._background_tasks = set()
-        self.cpu_executor: concurrent.futures.ThreadPoolExecutor | None = None
+        self.cpu_executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
         auto_cpu_workers = max(2, min(16, (os.cpu_count() or 1)))
         raw_cpu_workers = int(self.config.get("CPU_WORKER_THREADS", 0))
         if raw_cpu_workers < 0:
@@ -333,7 +334,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 f"Please update your config file to the latest version ({self.min_config_version}) for best performance and new features."
             )
 
-    def _parse_compression_value(self, value) -> int | None:
+    def _parse_compression_value(self, value) -> Optional[int]:
         if isinstance(value, str):
             v = value.strip()
             if not v:
@@ -421,7 +422,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
         client_token: bytes = b"",
         client_upload_compression_type: int = 0,
         client_download_compression_type: int = 0,
-    ) -> int | None:
+    ) -> Optional[int]:
         try:
             if not self.free_session_ids:
                 self.logger.error(
@@ -572,7 +573,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
             active_ids.pop(idx)
 
     def _extract_packet_payload(
-        self, labels: str, extracted_header: dict | None
+        self, labels: str, extracted_header: Optional[dict]
     ) -> bytes:
         """Extract packet payload and apply optional decompression based on header flag."""
         try:
@@ -638,7 +639,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
         parsed_packet=None,
         session_id=None,
         extracted_header=None,
-    ) -> bytes | None:
+    ) -> Optional[bytes]:
         """Handle NEW_SESSION VPN packet."""
         try:
             client_payload = self._extract_packet_payload(labels, extracted_header)
@@ -1586,8 +1587,8 @@ class MasterDnsVPNServer(PacketQueueMixin):
         data: bytes,
         labels: str,
         request_domain: str,
-        extracted_header: dict | None = None,
-    ) -> bytes | None:
+        extracted_header: Optional[dict] = None,
+    ) -> Optional[bytes]:
         if packet_type == Packet_Type.SESSION_INIT:
             return await self._handle_session_init(
                 request_domain=request_domain,
@@ -1619,7 +1620,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
         stream_id: int,
         sn: int,
         labels: str,
-        extracted_header: dict | None,
+        extracted_header: Optional[dict],
         now_mono: float,
     ) -> None:
         """Process a session packet without blocking response generation."""
@@ -1817,7 +1818,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
         session_id: int,
         request_domain: str,
         question_packet: bytes,
-        closed_info: dict | None,
+        closed_info: Optional[dict],
     ) -> bytes:
         try:
             is_base = (
@@ -1847,11 +1848,11 @@ class MasterDnsVPNServer(PacketQueueMixin):
         session_id: int,
         data: bytes = b"",
         labels: str = "",
-        parsed_packet: dict | None = None,
+        parsed_packet: Optional[dict] = None,
         addr=None,
         request_domain: str = "",
-        extracted_header: dict | None = None,
-    ) -> bytes | None:
+        extracted_header: Optional[dict] = None,
+    ) -> Optional[bytes]:
         # First handle packets that don't require an active session (e.g. session init, MTU negotiation).
         if packet_type in self._pre_session_packet_types:
             pre_session_response = await self._handle_pre_session_packet(
@@ -2358,7 +2359,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
         parsed_packet=None,
         session_id=None,
         extracted_header=None,
-    ) -> bytes | None:
+    ) -> Optional[bytes]:
         """Handle SET_MTU_REQ VPN packet and save it to the session."""
         try:
             session = self.sessions.get(session_id)
@@ -2423,7 +2424,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
         parsed_packet=None,
         session_id=None,
         extracted_header=None,
-    ) -> bytes | None:
+    ) -> Optional[bytes]:
         """Handle MTU_DOWN_REQ (download MTU test) VPN packet."""
         try:
             download_size_bytes = self._extract_packet_payload(labels, extracted_header)
@@ -2472,7 +2473,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
         parsed_packet=None,
         session_id=None,
         extracted_header=None,
-    ) -> bytes | None:
+    ) -> Optional[bytes]:
         """Handle SERVER_UPLOAD_TEST VPN packet."""
         try:
             raw_label = labels.split(".")[0] if "." in labels else labels
@@ -3148,7 +3149,7 @@ def main():
             pass
         else:
             try:
-                import uvloop  # pylint: disable=import-outside-toplevel
+                import uvloop
 
                 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
             except ImportError:
@@ -3193,7 +3194,7 @@ def main():
 
         if sys.platform == "win32":
             try:
-                from ctypes import wintypes  # pylint: disable=import-outside-toplevel
+                from ctypes import wintypes
 
                 HandlerRoutine = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
 
