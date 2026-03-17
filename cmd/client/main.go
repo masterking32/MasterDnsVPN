@@ -10,20 +10,19 @@ package main
 import (
 	"fmt"
 	"os"
-	"strings"
 
-	"masterdnsvpn-go/internal/config"
-	"masterdnsvpn-go/internal/logger"
+	"masterdnsvpn-go/internal/client"
 )
 
 func main() {
-	cfg, err := config.LoadClientConfig("client_config.toml")
+	app, err := client.Bootstrap("client_config.toml")
 	if err != nil {
 		_, _ = os.Stderr.WriteString(fmt.Sprintf("Client startup failed: %v\n", err))
 		os.Exit(1)
 	}
 
-	log := logger.New("MasterDnsVPN Go Client", cfg.LogLevel)
+	cfg := app.Config()
+	log := app.Logger()
 	log.Infof("[*] <green>Client Configuration Loaded</green>")
 	log.Infof(
 		"[*] <green>Protocol Type</green>: <cyan>%s</cyan>  |  <green>Encryption Method</green>: <cyan>%d</cyan>",
@@ -31,12 +30,16 @@ func main() {
 		cfg.DataEncryptionMethod,
 	)
 	log.Infof(
-		"[*] <green>Configured Domains</green>: <cyan>%s</cyan>",
-		strings.Join(cfg.Domains, ", "),
+		"[*] <green>Configured Domains</green>: <magenta>%d</magenta>",
+		len(cfg.Domains),
 	)
 	log.Infof(
 		"[*] <green>Loaded Resolvers</green>: <magenta>%d</magenta> unique IPs",
 		len(cfg.Resolvers),
+	)
+	log.Infof(
+		"[*] <green>Connection Catalog</green>: <magenta>%d</magenta> domain-resolver pairs",
+		len(app.Connections()),
 	)
 	log.Infof("[*] <green>Client Bootstrap Ready</green>")
 }
