@@ -179,7 +179,7 @@ class DnsPacketParser:
         )
         self.encryption_method = encryption_method
         if self.encryption_method not in (0, 1, 2, 3, 4, 5):
-            self.logger.error(
+            self.logger.debug(
                 f"Invalid encryption_method value: {self.encryption_method}. Defaulting to 1 (XOR encryption)."
             )
             self.encryption_method = 1
@@ -199,7 +199,7 @@ class DnsPacketParser:
                 self._aesgcm = AESGCM(self.key)
             except ImportError:
                 if self.logger:
-                    self.logger.error("AES-GCM missing.")
+                    self.logger.debug("AES-GCM missing.")
 
         elif self.encryption_method == 2:
             try:
@@ -360,11 +360,11 @@ class DnsPacketParser:
                 offset = end_rd
 
             return records, offset
-        except (IndexError, struct.error):
+        except (IndexError, struct.debug):
             self.logger.debug(f"Failed to parse DNS {section_name}: Truncated packet.")
             return None, offset
         except Exception as e:
-            self.logger.error(f"Failed to parse DNS {section_name}: {e}")
+            self.logger.debug(f"Failed to parse DNS {section_name}: {e}")
             return None, offset
 
     def _parse_dns_name_from_bytes(self, data: bytes, offset: int) -> tuple[str, int]:
@@ -465,7 +465,7 @@ class DnsPacketParser:
 
             return header + request_data[12:]
         except Exception as e:
-            self.logger.error(f"Failed to create Server Failure response: {e}")
+            self.logger.debug(f"Failed to create Server Failure response: {e}")
             return b""
 
     def _basic_response_with_rcode(self, request_data: bytes, rcode: int) -> bytes:
@@ -567,7 +567,7 @@ class DnsPacketParser:
 
             return b"".join(parts)
         except Exception as e:
-            self.logger.error(f"Failed to create answer packet: {e}")
+            self.logger.debug(f"Failed to create answer packet: {e}")
             return b""
 
     def simple_question_packet(self, domain: str, qType: int) -> bytes:
@@ -592,7 +592,7 @@ class DnsPacketParser:
             )
 
         except Exception as e:
-            self.logger.error(f"Failed to create simple question packet: {e}")
+            self.logger.debug(f"Failed to create simple question packet: {e}")
             return b""
 
     def create_packet(
@@ -690,7 +690,7 @@ class DnsPacketParser:
             label_len = len(p)
             if label_len:
                 if label_len > 63:
-                    self.logger.error("Label too long")
+                    self.logger.debug("Label too long")
                     return b"\x00"
                 _append(label_len)
                 _extend(p)
@@ -788,7 +788,7 @@ class DnsPacketParser:
             return nonce + self._aesgcm.encrypt(nonce, data, None)
         except Exception as e:
             if self.logger:
-                self.logger.error(f"AES Encrypt failed: {e}")
+                self.logger.debug(f"AES Encrypt failed: {e}")
             return b""
 
     def _aes_decrypt(
@@ -939,7 +939,7 @@ class DnsPacketParser:
         )
 
         if calculated_total_fragments > 255:
-            self.logger.error("Data too large, exceeds maximum 255 fragments.")
+            self.logger.debug("Data too large, exceeds maximum 255 fragments.")
             return []
 
         # Localize hot-path functions
@@ -1214,7 +1214,7 @@ class DnsPacketParser:
         )
 
         if total_chunks > 255:
-            self.logger.error("Data too large, exceeds maximum 255 fragments.")
+            self.logger.debug("Data too large, exceeds maximum 255 fragments.")
             return simple_ans(answers, question_packet)
 
         # Append Chunk 0
@@ -1317,7 +1317,7 @@ class DnsPacketParser:
         available_chars_space = MAX_DNS_TOTAL - total_overhead
 
         if available_chars_space <= 0:
-            self.logger.error(f"Domain {domain} is too long, no space for data.")
+            self.logger.debug(f"Domain {domain} is too long, no space for data.")
             return 0, 0
 
         max_payload_chars = (available_chars_space * MAX_LABEL_LEN) // (
@@ -1466,7 +1466,7 @@ class DnsPacketParser:
 
             return decoded_data
         except Exception as e:
-            self.logger.error(
+            self.logger.debug(
                 f"<red>Failed to extract VPN data: {e}, labels: {labels}</red>"
             )
             return b""

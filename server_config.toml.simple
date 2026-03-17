@@ -44,7 +44,21 @@ SOCKS5_USER = "admin"
 SOCKS5_PASS = "123456"
 
 # Max handshake activation timeout (seconds) for SOCKS streams.
-SOCKS_HANDSHAKE_TIMEOUT = 120.0
+# For high-loss / slow-resolver networks, a slightly higher timeout avoids
+# false aborts while streams are still making progress.
+SOCKS_HANDSHAKE_TIMEOUT = 180.0
+
+# Max concurrent outbound SOCKS connect/handshake operations.
+# This only limits streams in CONNECTING / SOCKS_CONNECTING phase.
+# Already-connected keepalive/data streams are not throttled by this value.
+# A moderate default is safer on bursty / lossy links.
+MAX_CONCURRENT_SOCKS_CONNECTS = 16
+
+# If a non-pre-session packet arrives with an invalid session cookie, the server
+# does not force reconnect immediately. It only emits ERROR_DROP after this many
+# invalid-cookie hits for the same session inside the sliding window below.
+INVALID_COOKIE_ERROR_THRESHOLD = 10
+INVALID_COOKIE_WINDOW_SECONDS = 2.0
 
 # ------------------------------------------------------------------------------
 # 3) Encryption
@@ -65,14 +79,14 @@ SUPPORTED_DOWNLOAD_COMPRESSION_TYPES = [0, 1, 2, 3]
 # ------------------------------------------------------------------------------
 
 # Data-plane ARQ profile.
-ARQ_WINDOW_SIZE = 256
+ARQ_WINDOW_SIZE = 1000
 ARQ_INITIAL_RTO = 0.5
-ARQ_MAX_RTO = 1.5
+ARQ_MAX_RTO = 3.0
 
 # Control-plane ARQ profile.
 ARQ_CONTROL_INITIAL_RTO = 0.5
-ARQ_CONTROL_MAX_RTO = 1.5
-ARQ_CONTROL_MAX_RETRIES = 180
+ARQ_CONTROL_MAX_RTO = 3.0
+ARQ_CONTROL_MAX_RETRIES = 80
 
 # ------------------------------------------------------------------------------
 # 5) Session Lifecycle
@@ -91,11 +105,16 @@ MAX_SESSIONS = 255
 # 6) Runtime Throughput / Resource Limits
 # ------------------------------------------------------------------------------
 
-# Max concurrent DNS request handlers.
+# Max queued DNS requests waiting for request workers.
 MAX_CONCURRENT_REQUESTS = 500
+
+# Fixed number of DNS request workers.
+# This avoids creating a new asyncio task for every incoming packet.
+DNS_REQUEST_WORKERS = 4
 
 # CPU thread-pool size for parser/codec offload.
 # 0 = auto (recommended). Set a positive number to force size. Set -1 to disable.
+# For a 2-core system, 2 is a safer default than an aggressive auto profile.
 CPU_WORKER_THREADS = 0
 
 # Max packed control blocks per response cycle (user upper bound).
@@ -112,4 +131,4 @@ LOG_LEVEL = "INFO"
 # ------------------------------------------------------------------------------
 # 7) Version Marker
 # ------------------------------------------------------------------------------
-CONFIG_VERSION = 3.0
+CONFIG_VERSION = 5.0

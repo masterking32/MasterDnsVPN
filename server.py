@@ -19,6 +19,7 @@ import time
 from bisect import bisect_left, bisect_right, insort
 from collections import deque
 
+from build_version import get_build_version
 from dns_utils.ARQ import ARQ
 from dns_utils.compression import (
     Compression_Type,
@@ -65,6 +66,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
 
     def __init__(self) -> None:
         """Initialize the MasterDnsVPNServer with configuration and logger."""
+        self.build_version = get_build_version()
         # ---------------------------------------------------------
         # Runtime primitives
         # ---------------------------------------------------------
@@ -158,8 +160,26 @@ class MasterDnsVPNServer(PacketQueueMixin):
         self.socks_handshake_timeout = float(
             self.config.get("SOCKS_HANDSHAKE_TIMEOUT", 120.0)
         )
-        self.max_concurrent_requests = asyncio.Semaphore(
-            int(self.config.get("MAX_CONCURRENT_REQUESTS", 1000))
+        self.max_concurrent_socks_connects = max(
+            1, int(self.config.get("MAX_CONCURRENT_SOCKS_CONNECTS", 64))
+        )
+        self.max_concurrent_requests = max(
+            1, int(self.config.get("MAX_CONCURRENT_REQUESTS", 1000))
+        )
+        self.dns_request_worker_count = max(
+            1,
+            min(
+                self.max_concurrent_requests,
+                int(
+                    self.config.get(
+                        "DNS_REQUEST_WORKERS",
+                        max(2, min(32, (os.cpu_count() or 1) * 2)),
+                    )
+                ),
+            ),
+        )
+        self.socks_connect_semaphore = asyncio.Semaphore(
+            self.max_concurrent_socks_connects
         )
 
         self.supported_upload_compression_types = (
@@ -180,17 +200,26 @@ class MasterDnsVPNServer(PacketQueueMixin):
         self._max_sessions = max(1, min(255, int(self.config.get("MAX_SESSIONS", 255))))
         self.free_session_ids = deque(range(1, self._max_sessions + 1))
         self.recently_closed_sessions = {}
+        self.invalid_cookie_window_seconds = max(
+            1.0, float(self.config.get("INVALID_COOKIE_WINDOW_SECONDS", 2.0))
+        )
+        self.invalid_cookie_error_threshold = max(
+            1, int(self.config.get("INVALID_COOKIE_ERROR_THRESHOLD", 10))
+        )
+        self.invalid_cookie_tracker = {}
 
         self._dns_task = None
+        self._dns_request_queue = None
+        self._dns_worker_tasks = []
         self._session_cleanup_task = None
         self._background_tasks = set()
         self.cpu_executor: concurrent.futures.ThreadPoolExecutor | None = None
-        auto_cpu_workers = max(2, min(16, (os.cpu_count() or 1)))
+        detected_cpu_workers = max(1, int(os.cpu_count() or 1))
         raw_cpu_workers = int(self.config.get("CPU_WORKER_THREADS", 0))
         if raw_cpu_workers < 0:
             self.cpu_worker_threads = 0
         elif raw_cpu_workers == 0:
-            self.cpu_worker_threads = auto_cpu_workers
+            self.cpu_worker_threads = detected_cpu_workers
         else:
             self.cpu_worker_threads = raw_cpu_workers
 
@@ -515,6 +544,13 @@ class MasterDnsVPNServer(PacketQueueMixin):
             pass
 
         self.sessions.pop(session_id, None)
+        for tracker_key in tuple(self.invalid_cookie_tracker):
+            if (
+                isinstance(tracker_key, tuple)
+                and tracker_key
+                and int(tracker_key[0]) == int(session_id)
+            ):
+                self.invalid_cookie_tracker.pop(tracker_key, None)
 
         try:
             if 1 <= session_id <= getattr(self, "_max_sessions", 255):
@@ -549,6 +585,35 @@ class MasterDnsVPNServer(PacketQueueMixin):
             return int(closed_info.get("session_cookie", 0) or 0)
 
         return None
+
+    def _should_emit_invalid_cookie_error(
+        self,
+        packet_type: int,
+        session_id: int,
+        expected_cookie: int | None,
+        packet_cookie: int,
+        now: float | None = None,
+    ) -> bool:
+        if int(packet_type) in self._pre_session_packet_types:
+            return False
+
+        now = time.monotonic() if now is None else now
+        cutoff = now - self.invalid_cookie_window_seconds
+        tracker_key = (
+            int(session_id),
+            -1 if expected_cookie is None else int(expected_cookie),
+            int(packet_cookie),
+        )
+        attempts = self.invalid_cookie_tracker.get(tracker_key)
+        if attempts is None:
+            attempts = deque()
+            self.invalid_cookie_tracker[tracker_key] = attempts
+
+        while attempts and attempts[0] < cutoff:
+            attempts.popleft()
+
+        attempts.append(now)
+        return len(attempts) >= self.invalid_cookie_error_threshold
 
     def _activate_response_queue(self, session: dict, stream_id: int) -> None:
         sid = int(stream_id)
@@ -762,6 +827,17 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 ]
                 for sid in expired_closed:
                     self.recently_closed_sessions.pop(sid, None)
+
+                cutoff = now - self.invalid_cookie_window_seconds
+                expired_invalid_cookie = []
+                for tracker_key, attempts in tuple(self.invalid_cookie_tracker.items()):
+                    while attempts and attempts[0] < cutoff:
+                        attempts.popleft()
+                    if not attempts:
+                        expired_invalid_cookie.append(tracker_key)
+
+                for tracker_key in expired_invalid_cookie:
+                    self.invalid_cookie_tracker.pop(tracker_key, None)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -1642,7 +1718,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
 
     def _get_active_response_queue(
         self, session: dict, streams: dict, stream_id: int
-    ) -> tuple[Optional[list], Optional[dict]]:
+    ) -> tuple[list | None, dict | None]:
         """
         Resolve one active response queue by stream_id.
         stream_id 0 is the session main queue.
@@ -1963,6 +2039,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
         forward_port = self.forward_port
         socks5_auth = self.socks5_auth
         logger = self.logger
+        acquired_connect_slot = False
 
         try:
             if not target_payload or len(target_payload) < 3:
@@ -2069,10 +2146,30 @@ class MasterDnsVPNServer(PacketQueueMixin):
                     )
                     return await asyncio.open_connection(target_ip, target_port)
 
+            while not self.should_stop.is_set():
+                if stream_data.get("status") in ("CLOSING", "TIME_WAIT"):
+                    return
+                try:
+                    await asyncio.wait_for(
+                        self.socks_connect_semaphore.acquire(), timeout=1.0
+                    )
+                    acquired_connect_slot = True
+                    stream_data["last_activity"] = time.monotonic()
+                    break
+                except asyncio.TimeoutError:
+                    stream_data["last_activity"] = time.monotonic()
+
+            if not acquired_connect_slot:
+                return
+
             try:
-                reader, writer = await asyncio.wait_for(
-                    _connect_and_handshake(), timeout=45.0
-                )
+                try:
+                    reader, writer = await asyncio.wait_for(
+                        _connect_and_handshake(), timeout=45.0
+                    )
+                finally:
+                    self.socks_connect_semaphore.release()
+                    acquired_connect_slot = False
             except asyncio.TimeoutError as timeout_exc:
                 raise timeout_exc
 
@@ -2152,6 +2249,9 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 reason=f"SOCKS target unreachable: {e}",
                 abortive=True,
             )
+        finally:
+            if acquired_connect_slot:
+                self.socks_connect_semaphore.release()
 
     async def _send_parser_response(self, builder, data, addr=None):
         if addr is None:
@@ -2262,6 +2362,29 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 self.logger.debug(
                     f"Invalid session cookie for packet type '{packet_type}' session '{session_id}' from {addr}. Dropping."
                 )
+                if self._should_emit_invalid_cookie_error(
+                    packet_type,
+                    session_id,
+                    expected_cookie,
+                    packet_cookie,
+                ):
+                    response_info = self.recently_closed_sessions.get(session_id)
+                    current_session = self.sessions.get(session_id)
+                    if current_session is not None:
+                        response_info = {
+                            "base_encode": bool(
+                                current_session.get("base_encode_responses", False)
+                            )
+                        }
+
+                    vpn_response = self._build_invalid_session_error_response(
+                        session_id=session_id,
+                        request_domain=request_domain,
+                        question_packet=data,
+                        closed_info=response_info,
+                    )
+                    if vpn_response:
+                        await self.send_udp_response(vpn_response, addr)
                 return
 
             if packet_type in self._valid_packet_types:
@@ -2308,32 +2431,50 @@ class MasterDnsVPNServer(PacketQueueMixin):
             )
         return await loop.run_in_executor(self.cpu_executor, func, *args)
 
+    async def _dns_request_worker(self) -> None:
+        """Consume DNS requests from the bounded queue without per-packet task churn."""
+        queue = self._dns_request_queue
+        assert queue is not None, "DNS request queue is not initialized."
+
+        while not self.should_stop.is_set():
+            item = None
+            try:
+                item = await queue.get()
+                if item is None:
+                    break
+
+                data, addr = item
+                await self.handle_single_request(data, addr)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.logger.debug(f"DNS request worker error: {e}")
+            finally:
+                if item is not None and queue is not None:
+                    try:
+                        queue.task_done()
+                    except ValueError:
+                        pass
+
     async def handle_dns_requests(self) -> None:
-        """Asynchronously handle incoming DNS requests and spawn a new task for each."""
+        """Receive DNS datagrams and enqueue them for a fixed worker pool."""
         assert self.udp_sock is not None, "UDP socket is not initialized."
         assert self.loop is not None, "Event loop is not initialized."
+        assert self._dns_request_queue is not None, (
+            "DNS request queue is not initialized."
+        )
         self.udp_sock.setblocking(False)
 
         loop = self.loop
         sock = self.udp_sock
-        bg_tasks = self._background_tasks
-        handle_req = self.handle_single_request
-        semaphore = self.max_concurrent_requests
+        request_queue = self._dns_request_queue
 
         while not self.should_stop.is_set():
             try:
                 data, addr = await async_recvfrom(loop, sock, 65536)
                 if len(data) < 12:
                     continue
-
-                await semaphore.acquire()
-
-                task = loop.create_task(handle_req(data, addr))
-                bg_tasks.add(task)
-
-                task.add_done_callback(
-                    lambda t: (bg_tasks.discard(t), semaphore.release())
-                )
+                await request_queue.put((data, addr))
 
             except asyncio.CancelledError:
                 break
@@ -2994,6 +3135,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
         """Initialize sockets, start background tasks, and wait for shutdown signal."""
         try:
             self.logger.info("<magenta>MasterDnsVPN Server starting ...</magenta>")
+
             self.loop = asyncio.get_running_loop()
 
             host = self.config.get("UDP_HOST", "0.0.0.0")
@@ -3024,7 +3166,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 f"<green>UDP socket bound on <blue>{host}:{port}</blue></green>"
             )
             self.logger.info(
-                f"<green>Runtime CPU cores detected: <cyan>{os.cpu_count() or 1}</cyan> | MAX_CONCURRENT_REQUESTS: <cyan>{int(self.config.get('MAX_CONCURRENT_REQUESTS', 1000))}</cyan></green>"
+                f"<green>Runtime CPU cores detected: <cyan>{os.cpu_count() or 1}</cyan> | DNS request workers: <cyan>{self.dns_request_worker_count}</cyan> | DNS queue: <cyan>{self.max_concurrent_requests}</cyan></green>"
             )
             if self.cpu_worker_threads > 0:
                 self.cpu_executor = concurrent.futures.ThreadPoolExecutor(
@@ -3036,6 +3178,9 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 )
             else:
                 self.logger.info("<yellow>CPU worker threads disabled.</yellow>")
+            self.logger.info(
+                f"<cyan>Build Version:</cyan> <yellow>{self.build_version}</yellow>"
+            )
 
             if sys.platform == "win32":
                 try:
@@ -3053,7 +3198,14 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 except Exception as e:
                     self.logger.debug(f"Failed to set SIO_UDP_CONNRESET: {e}")
 
+            self._dns_request_queue = asyncio.Queue(
+                maxsize=self.max_concurrent_requests
+            )
             self._dns_task = self.loop.create_task(self.handle_dns_requests())
+            self._dns_worker_tasks = [
+                self.loop.create_task(self._dns_request_worker())
+                for _ in range(self.dns_request_worker_count)
+            ]
             self._session_cleanup_task = self.loop.create_task(
                 self._session_cleanup_loop()
             )
@@ -3093,6 +3245,19 @@ class MasterDnsVPNServer(PacketQueueMixin):
             task = getattr(self, task_name, None)
             if task and not task.done():
                 task.cancel()
+
+        for task in getattr(self, "_dns_worker_tasks", []):
+            if task and not task.done():
+                task.cancel()
+
+        dns_worker_tasks = list(getattr(self, "_dns_worker_tasks", []))
+        if dns_worker_tasks:
+            try:
+                await asyncio.gather(*dns_worker_tasks, return_exceptions=True)
+            except Exception:
+                pass
+        self._dns_worker_tasks = []
+        self._dns_request_queue = None
 
         session_ids = list(self.sessions.keys())
         close_tasks = [self._close_session(sid) for sid in session_ids]

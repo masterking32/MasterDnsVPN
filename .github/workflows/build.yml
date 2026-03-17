@@ -74,6 +74,31 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Generate build version module (Windows)
+        if: ${{ matrix.os == 'windows-latest' }}
+        shell: powershell
+        run: |
+          $buildVersion = "${{ needs.preflight.outputs.release_tag }}"
+          @"
+          BUILD_VERSION = "$buildVersion"
+
+
+          def get_build_version() -> str:
+              return str(BUILD_VERSION or "dev").strip() or "dev"
+          "@ | Set-Content -Path build_version.py -Encoding UTF8
+
+      - name: Generate build version module (non-Windows)
+        if: ${{ matrix.os != 'windows-latest' }}
+        shell: bash
+        run: |
+          cat > build_version.py <<'PY'
+          BUILD_VERSION = "${{ needs.preflight.outputs.release_tag }}"
+
+
+          def get_build_version() -> str:
+              return str(BUILD_VERSION or "dev").strip() or "dev"
+          PY
+
       - name: Set up Python (Host, with pip cache)
         if: ${{ matrix.platform != 'Linux-Legacy' }}
         uses: actions/setup-python@v5

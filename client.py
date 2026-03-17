@@ -18,6 +18,7 @@ import time
 from bisect import bisect_left, bisect_right, insort
 from collections import defaultdict, deque
 
+from build_version import get_build_version
 from dns_utils.ARQ import ARQ
 from dns_utils.compression import (
     Compression_Type,
@@ -60,6 +61,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
             pass
 
     def __init__(self) -> None:
+        self.build_version = get_build_version()
         # ---------------------------------------------------------
         # Runtime and lifecycle primitives
         # ---------------------------------------------------------
@@ -85,12 +87,12 @@ class MasterDnsVPNClient(PacketQueueMixin):
             sys.exit(1)
 
         self.logger = getLogger(log_level=self.config.get("LOG_LEVEL", "INFO"))
-        auto_cpu_workers = max(2, min(16, (os.cpu_count() or 1)))
+        detected_cpu_workers = max(1, int(os.cpu_count() or 1))
         raw_cpu_workers = int(self.config.get("CPU_WORKER_THREADS", 0))
         if raw_cpu_workers < 0:
             self.cpu_worker_threads = 0
         elif raw_cpu_workers == 0:
-            self.cpu_worker_threads = auto_cpu_workers
+            self.cpu_worker_threads = detected_cpu_workers
         else:
             self.cpu_worker_threads = raw_cpu_workers
 
@@ -117,7 +119,9 @@ class MasterDnsVPNClient(PacketQueueMixin):
         # ---------------------------------------------------------
         self.resolvers: list = self._load_resolvers_from_file()
         self.allowed_resolver_sources = {
-            str(r).strip().lower() for r in self.resolvers if str(r).strip()
+            str(r[0]).strip().lower()
+            for r in self.resolvers
+            if isinstance(r, tuple) and r and str(r[0]).strip()
         }
         self.domains: list = self.config.get("DOMAINS", [])
         self.domains_lower: tuple = tuple(
@@ -195,6 +199,14 @@ class MasterDnsVPNClient(PacketQueueMixin):
             self.config.get("MAX_PACKETS_PER_BATCH", 100)
         )
         self.packet_duplication_count = self.config.get("PACKET_DUPLICATION_COUNT", 1)
+        self.stream_resolver_failover_resend_threshold: int = max(
+            1,
+            int(self.config.get("STREAM_RESOLVER_FAILOVER_RESEND_THRESHOLD", 2)),
+        )
+        self.stream_resolver_failover_cooldown: float = max(
+            0.1,
+            float(self.config.get("STREAM_RESOLVER_FAILOVER_COOLDOWN", 1.0)),
+        )
         self.upload_compression_type: int = normalize_compression_type(
             self.config.get("UPLOAD_COMPRESSION_TYPE", Compression_Type.OFF)
         )
@@ -246,6 +258,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
         self.success_mtu_checks: bool = False
         self.max_packed_blocks: int = 1
         self.connections_map: list = []
+        self.connections_by_key: dict[str, dict] = {}
         self.session_id = 0
         self.session_cookie = 0
         self.synced_upload_mtu = 0
@@ -258,11 +271,11 @@ class MasterDnsVPNClient(PacketQueueMixin):
         self.enqueue_seq = 0
         self.count_ping = 0
 
-        self.server_rtt_tracker = {}
         self.server_health = defaultdict(
             lambda: {
                 "pending": deque(),
                 "events": deque(),
+                "next_seq": 0,
             }
         )
         self.runtime_disabled_servers = {}
@@ -360,7 +373,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
         self.logger.debug("<magenta>[INIT]</magenta> MasterDnsVPNClient initialized.")
 
     def _load_resolvers_from_file(self) -> list:
-        """Load resolver IP addresses from client_resolvers.txt."""
+        """Load resolver IP addresses or CIDR ranges from client_resolvers.txt."""
         resolver_file = get_config_path("client_resolvers.txt")
         if not os.path.isfile(resolver_file):
             self.logger.error(
@@ -372,6 +385,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
 
         resolvers = []
         seen = set()
+        max_cidr_hosts = 65536
         try:
             with open(resolver_file, "r", encoding="utf-8") as f:
                 for raw_line in f:
@@ -379,13 +393,48 @@ class MasterDnsVPNClient(PacketQueueMixin):
                     if not line or line.startswith("#"):
                         continue
                     try:
-                        normalized_ip = str(ipaddress.ip_address(line))
+                        parsed_target, resolver_port = self._parse_resolver_entry(line)
+                        if isinstance(
+                            parsed_target,
+                            (ipaddress.IPv4Network, ipaddress.IPv6Network),
+                        ):
+                            network = parsed_target
+                            usable_hosts = network.num_addresses
+                            if network.version == 4 and network.prefixlen < 31:
+                                usable_hosts = max(0, usable_hosts - 2)
+                            elif network.version == 6 and network.prefixlen < 127:
+                                usable_hosts = max(0, usable_hosts - 1)
+
+                            if usable_hosts > max_cidr_hosts:
+                                self.logger.warning(
+                                    f"Resolver subnet '<yellow>{line}</yellow>' expands to <cyan>{usable_hosts}</cyan> hosts; maximum supported is <cyan>{max_cidr_hosts}</cyan>. Ignored."
+                                )
+                                continue
+
+                            expanded_count = 0
+                            for host_ip in network.hosts():
+                                resolver_entry = (str(host_ip), int(resolver_port))
+                                if resolver_entry in seen:
+                                    continue
+                                seen.add(resolver_entry)
+                                resolvers.append(resolver_entry)
+                                expanded_count += 1
+
+                            self.logger.debug(
+                                f"Expanded resolver subnet '<cyan>{line}</cyan>' to <cyan>{expanded_count}</cyan> IPs on port <cyan>{resolver_port}</cyan>."
+                            )
+                            continue
+
+                        resolver_entry = (str(parsed_target), int(resolver_port))
                     except ValueError:
+                        self.logger.warning(
+                            f"Invalid resolver IP/subnet '<yellow>{line}</yellow>' ignored."
+                        )
                         continue
-                    if normalized_ip in seen:
+                    if resolver_entry in seen:
                         continue
-                    seen.add(normalized_ip)
-                    resolvers.append(normalized_ip)
+                    seen.add(resolver_entry)
+                    resolvers.append(resolver_entry)
         except Exception as exc:
             self.logger.error(
                 f"Failed to read resolver file '<cyan>client_resolvers.txt</cyan>': {exc}"
@@ -395,13 +444,103 @@ class MasterDnsVPNClient(PacketQueueMixin):
 
         if not resolvers:
             self.logger.error(
-                "No valid resolver IP found in '<cyan>client_resolvers.txt</cyan>'."
+                "No valid resolver IP/subnet found in '<cyan>client_resolvers.txt</cyan>'."
             )
-            self.logger.error("Add at least one valid IPv4/IPv6 per line and restart.")
+            self.logger.error(
+                "Add at least one valid IP or CIDR range per line and restart."
+            )
             self._prompt_before_exit()
             sys.exit(1)
 
         return resolvers
+
+    def _parse_resolver_entry(
+        self, line: str
+    ) -> tuple[
+        ipaddress.IPv4Address
+        | ipaddress.IPv6Address
+        | ipaddress.IPv4Network
+        | ipaddress.IPv6Network,
+        int,
+    ]:
+        text = str(line or "").strip()
+        if not text:
+            raise ValueError("empty resolver entry")
+
+        try:
+            if "/" in text:
+                return ipaddress.ip_network(text, strict=False), 53
+            return ipaddress.ip_address(text), 53
+        except ValueError:
+            pass
+
+        host_part = ""
+        port_part = ""
+        if text.startswith("["):
+            end = text.find("]")
+            if end == -1:
+                raise ValueError("invalid bracketed resolver")
+            host_part = text[1:end].strip()
+            remainder = text[end + 1 :].strip()
+            if remainder.startswith(":"):
+                port_part = remainder[1:].strip()
+        else:
+            host_part, sep, port_part = text.rpartition(":")
+            if not sep:
+                raise ValueError("invalid resolver entry")
+            host_part = host_part.strip()
+            port_part = port_part.strip()
+
+        if not host_part or not port_part or not port_part.isdigit():
+            raise ValueError("invalid resolver port")
+
+        port = int(port_part)
+        if port < 1 or port > 65535:
+            raise ValueError("resolver port out of range")
+
+        if "/" in host_part:
+            return ipaddress.ip_network(host_part, strict=False), port
+        return ipaddress.ip_address(host_part), port
+
+    def _format_resolver_endpoint(self, resolver: str, port: int) -> str:
+        if ":" in str(resolver) and not str(resolver).startswith("["):
+            return f"[{resolver}]:{int(port)}"
+        return f"{resolver}:{int(port)}"
+
+    def _get_connection_resolver_port(self, connection: dict) -> int:
+        return int(connection.get("resolver_port", 53) or 53)
+
+    def _get_connection_resolver_addr(self, connection: dict) -> tuple[str, int]:
+        cached = connection.get("_resolver_addr")
+        if (
+            isinstance(cached, tuple)
+            and len(cached) == 2
+            and str(cached[0]).strip()
+            and int(cached[1]) > 0
+        ):
+            return str(cached[0]), int(cached[1])
+
+        resolver = str(connection.get("resolver", "")).strip()
+        resolver_port = self._get_connection_resolver_port(connection)
+        resolver_addr = (resolver, resolver_port)
+        connection["_resolver_addr"] = resolver_addr
+        return resolver_addr
+
+    def _get_connection_resolver_label(self, connection: dict) -> str:
+        cached = str(connection.get("_resolver_label", "") or "").strip()
+        if cached:
+            return cached
+
+        resolver, resolver_port = self._get_connection_resolver_addr(connection)
+        resolver_label = self._format_resolver_endpoint(resolver, resolver_port)
+        connection["_resolver_label"] = resolver_label
+        return resolver_label
+
+    def _make_server_key(self, resolver: str, resolver_port: int, domain: str) -> str:
+        return (
+            f"{self._format_resolver_endpoint(resolver, resolver_port)}:"
+            f"{str(domain or '').strip().lower()}"
+        )
 
     def _apply_scale_profile(self, total_pairs: int) -> None:
         """Apply runtime tuning profile based on resolver-domain pair count."""
@@ -456,19 +595,162 @@ class MasterDnsVPNClient(PacketQueueMixin):
         unique_resolvers = list(unique_resolvers)
 
         self.connections_map = []
+        self.connections_by_key = {}
         for domain in unique_domains:
             for resolver in unique_resolvers:
-                conn = {"domain": domain, "resolver": resolver}
+                resolver_host, resolver_port = resolver
+                resolver_port = int(resolver_port)
+                resolver_label = self._format_resolver_endpoint(
+                    resolver_host, resolver_port
+                )
+                conn = {
+                    "domain": domain,
+                    "resolver": resolver_host,
+                    "resolver_port": resolver_port,
+                    "_resolver_addr": (resolver_host, resolver_port),
+                    "_resolver_label": resolver_label,
+                }
                 conn["_key"] = self._get_connection_key(conn)
                 self._init_recheck_meta(conn)
                 self.connections_map.append(conn)
+                self.connections_by_key[conn["_key"]] = conn
 
     def _get_connection_key(self, connection: dict) -> str:
-        resolver = str(connection.get("resolver", "")).strip()
+        resolver, resolver_port = self._get_connection_resolver_addr(connection)
         domain = str(connection.get("domain", "")).strip().lower()
-        key = f"{resolver}:{domain}"
+        key = self._make_server_key(resolver, resolver_port, domain)
         connection["_key"] = key
         return key
+
+    def _get_connection_by_key(self, server_key: str) -> dict | None:
+        conn = self.connections_by_key.get(str(server_key or "").strip())
+        return conn if conn else None
+
+    def _get_valid_stream_preferred_connection(self, stream_data: dict) -> dict | None:
+        preferred_key = str(stream_data.get("preferred_server_key", "") or "").strip()
+        if not preferred_key:
+            return None
+        conn = self._get_connection_by_key(preferred_key)
+        if conn and conn.get("is_valid"):
+            return conn
+        return None
+
+    def _select_alternate_stream_connection(self, exclude_key: str = "") -> dict | None:
+        blocked_key = str(exclude_key or "").strip()
+        for conn in self.balancer.valid_servers:
+            if not conn or not conn.get("is_valid"):
+                continue
+            if blocked_key and conn.get("_key") == blocked_key:
+                continue
+            return conn
+        return None
+
+    def _set_stream_preferred_connection(
+        self, stream_data: dict, connection: dict | None
+    ) -> dict | None:
+        if not stream_data:
+            return None
+        if not connection:
+            stream_data["preferred_server_key"] = ""
+            return None
+        stream_data["preferred_server_key"] = str(connection.get("_key", "") or "")
+        stream_data["resolver_resend_streak"] = 0
+        stream_data["last_resolver_failover_at"] = time.monotonic()
+        return connection
+
+    def _ensure_stream_preferred_connection(self, stream_data: dict) -> dict | None:
+        preferred = self._get_valid_stream_preferred_connection(stream_data)
+        if preferred:
+            return preferred
+        fallback = self.balancer.get_best_server()
+        if fallback:
+            return self._set_stream_preferred_connection(stream_data, fallback)
+        return None
+
+    def _maybe_failover_stream_preferred_connection(
+        self, stream_data: dict
+    ) -> dict | None:
+        current = self._get_valid_stream_preferred_connection(stream_data)
+        if current is None:
+            return self._ensure_stream_preferred_connection(stream_data)
+
+        now = time.monotonic()
+        last_switch = float(stream_data.get("last_resolver_failover_at", 0.0) or 0.0)
+        if (now - last_switch) < self.stream_resolver_failover_cooldown:
+            return current
+
+        replacement = self._select_alternate_stream_connection(
+            exclude_key=str(current.get("_key", "") or "")
+        )
+        if replacement:
+            return self._set_stream_preferred_connection(stream_data, replacement)
+        return current
+
+    def _note_stream_progress(self, stream_data: dict) -> None:
+        if stream_data:
+            stream_data["resolver_resend_streak"] = 0
+
+    def _select_target_connections_for_packet(
+        self, pkt_type: int, stream_id: int
+    ) -> list[dict]:
+        target_count = max(1, int(self.packet_duplication_count))
+        if stream_id <= 0 or self.balancer.valid_servers_count <= 0:
+            return self.balancer.get_unique_servers(target_count)
+
+        # Keep control/setup packets on the normal balancer path so SYN/SOCKS
+        # handshakes and terminal control traffic can escape a slow preferred resolver.
+        if int(pkt_type) not in (Packet_Type.STREAM_DATA, Packet_Type.STREAM_RESEND):
+            return self.balancer.get_unique_servers(target_count)
+
+        stream_data = self.active_streams.get(stream_id)
+        if not stream_data:
+            return self.balancer.get_unique_servers(target_count)
+
+        if int(pkt_type) == Packet_Type.STREAM_RESEND:
+            streak = int(stream_data.get("resolver_resend_streak", 0)) + 1
+            stream_data["resolver_resend_streak"] = streak
+            if streak >= self.stream_resolver_failover_resend_threshold:
+                preferred = self._maybe_failover_stream_preferred_connection(
+                    stream_data
+                )
+            else:
+                preferred = self._ensure_stream_preferred_connection(stream_data)
+        else:
+            preferred = self._ensure_stream_preferred_connection(stream_data)
+
+        selected = []
+        seen_keys = set()
+
+        if preferred and preferred.get("is_valid"):
+            selected.append(preferred)
+            seen_keys.add(preferred.get("_key"))
+
+        if len(selected) >= target_count:
+            return selected[:target_count]
+
+        for conn in self.balancer.get_unique_servers(target_count):
+            if not conn or not conn.get("is_valid"):
+                continue
+            conn_key = conn.get("_key")
+            if conn_key in seen_keys:
+                continue
+            selected.append(conn)
+            seen_keys.add(conn_key)
+            if len(selected) >= target_count:
+                return selected
+
+        for conn in self.balancer.valid_servers:
+            if not conn or not conn.get("is_valid"):
+                continue
+            conn_key = conn.get("_key")
+            if conn_key in seen_keys:
+                continue
+            selected.append(conn)
+            seen_keys.add(conn_key)
+            if len(selected) >= target_count:
+                break
+
+        return selected
 
     def _init_recheck_meta(self, connection: dict) -> None:
         connection.setdefault("_recheck_fail_count", 0)
@@ -510,7 +792,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
             return ""
 
         conn = connection or {}
-        ip_value = str(conn.get("resolver", ""))
+        ip_value = self._get_connection_resolver_label(conn) if conn else ""
         domain_value = str(conn.get("domain", ""))
         up_mtu_value = str(conn.get("upload_mtu_bytes", 0))
         down_mtu_value = str(conn.get("download_mtu_bytes", 0))
@@ -595,21 +877,43 @@ class MasterDnsVPNClient(PacketQueueMixin):
 
     def _reset_server_runtime_state(self, server_key: str) -> None:
         self.server_health.pop(server_key, None)
-        self.server_rtt_tracker.pop(server_key, None)
         self.balancer.reset_server_stats(server_key)
 
     def _track_server_send(self, server_key: str) -> None:
         now = time.monotonic()
         h = self.server_health[server_key]
-        h["pending"].append(now)
+        seq = int(h.get("next_seq", 0))
+        h["next_seq"] = seq + 1
+        h["pending"].append(
+            {
+                "seq": seq,
+                "sent_time": now,
+                "timed_out": False,
+                "timeout_event": None,
+            }
+        )
 
-    def _track_server_success(self, server_key: str) -> None:
+    def _track_server_success(self, server_key: str) -> float | None:
         now = time.monotonic()
         h = self.server_health[server_key]
-        if h["pending"]:
-            h["pending"].popleft()
-        h["events"].append((now, True))
+        pending = h["pending"]
+        if not pending:
+            self._prune_server_health_window(server_key, now)
+            return None
+
+        entry = pending.popleft()
+        sent_time = float(entry.get("sent_time", now))
+        timeout_event = entry.get("timeout_event")
+        if (
+            entry.get("timed_out")
+            and isinstance(timeout_event, list)
+            and len(timeout_event) >= 2
+        ):
+            timeout_event[1] = True
+        else:
+            h["events"].append([now, True])
         self._prune_server_health_window(server_key, now)
+        return sent_time
 
     def _prune_server_health_window(self, server_key: str, now: float) -> None:
         h = self.server_health.get(server_key)
@@ -624,13 +928,31 @@ class MasterDnsVPNClient(PacketQueueMixin):
     def _collect_expired_pending_timeouts(self) -> None:
         now = time.monotonic()
         timeout_age = max(0.2, self.timeout)
+        late_response_grace = max(timeout_age * 3.0, 1.0)
         for server_key, h in list(self.server_health.items()):
             pending = h["pending"]
             events = h["events"]
             expire_before = now - timeout_age
-            while pending and pending[0] <= expire_before:
+            for entry in pending:
+                sent_time = float(entry.get("sent_time", now))
+                if sent_time > expire_before:
+                    break
+                if entry.get("timed_out"):
+                    continue
+                timeout_event = [now, False]
+                entry["timed_out"] = True
+                entry["timeout_event"] = timeout_event
+                events.append(timeout_event)
+
+            finalize_before = now - late_response_grace
+            while pending:
+                head = pending[0]
+                if not head.get("timed_out"):
+                    break
+                if float(head.get("sent_time", now)) > finalize_before:
+                    break
                 pending.popleft()
-                events.append((now, False))
+
             self._prune_server_health_window(server_key, now)
             if not pending and not events:
                 self.server_health.pop(server_key, None)
@@ -684,7 +1006,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
         self._reset_server_runtime_state(key)
         self._refresh_balancer_valid_servers()
 
-        resolver = connection.get("resolver", "N/A")
+        resolver = self._get_connection_resolver_label(connection)
         self.logger.warning(
             f"<yellow>DNS server <cyan>{resolver}</cyan> disabled due to: <red>{cause}</red></yellow>"
         )
@@ -709,7 +1031,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
         connection["is_valid"] = True
         self._refresh_balancer_valid_servers()
 
-        resolver = connection.get("resolver", "N/A")
+        resolver = self._get_connection_resolver_label(connection)
         self.logger.info(
             f"<green>DNS server <cyan>{resolver}</cyan> re-enabled and added back to active list.</green>"
         )
@@ -809,6 +1131,16 @@ class MasterDnsVPNClient(PacketQueueMixin):
         self._deactivate_response_queue(sid)
         return None, None
 
+    def _has_other_active_response_queue(self, exclude_stream_id: int) -> bool:
+        excluded = int(exclude_stream_id)
+        for sid in tuple(self.active_response_ids):
+            if int(sid) == excluded:
+                continue
+            q_ref, owner = self._get_active_response_queue(sid)
+            if q_ref and owner:
+                return True
+        return False
+
     def _match_allowed_domain_suffix(self, qname: str) -> str | None:
         """Return the matched allowed domain suffix for qname, if any."""
         if not qname:
@@ -879,14 +1211,6 @@ class MasterDnsVPNClient(PacketQueueMixin):
                     and source_ip not in self.allowed_resolver_sources
                 ):
                     return None, b""
-
-                server_key = f"{source_ip}:{matched_domain}"
-                self._track_server_success(server_key)
-                sent_time = self.server_rtt_tracker.pop(server_key, 0.0)
-                if sent_time > 0.0:
-                    self.balancer.report_success(
-                        server_key, rtt=(time.monotonic() - sent_time)
-                    )
         except Exception:
             return None, b""
 
@@ -904,6 +1228,16 @@ class MasterDnsVPNClient(PacketQueueMixin):
         )
         if packet_cookie != expected_cookie:
             return None, b""
+
+        if addr:
+            source_ip = str(addr[0]).strip().lower()
+            source_port = int(addr[1]) if len(addr) > 1 else 53
+            server_key = self._make_server_key(source_ip, source_port, matched_domain)
+            sent_time = self._track_server_success(server_key)
+            if sent_time is not None:
+                self.balancer.report_success(
+                    server_key, rtt=(time.monotonic() - sent_time)
+                )
 
         return parsed_header, returned_data
 
@@ -1019,9 +1353,10 @@ class MasterDnsVPNClient(PacketQueueMixin):
         mtu_size,
         is_retry=False,
     ):
+        resolver_label = self._format_resolver_endpoint(dns_server, dns_port)
         if not is_retry:
             self.logger.debug(
-                f"<magenta>[MTU Probe]</magenta> Testing Upload MTU: <yellow>{mtu_size}</yellow> bytes via <cyan>{dns_server}</cyan>"
+                f"<magenta>[MTU Probe]</magenta> Testing Upload MTU: <yellow>{mtu_size}</yellow> bytes via <cyan>{resolver_label}</cyan>"
             )
 
         mtu_char_len, mtu_bytes = self.dns_parser.calculate_upload_mtu(
@@ -1051,7 +1386,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
 
         if not response:
             self._log_mtu_probe(
-                f"<yellow>⚠️ Upload test failed: Upload MTU <cyan>{mtu_size}</cyan> bytes via <cyan>{dns_server}</cyan> for <cyan>{domain}</cyan></yellow>",
+                f"<yellow>⚠️ Upload test failed: Upload MTU <cyan>{mtu_size}</cyan> bytes via <cyan>{resolver_label}</cyan> for <cyan>{domain}</cyan></yellow>",
                 level="info",
                 is_retry=is_retry,
             )
@@ -1062,21 +1397,21 @@ class MasterDnsVPNClient(PacketQueueMixin):
 
         if packet_type == Packet_Type.MTU_UP_RES:
             self._log_mtu_probe(
-                f"<yellow>🟢 Upload test passed: Upload MTU <green>{mtu_size}</green> bytes via <cyan>{dns_server}</cyan> for <cyan>{domain}</cyan></yellow>",
+                f"<yellow>🟢 Upload test passed: Upload MTU <green>{mtu_size}</green> bytes via <cyan>{resolver_label}</cyan> for <cyan>{domain}</cyan></yellow>",
                 level="success",
                 is_retry=is_retry,
             )
             return True
         elif packet_type == Packet_Type.ERROR_DROP:
             self._log_mtu_probe(
-                f"<yellow>⚠️ Upload test failed (Server Dropped Packet): Upload MTU <cyan>{mtu_size}</cyan> bytes via <cyan>{dns_server}</cyan> for <cyan>{domain}</cyan></yellow>",
+                f"<yellow>⚠️ Upload test failed (Server Dropped Packet): Upload MTU <cyan>{mtu_size}</cyan> bytes via <cyan>{resolver_label}</cyan> for <cyan>{domain}</cyan></yellow>",
                 level="info",
                 is_retry=is_retry,
             )
             return False
 
         self._log_mtu_probe(
-            f"<yellow>⚠️ Upload test failed: Upload MTU <cyan>{mtu_size}</cyan> bytes via <cyan>{dns_server}</cyan> for <cyan>{domain}</cyan></yellow>",
+            f"<yellow>⚠️ Upload test failed: Upload MTU <cyan>{mtu_size}</cyan> bytes via <cyan>{resolver_label}</cyan> for <cyan>{domain}</cyan></yellow>",
             level="info",
             is_retry=is_retry,
         )
@@ -1091,9 +1426,10 @@ class MasterDnsVPNClient(PacketQueueMixin):
         up_mtu_bytes,
         is_retry=False,
     ):
+        resolver_label = self._format_resolver_endpoint(dns_server, dns_port)
         if not is_retry:
             self.logger.debug(
-                f"<magenta>[MTU Probe]</magenta> Testing Download MTU: <yellow>{mtu_size}</yellow> bytes via <cyan>{dns_server}</cyan>"
+                f"<magenta>[MTU Probe]</magenta> Testing Download MTU: <yellow>{mtu_size}</yellow> bytes via <cyan>{resolver_label}</cyan>"
             )
 
         worst_header = self.dns_parser.get_max_vpn_header_raw_size()
@@ -1133,7 +1469,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
 
         if not response:
             self._log_mtu_probe(
-                f"<yellow>⚠️ Download test failed: Download MTU <cyan>{mtu_size}</cyan> bytes via <cyan>{dns_server}</cyan> for <cyan>{domain}</cyan> (No Response)</yellow>",
+                f"<yellow>⚠️ Download test failed: Download MTU <cyan>{mtu_size}</cyan> bytes via <cyan>{resolver_label}</cyan> for <cyan>{domain}</cyan> (No Response)</yellow>",
                 level="info",
                 is_retry=is_retry,
             )
@@ -1145,21 +1481,21 @@ class MasterDnsVPNClient(PacketQueueMixin):
         if packet_type == Packet_Type.MTU_DOWN_RES:
             if returned_data and len(returned_data) == effective_download_size:
                 self._log_mtu_probe(
-                    f"<yellow>🟢 Download test passed: Download MTU <green>{mtu_size}</green> bytes via <cyan>{dns_server}</cyan> for <cyan>{domain}</cyan></yellow>",
+                    f"<yellow>🟢 Download test passed: Download MTU <green>{mtu_size}</green> bytes via <cyan>{resolver_label}</cyan> for <cyan>{domain}</cyan></yellow>",
                     level="success",
                     is_retry=is_retry,
                 )
                 return True
             else:
                 self._log_mtu_probe(
-                    f"<yellow>⚠️ Download test failed: Download MTU <cyan>{mtu_size}</cyan> bytes via <cyan>{dns_server}</cyan> for <cyan>{domain}</cyan> (Data Size Mismatch)</yellow>",
+                    f"<yellow>⚠️ Download test failed: Download MTU <cyan>{mtu_size}</cyan> bytes via <cyan>{resolver_label}</cyan> for <cyan>{domain}</cyan> (Data Size Mismatch)</yellow>",
                     level="info",
                     is_retry=is_retry,
                 )
                 return False
 
         self._log_mtu_probe(
-            f"<yellow>⚠️ Download test failed: Download MTU <cyan>{mtu_size}</cyan> bytes via <cyan>{dns_server}</cyan> for <cyan>{domain}</cyan> (Unexpected Packet Type)</yellow>",
+            f"<yellow>⚠️ Download test failed: Download MTU <cyan>{mtu_size}</cyan> bytes via <cyan>{resolver_label}</cyan> for <cyan>{domain}</cyan> (Unexpected Packet Type)</yellow>",
             level="info",
             is_retry=is_retry,
         )
@@ -1613,7 +1949,6 @@ class MasterDnsVPNClient(PacketQueueMixin):
             connection["_was_valid_once"] = False
             connection["_recheck_next_at"] = 0.0
 
-        sem = asyncio.Semaphore(max(1, self.mtu_test_parallelism))
         counters = {
             "completed": 0,
             "valid": 0,
@@ -1626,91 +1961,109 @@ class MasterDnsVPNClient(PacketQueueMixin):
             if not connection or self.should_stop.is_set():
                 return
 
-            async with sem:
-                if self.should_stop.is_set():
-                    return
+            if self.should_stop.is_set():
+                return
 
-                domain = connection.get("domain")
-                resolver = connection.get("resolver")
-                dns_port = 53
+            domain = connection.get("domain")
+            resolver, dns_port = self._get_connection_resolver_addr(connection)
+            resolver_label = self._get_connection_resolver_label(connection)
 
-                self.logger.debug(
-                    f"<blue>Testing connection <yellow>{domain}</yellow> via <cyan>{resolver}</cyan> (<yellow>{server_id} / {total_conns}</yellow>)...</blue>"
+            self.logger.debug(
+                f"<blue>Testing connection <yellow>{domain}</yellow> via <cyan>{resolver_label}</cyan> (<yellow>{server_id} / {total_conns}</yellow>)...</blue>"
+            )
+
+            up_valid, up_mtu_bytes, up_mtu_char = await self.test_upload_mtu_size(
+                domain, resolver, dns_port, self.max_upload_mtu
+            )
+
+            if not up_valid or (
+                self.min_upload_mtu > 0 and up_mtu_bytes < self.min_upload_mtu
+            ):
+                connection["_recheck_next_at"] = (
+                    time.monotonic() + self.recheck_inactive_interval_seconds
                 )
-
-                up_valid, up_mtu_bytes, up_mtu_char = await self.test_upload_mtu_size(
-                    domain, resolver, dns_port, self.max_upload_mtu
-                )
-
-                if not up_valid or (
-                    self.min_upload_mtu > 0 and up_mtu_bytes < self.min_upload_mtu
-                ):
-                    connection["_recheck_next_at"] = (
-                        time.monotonic() + self.recheck_inactive_interval_seconds
-                    )
-                    async with counters_lock:
-                        counters["completed"] += 1
-                        counters["reject_upload"] += 1
-                        completed = counters["completed"]
-                        valid_now = counters["valid"]
-                        rejected_now = (
-                            counters["reject_upload"] + counters["reject_download"]
-                        )
-                    self.logger.warning(
-                        f"<red>❌ Rejected ({completed}/{total_conns}): <cyan>{domain}</cyan> via <cyan>{resolver}</cyan> | reason=<yellow>UPLOAD_MTU</yellow> | value=<cyan>{up_mtu_bytes}</cyan> | totals: valid=<green>{valid_now}</green>, rejected=<red>{rejected_now}</red></red>"
-                    )
-                    return
-
-                down_valid, down_mtu_bytes = await self.test_download_mtu_size(
-                    domain, resolver, dns_port, self.max_download_mtu, up_mtu_bytes
-                )
-
-                if not down_valid or (
-                    self.min_download_mtu > 0 and down_mtu_bytes < self.min_download_mtu
-                ):
-                    connection["_recheck_next_at"] = (
-                        time.monotonic() + self.recheck_inactive_interval_seconds
-                    )
-                    async with counters_lock:
-                        counters["completed"] += 1
-                        counters["reject_download"] += 1
-                        completed = counters["completed"]
-                        valid_now = counters["valid"]
-                        rejected_now = (
-                            counters["reject_upload"] + counters["reject_download"]
-                        )
-                    self.logger.warning(
-                        f"<red>❌ Rejected ({completed}/{total_conns}): <cyan>{domain}</cyan> via <cyan>{resolver}</cyan> | reason=<yellow>DOWNLOAD_MTU</yellow> | value=<cyan>{down_mtu_bytes}</cyan> | totals: valid=<green>{valid_now}</green>, rejected=<red>{rejected_now}</red></red>"
-                    )
-                    return
-
-                connection["is_valid"] = True
-                connection["upload_mtu_bytes"] = up_mtu_bytes
-                connection["upload_mtu_chars"] = up_mtu_char
-                connection["download_mtu_bytes"] = down_mtu_bytes
-                connection["packet_loss"] = 0
-                connection["_recheck_fail_count"] = 0
-                connection["_recheck_next_at"] = 0.0
-                connection["_was_valid_once"] = True
-
                 async with counters_lock:
                     counters["completed"] += 1
-                    counters["valid"] += 1
+                    counters["reject_upload"] += 1
                     completed = counters["completed"]
                     valid_now = counters["valid"]
                     rejected_now = (
                         counters["reject_upload"] + counters["reject_download"]
                     )
-                self.logger.info(
-                    f"<green>✅ Accepted ({completed}/{total_conns}): <cyan>{domain}</cyan> via <cyan>{resolver}</cyan> | upload=<cyan>{up_mtu_bytes}</cyan> | download=<cyan>{down_mtu_bytes}</cyan> | totals: valid=<green>{valid_now}</green>, rejected=<red>{rejected_now}</red></green>"
+                self.logger.warning(
+                    f"<red>❌ Rejected ({completed}/{total_conns}): <cyan>{domain}</cyan> via <cyan>{resolver_label}</cyan> | reason=<yellow>UPLOAD_MTU</yellow> | value=<cyan>{up_mtu_bytes}</cyan> | totals: valid=<green>{valid_now}</green>, rejected=<red>{rejected_now}</red></red>"
                 )
+                return
 
-                self._append_mtu_success_line(mtu_output_path, connection)
+            down_valid, down_mtu_bytes = await self.test_download_mtu_size(
+                domain, resolver, dns_port, self.max_download_mtu, up_mtu_bytes
+            )
+
+            if not down_valid or (
+                self.min_download_mtu > 0 and down_mtu_bytes < self.min_download_mtu
+            ):
+                connection["_recheck_next_at"] = (
+                    time.monotonic() + self.recheck_inactive_interval_seconds
+                )
+                async with counters_lock:
+                    counters["completed"] += 1
+                    counters["reject_download"] += 1
+                    completed = counters["completed"]
+                    valid_now = counters["valid"]
+                    rejected_now = (
+                        counters["reject_upload"] + counters["reject_download"]
+                    )
+                self.logger.warning(
+                    f"<red>❌ Rejected ({completed}/{total_conns}): <cyan>{domain}</cyan> via <cyan>{resolver_label}</cyan> | reason=<yellow>DOWNLOAD_MTU</yellow> | value=<cyan>{down_mtu_bytes}</cyan> | totals: valid=<green>{valid_now}</green>, rejected=<red>{rejected_now}</red></red>"
+                )
+                return
+
+            connection["is_valid"] = True
+            connection["upload_mtu_bytes"] = up_mtu_bytes
+            connection["upload_mtu_chars"] = up_mtu_char
+            connection["download_mtu_bytes"] = down_mtu_bytes
+            connection["packet_loss"] = 0
+            connection["_recheck_fail_count"] = 0
+            connection["_recheck_next_at"] = 0.0
+            connection["_was_valid_once"] = True
+
+            async with counters_lock:
+                counters["completed"] += 1
+                counters["valid"] += 1
+                completed = counters["completed"]
+                valid_now = counters["valid"]
+                rejected_now = counters["reject_upload"] + counters["reject_download"]
+            self.logger.info(
+                f"<green>✅ Accepted ({completed}/{total_conns}): <cyan>{domain}</cyan> via <cyan>{resolver_label}</cyan> | upload=<cyan>{up_mtu_bytes}</cyan> | download=<cyan>{down_mtu_bytes}</cyan> | totals: valid=<green>{valid_now}</green>, rejected=<red>{rejected_now}</red></green>"
+            )
+
+            self._append_mtu_success_line(mtu_output_path, connection)
+
+        async def _mtu_test_worker(work_queue: asyncio.Queue) -> None:
+            while not self.should_stop.is_set():
+                item = await work_queue.get()
+                if item is None:
+                    work_queue.task_done()
+                    return
+
+                try:
+                    server_id, connection = item
+                    await _test_one_connection(server_id, connection)
+                finally:
+                    work_queue.task_done()
+
+        work_queue = asyncio.Queue()
+        for idx, conn in enumerate(self.connections_map, start=1):
+            if conn:
+                work_queue.put_nowait((idx, conn))
+
+        worker_count = min(max(1, self.mtu_test_parallelism), work_queue.qsize() or 1)
+        for _ in range(worker_count):
+            work_queue.put_nowait(None)
 
         tasks = [
-            asyncio.create_task(_test_one_connection(idx, conn))
-            for idx, conn in enumerate(self.connections_map, start=1)
-            if conn
+            asyncio.create_task(_mtu_test_worker(work_queue))
+            for _ in range(worker_count)
         ]
         if tasks:
             results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -1758,37 +2111,47 @@ class MasterDnsVPNClient(PacketQueueMixin):
 
     async def _recheck_one_inactive_connection(self, connection: dict) -> bool:
         domain = connection.get("domain")
-        resolver = connection.get("resolver")
+        resolver, dns_port = self._get_connection_resolver_addr(connection)
         if not domain or not resolver:
             return False
 
-        up_valid, up_mtu_bytes, up_mtu_char = await self.test_upload_mtu_size(
-            domain, resolver, 53, self.max_upload_mtu
-        )
-        if (not up_valid) or (
-            self.min_upload_mtu > 0 and up_mtu_bytes < self.min_upload_mtu
-        ):
-            return False
+        synced_up = int(self.synced_upload_mtu or 0)
+        synced_down = int(self.synced_download_mtu or 0)
+        resolver_label = self._get_connection_resolver_label(connection)
 
-        down_valid, down_mtu_bytes = await self.test_download_mtu_size(
-            domain, resolver, 53, self.max_download_mtu, up_mtu_bytes
-        )
-        if (not down_valid) or (
-            self.min_download_mtu > 0 and down_mtu_bytes < self.min_download_mtu
-        ):
-            return False
-
-        # Keep runtime MTU consistency; avoid adding servers that cannot handle
-        # the currently negotiated session MTU.
-        if (
-            self.synced_upload_mtu > 0
-            and self.synced_download_mtu > 0
-            and (
-                up_mtu_bytes < self.synced_upload_mtu
-                or down_mtu_bytes < self.synced_download_mtu
+        if synced_up <= 0 or synced_down <= 0:
+            self.logger.debug(
+                f"Cannot recheck connection {domain} via {resolver_label} because synced MTU values are not available."
             )
-        ):
             return False
+
+        up_valid = await self.send_upload_mtu_test(
+            domain,
+            resolver,
+            dns_port,
+            synced_up,
+            is_retry=False,
+        )
+        if not up_valid:
+            return False
+
+        up_mtu_char = self.dns_parser.calculate_upload_mtu(
+            domain=domain, mtu=synced_up
+        )[0]
+        up_mtu_bytes = synced_up
+
+        down_valid = await self.send_download_mtu_test(
+            domain,
+            resolver,
+            dns_port,
+            synced_down,
+            synced_up,
+            is_retry=False,
+        )
+        if not down_valid:
+            return False
+
+        down_mtu_bytes = synced_down
 
         connection["upload_mtu_bytes"] = up_mtu_bytes
         connection["upload_mtu_chars"] = up_mtu_char
@@ -1910,7 +2273,8 @@ class MasterDnsVPNClient(PacketQueueMixin):
                 continue
 
             domain = selected_conn.get("domain")
-            resolver = selected_conn.get("resolver")
+            resolver, dns_port = self._get_connection_resolver_addr(selected_conn)
+            resolver_label = self._get_connection_resolver_label(selected_conn)
 
             sync_token = os.urandom(8)
 
@@ -1935,7 +2299,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
 
             if not dns_queries:
                 self.logger.error(
-                    f"<yellow>Failed to build MTU sync via <cyan>{resolver}</cyan> for <cyan>{domain}</cyan>, Retrying...</yellow>"
+                    f"<yellow>Failed to build MTU sync via <cyan>{resolver_label}</cyan> for <cyan>{domain}</cyan>, Retrying...</yellow>"
                 )
                 await asyncio.sleep(0.2)
                 continue
@@ -1945,7 +2309,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
                     return False
 
                 response = await self._send_and_receive_dns(
-                    dns_queries[0], resolver, 53, 2.0
+                    dns_queries[0], resolver, dns_port, 2.0
                 )
 
                 if response:
@@ -1971,7 +2335,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
                     await asyncio.sleep(0.5)
 
             self.logger.warning(
-                f"<yellow>MTU sync failed via <cyan>{resolver}</cyan> for <cyan>{domain}</cyan>. Retrying overall process...</yellow>"
+                f"<yellow>MTU sync failed via <cyan>{resolver_label}</cyan> for <cyan>{domain}</cyan>. Retrying overall process...</yellow>"
             )
             await asyncio.sleep(0.2)
 
@@ -1994,7 +2358,8 @@ class MasterDnsVPNClient(PacketQueueMixin):
                 continue
 
             domain = selected_conn.get("domain")
-            resolver = selected_conn.get("resolver")
+            resolver, dns_port = self._get_connection_resolver_addr(selected_conn)
+            resolver_label = self._get_connection_resolver_label(selected_conn)
 
             init_token = os.urandom(8).hex().encode("ascii")
             flag_byte = b"\x01" if self.base_encode_responses else b"\x00"
@@ -2020,7 +2385,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
 
             if not dns_queries:
                 self.logger.error(
-                    f"Failed to build session init DNS query via {resolver} for {domain}, Retrying..."
+                    f"Failed to build session init DNS query via {resolver_label} for {domain}, Retrying..."
                 )
                 await asyncio.sleep(0.2)
                 continue
@@ -2030,7 +2395,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
                     return False
 
                 response = await self._send_and_receive_dns(
-                    dns_queries[0], resolver, 53, self.timeout
+                    dns_queries[0], resolver, dns_port, self.timeout
                 )
 
                 if response:
@@ -2286,7 +2651,6 @@ class MasterDnsVPNClient(PacketQueueMixin):
         self.track_seq_packets = set()
         self.track_fragment_packets = set()
         self.rx_tasks = set()
-        self.server_rtt_tracker.clear()
         self.server_health.clear()
 
         ping_mgr = getattr(self, "ping_manager", None)
@@ -2315,7 +2679,6 @@ class MasterDnsVPNClient(PacketQueueMixin):
             self.active_streams.clear()
             self.closed_streams.clear()
             self.rx_tasks.clear()
-            self.server_rtt_tracker.clear()
             self.server_health.clear()
         except Exception:
             pass
@@ -2436,6 +2799,21 @@ class MasterDnsVPNClient(PacketQueueMixin):
             self.logger.debug(
                 f"<magenta>[LOOP]</magenta> Starting {num_workers} TX workers."
             )
+
+            self.logger.info(
+                f"<cyan>Build Version:</cyan> <yellow>{self.build_version}</yellow>"
+            )
+
+            self.logger.info("<yellow>" + "=" * 80 + "</yellow>")
+            self.logger.success(
+                "<fg #ff456d>📢 Join our Telegram channel: <cyan>@MasterDNSVPN</cyan> for support and updates! 📢</fg #ff456d>"
+            )
+
+            self.logger.info("<yellow>" + "=" * 80 + "</yellow>")
+            self.logger.success(
+                "<cyan>GitHub:</cyan> <blue>https://github.com/masterking32/MasterDnsVPN</blue>"
+            )
+            self.logger.info("<yellow>" + "=" * 80 + "</yellow>")
             for _ in range(num_workers):
                 self.workers.append(self.loop.create_task(self._tx_worker()))
 
@@ -2534,13 +2912,10 @@ class MasterDnsVPNClient(PacketQueueMixin):
             try:
                 data, addr = await async_recvfrom(self.loop, self.tunnel_sock, 65536)
                 await self.rx_semaphore.acquire()
-                task = self.loop.create_task(
-                    self._process_and_route_incoming(data, addr)
-                )
-                self.rx_tasks.add(task)
-                task.add_done_callback(
-                    lambda t: (self.rx_tasks.discard(t), self.rx_semaphore.release())
-                )
+                try:
+                    await self._process_and_route_incoming(data, addr)
+                finally:
+                    self.rx_semaphore.release()
 
             except asyncio.CancelledError:
                 break
@@ -2806,7 +3181,12 @@ class MasterDnsVPNClient(PacketQueueMixin):
             "track_types": set(),
             "track_seq_packets": set(),
             "track_fragment_packets": set(),
+            "preferred_server_key": "",
+            "resolver_resend_streak": 0,
+            "last_resolver_failover_at": 0.0,
         }
+
+        self._ensure_stream_preferred_connection(self.active_streams[stream_id])
 
         if not is_socks5:
             await self._enqueue_packet(
@@ -2849,12 +3229,10 @@ class MasterDnsVPNClient(PacketQueueMixin):
                             await writer.drain()
 
                             stream_obj = stream_data.get("stream")
-                            if (
-                                stream_obj
-                                and hasattr(stream_obj, "socks_connected")
-                                and not stream_obj.socks_connected.is_set()
+                            if stream_obj and hasattr(
+                                stream_obj, "mark_socks_connected"
                             ):
-                                stream_obj.socks_connected.set()
+                                await stream_obj.mark_socks_connected()
 
                         except Exception as e:
                             self.logger.debug(
@@ -3107,62 +3485,67 @@ class MasterDnsVPNClient(PacketQueueMixin):
         return bytes(packed_buffer) if blocks > 1 else b""
 
     def _dequeue_response_packet(self):
-        if not self.active_response_ids:
-            return None
+        while self.active_response_ids:
+            last_stream_id = int(self.round_robin_stream_id)
+            selected_pos = bisect_right(self.active_response_ids, last_stream_id)
+            attempts = len(self.active_response_ids)
+            target_queue = None
+            pop_owner = None
+            selected_stream_id = 0
 
-        last_stream_id = int(self.round_robin_stream_id)
-        selected_pos = bisect_right(self.active_response_ids, last_stream_id)
-        attempts = len(self.active_response_ids)
-        target_queue = None
-        pop_owner = None
-        selected_stream_id = 0
-
-        while attempts > 0 and self.active_response_ids:
-            if selected_pos >= len(self.active_response_ids):
-                selected_pos = 0
-            candidate_stream_id = self.active_response_ids[selected_pos]
-            target_queue, pop_owner = self._get_active_response_queue(
-                candidate_stream_id
-            )
-            if target_queue and pop_owner:
-                selected_stream_id = candidate_stream_id
-                break
-            attempts -= 1
-
-        if not target_queue or not pop_owner:
-            return None
-
-        item = heapq.heappop(target_queue)
-        self._on_queue_pop(pop_owner, item)
-        if not target_queue:
-            self._deactivate_response_queue(selected_stream_id)
-        self.round_robin_stream_id = selected_stream_id
-
-        if item[2] == Packet_Type.PING and self.count_ping > 0:
-            self.count_ping -= 1
-
-        if (
-            item[2] in self._packable_control_types
-            and not item[5]
-            and self.max_packed_blocks > 1
-        ):
-            packed = self._pack_selected_response_blocks(
-                selected_stream_id=selected_stream_id,
-                selected_queue=target_queue,
-                selected_owner=pop_owner,
-                first_item=item,
-            )
-            if packed:
-                return (
-                    item[0],
-                    item[1],
-                    Packet_Type.PACKED_CONTROL_BLOCKS,
-                    0,
-                    0,
-                    packed,
+            while attempts > 0 and self.active_response_ids:
+                if selected_pos >= len(self.active_response_ids):
+                    selected_pos = 0
+                candidate_stream_id = self.active_response_ids[selected_pos]
+                target_queue, pop_owner = self._get_active_response_queue(
+                    candidate_stream_id
                 )
+                if target_queue and pop_owner:
+                    selected_stream_id = candidate_stream_id
+                    break
+                attempts -= 1
 
-        return item
+            if not target_queue or not pop_owner:
+                return None
+
+            item = heapq.heappop(target_queue)
+            self._on_queue_pop(pop_owner, item)
+            if not target_queue:
+                self._deactivate_response_queue(selected_stream_id)
+            self.round_robin_stream_id = selected_stream_id
+
+            if item[2] == Packet_Type.PING:
+                if self.count_ping > 0:
+                    self.count_ping -= 1
+                if selected_stream_id == 0 and self._has_other_active_response_queue(
+                    exclude_stream_id=0
+                ):
+                    continue
+
+            if (
+                item[2] in self._packable_control_types
+                and not item[5]
+                and self.max_packed_blocks > 1
+            ):
+                packed = self._pack_selected_response_blocks(
+                    selected_stream_id=selected_stream_id,
+                    selected_queue=target_queue,
+                    selected_owner=pop_owner,
+                    first_item=item,
+                )
+                if packed:
+                    return (
+                        item[0],
+                        item[1],
+                        Packet_Type.PACKED_CONTROL_BLOCKS,
+                        0,
+                        0,
+                        packed,
+                    )
+
+            return item
+
+        return None
 
     async def _tx_worker(self):
         while not self.should_stop.is_set() and not self.session_restart_event.is_set():
@@ -3216,12 +3599,11 @@ class MasterDnsVPNClient(PacketQueueMixin):
                 self.dns_parser.codec_transform(data, encrypt=True) if data else b""
             )
 
-            target_conns = self.balancer.get_unique_servers(
-                self.packet_duplication_count
+            target_conns = self._select_target_connections_for_packet(
+                pkt_type, stream_id
             )
 
             for conn in target_conns:
-                self.server_rtt_tracker[conn["_key"]] = time.monotonic()
                 self.balancer.report_send(conn["_key"])
                 self._track_server_send(conn["_key"])
                 query_packets = self.dns_parser.build_request_dns_query(
@@ -3243,11 +3625,12 @@ class MasterDnsVPNClient(PacketQueueMixin):
 
                 for query_packet in query_packets:
                     try:
+                        resolver_addr = self._get_connection_resolver_addr(conn)
                         await async_sendto(
                             self.loop,
                             self.tunnel_sock,
                             query_packet,
-                            (conn["resolver"], 53),
+                            resolver_addr,
                         )
                     except Exception as _:
                         pass
@@ -3313,6 +3696,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
         stream_id_exists = stream_data is not None
         if stream_id_exists:
             stream_data["last_activity_time"] = time.monotonic()
+            self._note_stream_progress(stream_data)
 
         if ptype == Packet_Type.PACKED_CONTROL_BLOCKS and data:
             _unpack_from = self._block_packer.unpack_from
@@ -3772,6 +4156,9 @@ class MasterDnsVPNClient(PacketQueueMixin):
                 )
             self.logger.info("=" * 60)
             self.logger.success("<magenta>Starting MasterDnsVPN Client...</magenta>")
+            self.logger.info(
+                f"<cyan>Build Version:</cyan> <yellow>{self.build_version}</yellow>"
+            )
             self.logger.success(
                 "<cyan>GitHub:</cyan> <blue>https://github.com/masterking32/MasterDnsVPN</blue>"
             )
