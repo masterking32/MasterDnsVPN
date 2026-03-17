@@ -156,7 +156,14 @@ def get_encrypt_key(method_id: int) -> str:
         length = 24
     else:
         length = 32
-    key_path = "encrypt_key.txt"
+
+    try:
+        from .config_loader import get_config_path
+
+        key_path = get_config_path("encrypt_key.txt")
+    except Exception:
+        key_path = "encrypt_key.txt"
+
     random_key = load_text(key_path)
     if not random_key or len(random_key) != length:
         random_key = generate_random_hex_text(length)
@@ -167,8 +174,11 @@ def get_encrypt_key(method_id: int) -> str:
 def generate_random_hex_text(length: int) -> str:
     """
     Generate a random hexadecimal string of the specified length.
+    Always returns exactly `length` characters.
     """
-    return secrets.token_hex(length // 2)
+    if length <= 0:
+        return ""
+    return secrets.token_hex((length + 1) // 2)[:length]
 
 
 def getLogger(

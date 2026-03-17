@@ -72,7 +72,7 @@ def compress_payload(
     Returns: (processed_data, actual_compression_type_used)
     """
     if not data:
-        return data, Compression_Type.OFF
+        return b"" if data is None else data, Compression_Type.OFF
 
     if comp_type == Compression_Type.OFF:
         return data, Compression_Type.OFF
@@ -109,7 +109,7 @@ def try_decompress_payload(data: bytes, comp_type: int) -> tuple[bytes, bool]:
     Returns: (payload, success)
     """
     if not data or comp_type == Compression_Type.OFF:
-        return data, True
+        return b"" if data is None else data, True
 
     if not is_compression_type_available(comp_type):
         return b"", False

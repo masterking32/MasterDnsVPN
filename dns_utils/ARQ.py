@@ -6,8 +6,8 @@
 import asyncio
 import socket
 import time
+import traceback
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
 
 from .DNS_ENUMS import Packet_Type, Stream_State
 
@@ -48,7 +48,7 @@ class ARQ:
         Packet_Type.SOCKS5_UPSTREAM_UNAVAILABLE: Packet_Type.SOCKS5_UPSTREAM_UNAVAILABLE_ACK,
     }
 
-    class _DummyLogger:
+    class _DummyLogger:  # pragma: no cover
         def debug(self, *args, **kwargs):
             pass
 
@@ -108,9 +108,9 @@ class ARQ:
         # -----------------------------------------------------------------
         self.snd_nxt = 0
         self.rcv_nxt = 0
-        self.snd_buf: Dict[int, Dict[str, object]] = {}
-        self.rcv_buf: Dict[int, bytes] = {}
-        self.control_snd_buf: Dict[Tuple[int, int], _PendingControlPacket] = {}
+        self.snd_buf: dict[int, dict[str, object]] = {}
+        self.rcv_buf: dict[int, bytes] = {}
+        self.control_snd_buf: dict[tuple[int, int], _PendingControlPacket] = {}
 
         # -----------------------------------------------------------------
         # Stream lifecycle and TCP-like control flags
@@ -123,14 +123,14 @@ class ARQ:
         self._fin_sent = False
         self._fin_received = False
         self._fin_acked = False
-        self._fin_seq_sent: Optional[int] = None
-        self._fin_seq_received: Optional[int] = None
+        self._fin_seq_sent: int | None = None
+        self._fin_seq_received: int | None = None
 
         self._rst_received = False
         self._rst_sent = False
         self._rst_acked = False
-        self._rst_seq_sent: Optional[int] = None
-        self._rst_seq_received: Optional[int] = None
+        self._rst_seq_sent: int | None = None
+        self._rst_seq_received: int | None = None
 
         self._local_write_closed = False
         self._remote_write_closed = False
@@ -177,7 +177,7 @@ class ARQ:
 
         self._control_ack_map = dict(self.CONTROL_ACK_PAIRS)
         self._control_reverse_ack_map = {v: k for k, v in self._control_ack_map.items()}
-        self._last_dup_ack_sn: Optional[int] = None
+        self._last_dup_ack_sn: int | None = None
         self._last_dup_ack_time: float = 0.0
 
         try:
@@ -201,7 +201,7 @@ class ARQ:
             self.rtx_task = None
 
     # Set stream lifecycle state (uses Stream_State enum).
-    def _set_state(self, new_state: str) -> None:
+    def _set_state(self, new_state: int) -> None:
         self.state = new_state
 
     # Normalize sequence number to uint16 (0..65535).
@@ -234,6 +234,14 @@ class ARQ:
         if self.state == Stream_State.OPEN:
             self._set_state(Stream_State.HALF_CLOSED_LOCAL)
 
+    async def mark_socks_connected(self) -> None:
+        if self.socks_connected.is_set():
+            return
+
+        self.socks_connected.set()
+        await self._flush_ready_local_data()
+        await self._try_finalize_remote_eof()
+
     # Clear all buffers immediately (RST/abort semantics).
     def _clear_all_queues(self) -> None:
         self.snd_buf.clear()
@@ -245,7 +253,7 @@ class ARQ:
     # External transition hooks for client/server integration
     # ---------------------------------------------------------------------
     # Register outbound FIN and transition state.
-    def mark_fin_sent(self, seq_num: Optional[int] = None) -> None:
+    def mark_fin_sent(self, seq_num: int | None = None) -> None:
         self._fin_sent = True
         if seq_num is not None:
             self._fin_seq_sent = self._norm_sn(seq_num)
@@ -277,7 +285,7 @@ class ARQ:
             self._set_state(Stream_State.CLOSING)
 
     # Register outbound RST and move to RESET state.
-    def mark_rst_sent(self, seq_num: Optional[int] = None) -> None:
+    def mark_rst_sent(self, seq_num: int | None = None) -> None:
         self._rst_sent = True
         if seq_num is not None:
             self._rst_seq_sent = self._norm_sn(seq_num)
@@ -386,15 +394,14 @@ class ARQ:
                 _ct.uncancel()
         except Exception as e:
             self.logger.debug(f"Stream {self.stream_id} IO loop error: {e}")
+            reset_required = True
+            error_reason = str(e)
         finally:
             if self.closed:
-                return
-
-            if reset_required:
+                pass  # already closed — cleanup was handled by whoever called close()
+            elif reset_required:
                 await self.abort(reason=error_reason or "Local reset/error")
-                return
-
-            if self._fin_received:
+            elif self._fin_received:
                 # Do not drop outbound queue. Drain and then graceful close.
                 wait_deadline = time.monotonic() + self.fin_drain_timeout
                 while (
@@ -408,15 +415,11 @@ class ARQ:
                     await self.abort(
                         reason="Remote FIN received but local send buffer did not drain"
                     )
-                    return
-
-                if not self.closed:
+                elif not self.closed:
                     await self._initiate_graceful_close(
                         reason="Remote FIN fully handled"
                     )
-                return
-
-            if graceful_eof:
+            elif graceful_eof:
                 await self._initiate_graceful_close(reason=error_reason or "Local EOF")
 
     # Drain outstanding sends and then close with FIN.
@@ -452,6 +455,9 @@ class ARQ:
         ):
             return
 
+        if self.is_socks and not self.socks_connected.is_set():
+            return
+
         self._remote_write_closed = True
 
         try:
@@ -481,6 +487,34 @@ class ARQ:
 
         if self._fin_sent and self._fin_acked and not self.snd_buf:
             await self.close(reason="Both FIN sides fully acknowledged")
+
+    async def _flush_ready_local_data(self) -> None:
+        if self.closed or (self.is_socks and not self.socks_connected.is_set()):
+            return
+
+        has_written = False
+        _pop = self.rcv_buf.pop
+        data_to_write = []
+
+        while self.rcv_nxt in self.rcv_buf:
+            try:
+                data_to_write.append(_pop(self.rcv_nxt))
+                has_written = True
+                self.rcv_nxt = (self.rcv_nxt + 1) % 65536
+            except Exception as e:
+                await self.abort(reason=f"RCV Buffer Error: {e}")
+                return
+
+        if not has_written:
+            return
+
+        try:
+            async with self._write_lock:
+                self.writer.write(b"".join(data_to_write))
+                await self.writer.drain()
+        except Exception as e:
+            await self.abort(reason=f"Writer Error: {e}")
+            return
 
     # Periodic scheduler that triggers data/control retransmission checks.
     async def _retransmit_loop(self):
@@ -552,28 +586,7 @@ class ARQ:
         if sn not in self.rcv_buf:
             self.rcv_buf[sn] = data
 
-        has_written = False
-        _write = self.writer.write
-        _pop = self.rcv_buf.pop
-        data_to_write = []
-
-        while self.rcv_nxt in self.rcv_buf:
-            try:
-                data_to_write.append(_pop(self.rcv_nxt))
-                has_written = True
-                self.rcv_nxt = (self.rcv_nxt + 1) % 65536
-            except Exception as e:
-                await self.abort(reason=f"RCV Buffer Error: {e}")
-                return
-
-        if has_written:
-            try:
-                async with self._write_lock:
-                    _write(b"".join(data_to_write))
-                    await self.writer.drain()
-            except Exception as e:
-                await self.abort(reason=f"Writer Error: {e}")
-                return
+        await self._flush_ready_local_data()
 
         await self.enqueue_tx(0, self.stream_id, sn, b"", is_ack=True)
         await self._try_finalize_remote_eof()
@@ -657,7 +670,7 @@ class ARQ:
         payload: bytes = b"",
         priority: int = 0,
         track_for_ack: bool = True,
-        ack_type: Optional[int] = None,
+        ack_type: int | None = None,
     ) -> bool:
         ptype = int(packet_type)
         sn = self._norm_sn(sequence_num)
@@ -866,13 +879,28 @@ class ARQ:
         self.closed = True
 
         current_task = asyncio.current_task()
-        for task in (getattr(self, "io_task", None), getattr(self, "rtx_task", None)):
-            if task and not task.done() and task is not current_task:
-                task.cancel()
-                try:
-                    await asyncio.wait_for(task, timeout=0.2)
-                except BaseException:
-                    pass
+        tasks_to_cancel = [
+            t
+            for t in (getattr(self, "io_task", None), getattr(self, "rtx_task", None))
+            if t and not t.done() and t is not current_task
+        ]
+        for task in tasks_to_cancel:
+            task.cancel()
+            try:
+                await asyncio.wait_for(task, timeout=0.2)
+            except asyncio.TimeoutError:
+                self.logger.debug(
+                    f"Stream {self.stream_id}: task {task.get_name()!r} "
+                    f"did not finish within 0.2 s after cancel during close()"
+                )
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                self.logger.debug(
+                    f"Stream {self.stream_id}: unexpected exception while awaiting "
+                    f"cancelled task {task.get_name()!r} during close():\n"
+                    f"{''.join(traceback.format_exception(type(exc), exc, exc.__traceback__))}"
+                )
 
         try:
             if (

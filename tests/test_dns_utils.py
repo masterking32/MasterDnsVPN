@@ -786,32 +786,34 @@ class TestReleaseTracking:
     def test_stream_data_releases_track_data(self) -> None:
         m = _ConcreteQueueMixin()
         owner: dict = {"track_data": {42}}
-        m._release_tracking_on_pop(owner, Packet_Type.STREAM_DATA, 42)
+        m._release_tracking_on_pop(owner, Packet_Type.STREAM_DATA, 0, 42)
         assert 42 not in owner["track_data"]
 
-    def test_socks5_syn_releases_track_data(self) -> None:
+    def test_socks5_syn_is_noop_for_tracking(self) -> None:
+        # SOCKS5_SYN is not in any tracking set; the call must not raise
+        # and must leave unrelated tracking data intact.
         m = _ConcreteQueueMixin()
         owner: dict = {"track_data": {7}}
-        m._release_tracking_on_pop(owner, Packet_Type.SOCKS5_SYN, 7)
-        assert 7 not in owner["track_data"]
+        m._release_tracking_on_pop(owner, Packet_Type.SOCKS5_SYN, 0, 7)
+        assert 7 in owner["track_data"]
 
     def test_stream_data_ack_releases_track_ack(self) -> None:
         m = _ConcreteQueueMixin()
         owner: dict = {"track_ack": {10}}
-        m._release_tracking_on_pop(owner, Packet_Type.STREAM_DATA_ACK, 10)
+        m._release_tracking_on_pop(owner, Packet_Type.STREAM_DATA_ACK, 0, 10)
         assert 10 not in owner["track_ack"]
 
     def test_stream_resend_releases_track_resend(self) -> None:
         m = _ConcreteQueueMixin()
         owner: dict = {"track_resend": {5}}
-        m._release_tracking_on_pop(owner, Packet_Type.STREAM_RESEND, 5)
+        m._release_tracking_on_pop(owner, Packet_Type.STREAM_RESEND, 0, 5)
         assert 5 not in owner["track_resend"]
 
     def test_stream_fin_releases_fin_and_types(self) -> None:
         m = _ConcreteQueueMixin()
         ptype = Packet_Type.STREAM_FIN
         owner: dict = {"track_fin": {ptype}, "track_types": {ptype}}
-        m._release_tracking_on_pop(owner, ptype, 0)
+        m._release_tracking_on_pop(owner, ptype, 0, 0)
         assert ptype not in owner["track_fin"]
         assert ptype not in owner["track_types"]
 
@@ -819,14 +821,14 @@ class TestReleaseTracking:
         m = _ConcreteQueueMixin()
         ptype = Packet_Type.STREAM_SYN
         owner: dict = {"track_syn_ack": {ptype}, "track_types": {ptype}}
-        m._release_tracking_on_pop(owner, ptype, 0)
+        m._release_tracking_on_pop(owner, ptype, 0, 0)
         assert ptype not in owner["track_syn_ack"]
         assert ptype not in owner["track_types"]
 
     def test_none_of_the_above_is_noop(self) -> None:
         m = _ConcreteQueueMixin()
         owner: dict = {}
-        m._release_tracking_on_pop(owner, Packet_Type.PING, 0)
+        m._release_tracking_on_pop(owner, Packet_Type.PING, 0, 0)
 
 
 class TestResolveArqPacketType:
@@ -894,43 +896,43 @@ class TestTrackMainPacketOnce:
     def test_resend_not_in_track_data(self) -> None:
         m = _ConcreteQueueMixin()
         owner: dict = {}
-        assert m._track_main_packet_once(owner, Packet_Type.STREAM_RESEND, 1)
-        assert not m._track_main_packet_once(owner, Packet_Type.STREAM_RESEND, 1)
+        assert m._track_main_packet_once(owner, 0, Packet_Type.STREAM_RESEND, 1)
+        assert not m._track_main_packet_once(owner, 0, Packet_Type.STREAM_RESEND, 1)
 
     def test_resend_blocked_by_existing_track_data(self) -> None:
         m = _ConcreteQueueMixin()
         owner: dict = {"track_data": {5}}
-        assert not m._track_main_packet_once(owner, Packet_Type.STREAM_RESEND, 5)
+        assert not m._track_main_packet_once(owner, 0, Packet_Type.STREAM_RESEND, 5)
 
     def test_stream_fin_tracked_once(self) -> None:
         m = _ConcreteQueueMixin()
         owner: dict = {}
-        assert m._track_main_packet_once(owner, Packet_Type.STREAM_FIN, 0)
-        assert not m._track_main_packet_once(owner, Packet_Type.STREAM_FIN, 0)
+        assert m._track_main_packet_once(owner, 0, Packet_Type.STREAM_FIN, 0)
+        assert not m._track_main_packet_once(owner, 0, Packet_Type.STREAM_FIN, 0)
 
     def test_syn_type_tracked_once(self) -> None:
         m = _ConcreteQueueMixin()
         owner: dict = {}
-        assert m._track_main_packet_once(owner, Packet_Type.STREAM_SYN, 0)
-        assert not m._track_main_packet_once(owner, Packet_Type.STREAM_SYN, 0)
+        assert m._track_main_packet_once(owner, 0, Packet_Type.STREAM_SYN, 0)
+        assert not m._track_main_packet_once(owner, 0, Packet_Type.STREAM_SYN, 0)
 
     def test_stream_data_ack_tracked_once(self) -> None:
         m = _ConcreteQueueMixin()
         owner: dict = {}
-        assert m._track_main_packet_once(owner, Packet_Type.STREAM_DATA_ACK, 7)
-        assert not m._track_main_packet_once(owner, Packet_Type.STREAM_DATA_ACK, 7)
+        assert m._track_main_packet_once(owner, 0, Packet_Type.STREAM_DATA_ACK, 7)
+        assert not m._track_main_packet_once(owner, 0, Packet_Type.STREAM_DATA_ACK, 7)
 
     def test_stream_data_tracked_once(self) -> None:
         m = _ConcreteQueueMixin()
         owner: dict = {}
-        assert m._track_main_packet_once(owner, Packet_Type.STREAM_DATA, 3)
-        assert not m._track_main_packet_once(owner, Packet_Type.STREAM_DATA, 3)
+        assert m._track_main_packet_once(owner, 0, Packet_Type.STREAM_DATA, 3)
+        assert not m._track_main_packet_once(owner, 0, Packet_Type.STREAM_DATA, 3)
 
     def test_other_type_always_returns_true(self) -> None:
         m = _ConcreteQueueMixin()
         owner: dict = {}
-        assert m._track_main_packet_once(owner, Packet_Type.PING, 0)
-        assert m._track_main_packet_once(owner, Packet_Type.PING, 0)
+        assert m._track_main_packet_once(owner, 0, Packet_Type.PING, 0)
+        assert m._track_main_packet_once(owner, 0, Packet_Type.PING, 0)
 
 
 class TestTrackStreamPacketOnce:
@@ -1159,7 +1161,7 @@ class TestDnsPacketParserInit:
         logger = MagicMock()
         p = DnsPacketParser(logger=logger, encryption_key="k", encryption_method=99)
         assert p.encryption_method == 1
-        logger.error.assert_called_once()
+        logger.debug.assert_called_once()
 
 
 class TestDeriveKey:
@@ -1412,7 +1414,14 @@ class TestVpnHeader:
 
     def test_parse_vpn_header_bytes_session_init(self) -> None:
         p = _make_parser(method=0)
-        raw = bytes([5, Packet_Type.SESSION_INIT])
+        # SESSION_INIT header: session_id + packet_type + session_cookie + check_byte
+        raw = p.create_vpn_header(
+            session_id=5,
+            packet_type=Packet_Type.SESSION_INIT,
+            base36_encode=False,
+            base_encode=False,
+        )
+        assert isinstance(raw, bytes)
         parsed = p.parse_vpn_header_bytes(raw)
         assert parsed is not None
         assert parsed["session_id"] == 5
@@ -1430,24 +1439,36 @@ class TestVpnHeader:
 
     def test_parse_vpn_header_bytes_with_return_length(self) -> None:
         p = _make_parser(method=0)
-        raw = bytes([3, Packet_Type.PING])
+        # PING header: session_id + packet_type + session_cookie + check_byte = 4 bytes
+        raw = p.create_vpn_header(
+            session_id=3,
+            packet_type=Packet_Type.PING,
+            base36_encode=False,
+            base_encode=False,
+        )
+        assert isinstance(raw, bytes)
         parsed, length = p.parse_vpn_header_bytes(raw, return_length=True)
         assert parsed is not None
-        assert length == 2
+        assert length == p.get_vpn_header_raw_size(Packet_Type.PING)
 
     def test_parse_vpn_header_stream_data(self) -> None:
         p = _make_parser(method=0)
-        raw = bytes([
-            1,  # session_id
-            Packet_Type.STREAM_DATA,
-            0, 42,  # stream_id = 42
-            0, 100,  # sequence_num = 100
-            0,  # fragment_id
-            1,  # total_fragments
-            0, 50,  # total_data_length = 50
-            0,  # compression_type
-        ])
+        # Use create_vpn_header so session_cookie + check_byte are included correctly
+        raw = p.create_vpn_header(
+            session_id=1,
+            packet_type=Packet_Type.STREAM_DATA,
+            base36_encode=False,
+            stream_id=42,
+            sequence_num=100,
+            fragment_id=0,
+            total_fragments=1,
+            total_data_length=50,
+            compression_type=0,
+            base_encode=False,
+        )
+        assert isinstance(raw, bytes)
         parsed = p.parse_vpn_header_bytes(raw)
+        assert parsed is not None
         assert parsed["stream_id"] == 42
         assert parsed["sequence_num"] == 100
 
@@ -2778,7 +2799,7 @@ class TestVpnHeaderBaseEncodeFalse:
             base_encode=False,
         )
         assert isinstance(result, bytes)
-        assert len(result) == 2  # just session_id + packet_type for PING
+        assert len(result) == 4  # session_id + packet_type + session_cookie + check_byte
 
 
 class TestVpnResponseMultiChunk:

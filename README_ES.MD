@@ -1,4 +1,4 @@
-# Proyecto MasterDnsVPN 🚀
+﻿# Proyecto MasterDnsVPN 🚀
 
 ## [نسخه فارسی](https://github.com/masterking32/MasterDnsVPN/blob/main/README_FA.MD) | [English Version](https://github.com/masterking32/MasterDnsVPN/blob/main/README.MD) | [Spanish Version](https://github.com/masterking32/MasterDnsVPN/blob/main/README_ES.MD)
 
@@ -7,6 +7,10 @@ El proyecto **MasterDnsVPN** es una solución robusta, de bajo overhead y avanza
 Este sistema está diseñado específicamente para sortear firewalls estrictos y restricciones de red severas donde los protocolos VPN tradicionales, o incluso servicios de tunelización DNS conocidos como **DNSTT** y **SlipStream**, están bloqueados o resultan inútiles debido a grandes interrupciones y limitaciones de los resolutores DNS.
 
 El objetivo principal de **MasterDnsVPN** es proveer un túnel seguro, confiable y flexible que minimice el overhead del protocolo y entregue un rendimiento estable y aceptable incluso en redes que sufren alta pérdida de paquetes o limitaciones estrictas de MTU.
+
+---
+
+❌ Descargo de responsabilidad: Este proyecto está destinado únicamente a fines educativos e investigativos. Su uso puede alterar las estructuras de la red, y está prohibido utilizarlo para eludir las leyes de los países. No asumimos ninguna responsabilidad por tales acciones.
 
 ---
 
@@ -207,7 +211,7 @@ Si iniciaste tu servidor usando el script de Instalación Rápida (Paso 2.1), so
 
 1. **`ENCRYPTION_KEY`**: Pegá la clave de cifrado que se mostró en la terminal de tu servidor (o que se encuentra en `encrypt_key.txt` en el servidor). ¡La conexión será rechazada sin esta clave!
 2. **`DOMAINS`**: Ingresá tu subdominio de túnel exactamente (por ej., `["v.example.com"]`). **Nota:** Por ahora, proporcioná únicamente UN dominio. El soporte para múltiples dominios se finalizará en futuras actualizaciones.
-3. **`client_resolvers.txt`**: Archivo de resolutores (una IP por línea, por ej. `8.8.8.8`). Las líneas vacías o inválidas se omiten. Si falta el archivo o no contiene IPs válidas, el cliente no inicia.
+3. **`client_resolvers.txt`**: Archivo de resolutores con formatos `IP`, `IP:PORT`, `CIDR` y `CIDR:PORT` (por ej. `8.8.8.8`, `8.8.8.8:5353`, `1.1.1.0/24`, `1.1.1.0/24:99`). Las líneas vacías o inválidas se omiten. Si falta el archivo o no contiene entradas válidas, el cliente no inicia.
 
 > ⚠️ **Nota Importante 1 (Cifrado):** El script de instalación rápida configura el cifrado del servidor en `XOR` por defecto. Asegurate de que `DATA_ENCRYPTION_METHOD` en la configuración de tu cliente también esté en `1` para que coincida con el servidor.
 >
@@ -225,86 +229,109 @@ Si **no** usaste el script del Paso 2.1 y querés configurar el servidor manualm
 
 ## Sección 3.3: Variables de Configuración del Cliente (`client_config.toml`) 📖
 
-La siguiente tabla explica todas las opciones disponibles y sus funciones en el cliente:
+La siguiente tabla está sincronizada con `client_config.toml.simple` y con el comportamiento actual de `client.py`:
 
 | Parámetro | Valor Predeterminado | Valores Aceptados | Descripción |
 |---------|--------------|------------------|-------|
-| `PROTOCOL_TYPE` | `"SOCKS5"` | `"SOCKS5"`, `"TCP"` | **Tipo de Protocolo del Túnel:**<br><br>• `"SOCKS5"`:<br> Altamente recomendado. El código SOCKS de este proyecto está muy optimizado para máxima velocidad.<br>• `"TCP"`:<br> Se usa para reenviar puertos/protocolos en bruto como VLESS u OpenVPN (tiene mayor overhead). <br>**Nota**: Debe coincidir con la configuración del servidor. |
-| `DOMAINS` | `["v.domain.com"]` | Lista de valores (por ej., `["sub.site.com"]`) | El subdominio `NS` configurado en la Sección 1. Debe ser exactamente el mismo en el Cliente y en el Servidor. <br> ¡Por ahora, evitá agregar múltiples dominios! |
-| `DATA_ENCRYPTION_METHOD` | `1` | `0` a `5` | **Algoritmo de Cifrado:**<br><br>`0`: Desactivado (Sin seguridad)<br>`1`: Algoritmo XOR (Recomendado - Alta velocidad, seguridad media)<br>`2`: ChaCha20<br>`3`: AES-128-GCM<br>`4`: AES-192-GCM<br>`5`: AES-256-GCM (Máxima seguridad, menor velocidad) |
-| `ENCRYPTION_KEY` | `""` | Cadena de texto | Clave de cifrado que debe coincidir con el servidor. Las conexiones fallan sin esta clave. |
-| `BASE_ENCODE_DATA` | `false` | `true` o `false` | Aplica una codificación base compatible con DNS antes del transporte. Normalmente dejalo en `false`; activarlo agrega overhead y puede bajar el rendimiento. |
-| `LISTEN_IP` | `"0.0.0.0"` | IP válida (por ej., `127.0.0.1`) | Dirección IP local en la que escucha el cliente.<br><br>• `"127.0.0.1"`: Solo el dispositivo local (más seguro)<br>• `"0.0.0.0"`: Accesible por todos los dispositivos de tu red local |
-| `LISTEN_PORT` | `1080` | Número de puerto (por ej., `1080`) | El puerto en el que escucha el cliente para que tus apps (Navegador, Telegram) puedan conectarse. |
-| `SOCKS5_AUTH` | `true` | `true` o `false` | Habilita la autenticación local de `SOCKS5`. (Si es `false`, conectarse a tu proxy no requiere usuario/contraseña). **Nota:** Esta configuración es únicamente para la seguridad de tu máquina local y no tiene nada que ver con la conexión del túnel. Solo funciona si el protocolo está configurado en `SOCKS5`. |
-| `SOCKS5_USER` | `"master_dns_vpn"` | Cadena personalizada | Nombre de usuario para el proxy SOCKS local (si `SOCKS5_AUTH` está activo). |
-| `SOCKS5_PASS` | `"master_dns_vpn"` | Cadena personalizada | Contraseña para el proxy SOCKS local (si `SOCKS5_AUTH` está activo). |
-| `client_resolvers.txt` (archivo) | Incluido en ZIP release | Una IP por línea | La fuente de resolutores se movió del config al archivo. Las líneas vacías/inválidas se omiten. Si falta el archivo o no hay IPs válidas, el cliente finaliza con error. |
-| `PACKET_DUPLICATION_COUNT` | `3` | Entero positivo (`1` para desactivar, `2`, `3`+) | Cantidad de veces que se duplica un paquete. Por ejemplo, `3` significa que cada paquete se envía simultáneamente a 3 resolutores distintos. Se acepta la primera respuesta. Consume ancho de banda pero minimiza las pérdidas en redes muy perturbadas. |
-| `RESOLVER_BALANCING_STRATEGY` | `1` | `1`, `2`, `3` | **Estrategia de Balanceo de Carga:**<br><br>`1`: **Aleatorio**: Selecciona un servidor al azar.<br>`2`: **Round-Robin**: Rota secuencialmente por la lista.<br>`3`: **Menor Pérdida**: Selecciona de forma inteligente el servidor con menor pérdida de paquetes. |
-| `MIN_UPLOAD_MTU` | `40` | Entero (Bytes) | MTU mínimo de subida que debe tener un resolutor para ser utilizado. Los resolutores por debajo de este umbral son descartados. Establecé en `0` para desactivar. Ver Sección 3.5 para más detalles. |
-| `MIN_DOWNLOAD_MTU` | `40` | Entero (Bytes) | MTU mínimo de bajada que debe tener un resolutor para ser utilizado. Los resolutores por debajo de este umbral son descartados. Establecé en `0` para desactivar. Ver Sección 3.5. |
-| `MAX_UPLOAD_MTU` | `220` | Entero (Bytes) | MTU máximo de subida utilizado durante la fase de sondeo automático. Debe ser menor al MTU confiable más grande de tu red. Ver Sección 3.5. |
-| `MTU_TEST_RETRIES` | `2` | Entero (por ej., `1`, `2`, `3`+) | Cantidad de reintentos si falla una prueba de MTU. Se recomienda aumentar a 3 o 4 en redes con filtrado intensivo para evitar descartar servidores temporalmente lentos.<br>**Advertencia:** Aumenta considerablemente el tiempo de inicio inicial, pero mejora enormemente la precisión. |
-| `MTU_TEST_TIMEOUT` | `1.0` | Float (Segundos) | Duración del tiempo de espera (en segundos) para una respuesta de MTU. Aumentá a 2.0 o 3.0 en redes de alta latencia.<br>**Advertencia:** Un timeout mayor implica un arranque más lento si los paquetes se pierden. |
-| `MAX_CONNECTION_ATTEMPTS` | `10` | Entero (por ej., `10`, `20`, `30`) | Máximo de intentos que hace el cliente para establecer una Sesión. En redes severamente perturbadas, podría ser necesario aumentar esto a 20 o 30 para forzar una conexión. |
-| `ARQ_WINDOW_SIZE` | `3000` | Entero (por ej., `300`, `1000`, `3000`) | Tamaño de ventana (cantidad de paquetes sin confirmar permitidos en vuelo). Debe escalar con la RAM del Cliente. 3000 es un buen equilibrio. Bajá a 300 para dispositivos con RAM extremadamente limitada, aunque puede causar fluctuaciones. |
-| `ARQ_INITIAL_RTO` | `1.0` | Float (Segundos) | Tiempo de Retransmisión Inicial para ARQ. Tiempo que el cliente espera un ACK antes de reenviar. Aumentá en redes de alta latencia, pero ralentiza la recuperación ante paquetes perdidos. |
-| `ARQ_MAX_RTO` | `3.0` | Float (Segundos) | Límite máximo de RTO con backoff durante las retransmisiones. Configurar esto en 5.0 o 10.0 podría ser necesario en redes muy malas, pero valores extremos retrasan significativamente la recuperación. |
-| `DNS_QUERY_TIMEOUT` | `5.0` | Float (Segundos) | Tiempo de espera para una respuesta DNS estándar antes de considerarla perdida y reintentar. |
-| `NUM_RX_WORKERS` | `2` | Entero (por ej., `1`, `2`, `4`) | Cantidad de trabajadores de Recepción (RX) que procesan los paquetes entrantes. Valores mayores ayudan en redes rápidas pero consumen más CPU. |
-| `NUM_DNS_WORKERS` | `3` | Entero (por ej., `1`, `3`, `5`) | Cantidad de trabajadores TX que envían consultas DNS. Valores mayores mejoran la concurrencia pero consumen más CPU. |
-| `SOCKET_BUFFER_SIZE` | `8388608` | Entero (Bytes) | Tamaño del buffer del socket UDP. Determina cuántos datos entrantes almacena en buffer el sistema operativo antes de descartar paquetes. Se recomiendan valores altos para entornos de alto tráfico; requiere RAM suficiente. |
-| `LOG_LEVEL` | `"INFO"` | `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`, `"CRITICAL"` | Nivel de detalle de los registros del cliente. `DEBUG` ayuda a solucionar problemas pero genera registros masivos. `INFO` o `WARNING` es mejor para uso diario. |
-| `CONFIG_VERSION` | `3.0` | Número (float/int) | Versión del esquema de configuración usada para validar compatibilidad con los valores actuales del cliente. |
+| `PROTOCOL_TYPE` | `"SOCKS5"` | `"SOCKS5"`, `"TCP"` | Tipo de túnel entre cliente y servidor. `SOCKS5` es el modo principal y optimizado para navegador y apps. `TCP` se usa como túnel TCP bruto y normalmente tiene más overhead. Debe coincidir con el servidor. |
+| `DOMAINS` | `["v.domain.com"]` | Lista de cadenas | Dominio o subdominio sobre el que el cliente envía consultas. Debe coincidir exactamente con `DOMAIN` del servidor y con tu registro `NS`. |
+| `DATA_ENCRYPTION_METHOD` | `1` | `0` a `5` | Algoritmo de cifrado del payload del túnel. `0` apagado, `1` XOR, `2` ChaCha20, `3` AES-128-GCM, `4` AES-192-GCM, `5` AES-256-GCM. Debe coincidir con el servidor. |
+| `ENCRYPTION_KEY` | `""` | Cadena | Clave compartida entre cliente y servidor. Sin ella no se crea la sesión. |
+| `BASE_ENCODE_DATA` | `false` | `true` o `false` | Si está activo, el payload se convierte a un formato base-safe antes de viajar por DNS. Mejora compatibilidad pero aumenta overhead y uso de CPU. |
+| `LISTEN_IP` | `"0.0.0.0"` | IP válida | Dirección donde escucha el proxy local del cliente. `127.0.0.1` expone solo al mismo equipo; `0.0.0.0` también lo expone a la red local. |
+| `LISTEN_PORT` | `1080` | Puerto válido | Puerto al que se conectan las aplicaciones locales. |
+| `SOCKS5_AUTH` | `true` | `true` o `false` | Activa o desactiva la autenticación del proxy SOCKS5 local. Solo aplica a quienes usan este proxy local; no es autenticación contra el servidor. |
+| `SOCKS5_USER` | `"master_dns_vpn"` | Cadena | Usuario del proxy local cuando `SOCKS5_AUTH` está activo. |
+| `SOCKS5_PASS` | `"master_dns_vpn"` | Cadena | Contraseña del proxy local cuando `SOCKS5_AUTH` está activo. |
+| `SOCKS_HANDSHAKE_TIMEOUT` | `300.0` | Float (Segundos) | Tiempo máximo permitido para que un stream SOCKS local complete su activación antes de abortarlo. En enlaces lentos o con pérdida alta conviene mantenerlo algo más alto. |
+| `client_resolvers.txt` (archivo) | Junto al binario/ZIP | `IP`, `IP:PORT`, `CIDR`, `CIDR:PORT` por línea | Fuente de resolutores. Las líneas vacías o inválidas se ignoran. Si el archivo falta o no contiene entradas válidas, el cliente no arranca. |
+| `PACKET_DUPLICATION_COUNT` | `2` | Entero positivo | Cuántas veces se duplica cada query sobre resolutores distintos. `1` significa sin duplicación. `2` es el punto de partida recomendado en enlaces inestables. |
+| `STREAM_RESOLVER_FAILOVER_RESEND_THRESHOLD` | `2` | Entero positivo | Si un stream acumula esta cantidad de `STREAM_RESEND` consecutivos, el cliente cambia el resolutor preferido de ese stream a otro resolutor sano. |
+| `STREAM_RESOLVER_FAILOVER_COOLDOWN` | `1.0` | Float (Segundos) | Tiempo mínimo entre dos cambios de resolutor preferido para el mismo stream. Evita thrashing entre resolutores. |
+| `MAX_PACKETS_PER_BATCH` | `100` | Entero positivo | Límite superior para fusionar control blocks pequeños en una sola operación DNS. El valor real en runtime también queda limitado por el MTU negociado. `1` lo desactiva. |
+| `RESOLVER_BALANCING_STRATEGY` | `2` | `1`, `2`, `3`, `4` | Método de selección de resolutores: `1` aleatorio, `2` round-robin, `3` menor pérdida, `4` menor latencia. |
+| `DNS_QUERY_TIMEOUT` | `5.0` | Float (Segundos) | Timeout base para una consulta DNS normal. Si la respuesta no llega dentro de esta ventana, entra en la contabilidad de salud como timeout. |
+| `UPLOAD_COMPRESSION_TYPE` | `0` | `0`, `1`, `2`, `3` | Compresión de payload cliente -> servidor: `0` OFF, `1` ZSTD, `2` LZ4, `3` ZLIB. Los paquetes muy pequeños normalmente no se comprimen para ahorrar CPU. |
+| `DOWNLOAD_COMPRESSION_TYPE` | `0` | `0`, `1`, `2`, `3` | Compresión de payload servidor -> cliente con el mismo enum anterior. Se negocia al crear la sesión. |
+| `MIN_UPLOAD_MTU` | `70` | Entero (Bytes) | MTU mínimo aceptable de subida. Un resolutor por debajo de este valor se descarta. `0` desactiva este límite. |
+| `MIN_DOWNLOAD_MTU` | `150` | Entero (Bytes) | MTU mínimo aceptable de bajada. Los resolutores por debajo de este valor quedan fuera. |
+| `MAX_UPLOAD_MTU` | `150` | Entero (Bytes) | Tope inicial desde el que arranca la búsqueda binaria de MTU de subida. Conviene mantenerlo conservador para no alargar el arranque. |
+| `MAX_DOWNLOAD_MTU` | `200` | Entero (Bytes) | Tope inicial de la prueba de MTU de bajada. Si es demasiado alto, el arranque se vuelve más lento e inestable. |
+| `MTU_TEST_RETRIES` | `2` | Entero positivo | Número de reintentos por prueba MTU antes de declarar fallo. Aumentarlo mejora la precisión en redes malas pero alarga el arranque. |
+| `MTU_TEST_TIMEOUT` | `2.0` | Float (Segundos) | Timeout de cada prueba MTU. Si los resolutores responden lento, conviene subirlo un poco. |
+| `AUTO_SCALE_PROFILES` | `true` | `true` o `false` | Ajusta automáticamente algunos parámetros de startup y recheck según el tamaño de la lista de dominios/resolutores. |
+| `MTU_TEST_PARALLELISM` | `6` | Entero positivo | Cantidad de pares resolutor-dominio probados en paralelo durante el escaneo MTU inicial. Más alto acelera el arranque pero sube la carga temporal de CPU/red. |
+| `SAVE_MTU_SERVERS_TO_FILE` | `false` | `true` o `false` | Si está activo, guarda en archivo los resolutores que superaron la validación MTU. |
+| `MTU_SERVERS_FILE_NAME` | `"masterdnsvpn_success_test_{time}.txt"` | Cadena | Nombre del archivo de salida de resultados MTU. Si contiene `{time}`, se reemplaza por timestamp. |
+| `MTU_SERVERS_FILE_FORMAT` | `"{IP} - UP: {UP_MTU} DOWN: {DOWN-MTU}"` | Cadena | Formato por línea para cada resolutor válido. Soporta placeholders como `{IP}`, `{UP_MTU}`, `{DOWN-MTU}`, `{DOMAIN}` y `{TIME}`. |
+| `MTU_USING_SECTION_SEPARATOR_TEXT` | `"---- Active MTU Testing Results ----"` | Cadena | Texto separador opcional que se añade una sola vez al terminar el escaneo MTU inicial. Cadena vacía lo desactiva. |
+| `MTU_REMOVED_SERVER_LOG_FORMAT` | `"IP {IP} removed from list at {TIME} due to {CAUSE}"` | Cadena | Formato de línea que se escribe cuando un resolutor se desactiva en runtime. |
+| `MTU_ADDED_SERVER_LOG_FORMAT` | `"Server {IP} re-added at {TIME} (UP MTU: {UP_MTU}, DOWN MTU: {DOWN_MTU})"` | Cadena | Formato de línea que se escribe cuando un resolutor inactivo vuelve a activarse correctamente. |
+| `AUTO_DISABLE_TIMEOUT_SERVERS` | `true` | `true` o `false` | Si un par resolutor-dominio presenta 100% timeouts dentro de la ventana configurada y aún existe otro resolutor activo, se desactiva temporalmente. |
+| `AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS` | `120` | Float/Entero (Segundos) | Ventana deslizante usada por la lógica de salud para evaluar timeouts en runtime. |
+| `AUTO_DISABLE_TIMEOUT_MIN_OBSERVATIONS` | `3` | Entero positivo | Cantidad mínima de observaciones timeout/success antes de permitir que el cliente desactive un resolutor-dominio. |
+| `AUTO_DISABLE_CHECK_INTERVAL_SECONDS` | `1.0` | Float (Segundos) | Intervalo del worker de salud que revisa la ventana de timeouts. |
+| `RECHECK_INACTIVE_SERVERS_ENABLED` | `true` | `true` o `false` | Activa el recheck periódico en segundo plano de resolutores rechazados por MTU o desactivados en runtime. |
+| `RECHECK_INACTIVE_INTERVAL_SECONDS` | `300` | Float/Entero (Segundos) | Intervalo entre ciclos completos de recheck de resolutores inactivos. |
+| `RECHECK_SERVER_INTERVAL_SECONDS` | `3.0` | Float (Segundos) | Pausa entre dos pruebas consecutivas dentro del worker de recheck. |
+| `RECHECK_BATCH_SIZE` | `5` | Entero positivo | Máximo de pares resolutor-dominio inactivos probados en cada ciclo de recheck. |
+| `MAX_CONNECTION_ATTEMPTS` | `10` | Entero positivo | Cantidad de intentos para crear la sesión inicial. Si la red está muy dañada, puede subirse. |
+| `ARQ_WINDOW_SIZE` | `1000` | Entero positivo | Tamaño de ventana del ARQ de datos. Valores mayores permiten más datos en vuelo pero consumen más RAM. |
+| `ARQ_INITIAL_RTO` | `0.5` | Float (Segundos) | Timeout inicial de retransmisión para datos en ARQ. |
+| `ARQ_MAX_RTO` | `3.0` | Float (Segundos) | Límite máximo de backoff para retransmisiones de datos. |
+| `ARQ_CONTROL_INITIAL_RTO` | `0.5` | Float (Segundos) | Timeout inicial para paquetes de control confiables como SYN/FIN/RST y mensajes de control SOCKS. |
+| `ARQ_CONTROL_MAX_RTO` | `3.0` | Float (Segundos) | Límite máximo de backoff para el plano de control. |
+| `ARQ_CONTROL_MAX_RETRIES` | `80` | Entero positivo | Tope de retries de control antes de abortar el camino del stream/sesión. |
+| `NUM_RX_WORKERS` | `2` | Entero positivo | Cantidad de workers de recepción y parseo de respuestas entrantes. |
+| `NUM_DNS_WORKERS` | `2` | Entero positivo | Cantidad de workers de envío de consultas DNS. |
+| `CPU_WORKER_THREADS` | `0` | `-1`, `0`, entero positivo | Tamaño del pool de hilos para parse/codec/compresión. `0` usa auto-detección según la cantidad real de núcleos; `-1` lo desactiva. |
+| `RX_SEMAPHORE_LIMIT` | `256` | Entero positivo | Límite de operaciones RX en vuelo. Más alto reduce backpressure y aumenta uso de RAM. |
+| `MAX_CLOSED_STREAM_RECORDS` | `2000` | Entero positivo | Límite de registros de streams cerrados usados para evitar cierres duplicados y carreras tardías de limpieza. |
+| `SOCKET_BUFFER_SIZE` | `8388608` | Entero (Bytes) | Tamaño del buffer UDP del socket del cliente. Ayuda en ráfagas y pérdida alta, pero consume más RAM. |
+| `LOG_LEVEL` | `"INFO"` | `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`, `"CRITICAL"` | Nivel de detalle de los logs del cliente. |
+| `CONFIG_VERSION` | `5.0` | Número | Versión del esquema de configuración usada para comprobar compatibilidad con el código actual. |
 
 ---
-
-## Sección 3.3.1: Actualizaciones Recientes de Config y Runtime (Importante)
-
-Estos cambios ya están reflejados en los archivos `.simple` y en el código actual:
-
-- La fuente de resolutores se movió de `RESOLVER_DNS_SERVERS` a `client_resolvers.txt` (una IP por línea).
-- `MTU_TEST_PARALLELISM` permite pruebas MTU en paralelo durante el inicio.
-- `AUTO_SCALE_PROFILES` ajusta automáticamente parámetros MTU/recheck según el tamaño de la lista.
-- Controles de salud de resolutores en runtime: `AUTO_DISABLE_TIMEOUT_SERVERS`, `AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS`, `AUTO_DISABLE_TIMEOUT_MIN_OBSERVATIONS`, `AUTO_DISABLE_CHECK_INTERVAL_SECONDS`.
-- Rechequeo en segundo plano: `RECHECK_INACTIVE_SERVERS_ENABLED`, `RECHECK_INACTIVE_INTERVAL_SECONDS`, `RECHECK_SERVER_INTERVAL_SECONDS`, `RECHECK_BATCH_SIZE`.
-- Logs de resultados MTU en archivo: `SAVE_MTU_SERVERS_TO_FILE`, `MTU_SERVERS_FILE_NAME`, `MTU_SERVERS_FILE_FORMAT`, `MTU_USING_SECTION_SEPARATOR_TEXT`, `MTU_REMOVED_SERVER_LOG_FORMAT`, `MTU_ADDED_SERVER_LOG_FORMAT`.
-- Compresión de paquetes: `UPLOAD_COMPRESSION_TYPE` y `DOWNLOAD_COMPRESSION_TYPE` (0=OFF, 1=ZSTD, 2=LZ4, 3=ZLIB).
-- Empaquetado de paquetes de control pequeños con `MAX_PACKETS_PER_BATCH` para reducir consultas DNS.
-- Ajustes de overhead SOCKS/control: `SOCKS_HANDSHAKE_TIMEOUT`, `ARQ_CONTROL_INITIAL_RTO`, `ARQ_CONTROL_MAX_RTO`, `ARQ_CONTROL_MAX_RETRIES`.
-- Controles de recursos: `CPU_WORKER_THREADS`, `RX_SEMAPHORE_LIMIT`, `MAX_CLOSED_STREAM_RECORDS`.
-- En servidor se añadieron/expandieron `SOCKS_HANDSHAKE_TIMEOUT`, `ARQ_CONTROL_*`, `MAX_SESSIONS`, `CPU_WORKER_THREADS` y fallback seguro de compresión.
 
 ## Sección 3.4: Variables de Configuración del Servidor (`server_config.toml`) 📖
 
+La siguiente tabla está sincronizada con `server_config.toml.simple` y con el comportamiento actual de `server.py`:
+
 | Parámetro | Valor Predeterminado | Valores Aceptados | Descripción |
 |---------|--------------|------------------|-------|
-| `UDP_HOST` | `"0.0.0.0"` | IP válida | Dirección IP a la que el servidor se vincula para escuchar consultas DNS. |
-| `UDP_PORT` | `53` | Número de puerto | Puerto en el que escucha el servidor. **Nota:** Debe ser 53 para que la resolución DNS real funcione. |
-| `DOMAIN` | `["v.domain.com"]` | Lista de valores | El dominio para el que este servidor es autoritativo. Debe coincidir con tu registro `NS`. **¡Por ahora, evitá configurar múltiples dominios!** |
-| `DATA_ENCRYPTION_METHOD` | `1` | `0` a `5` | **Algoritmo de Cifrado:**<br><br>`0`: Desactivado<br>`1`: XOR (Recomendado)<br>`2`: ChaCha20<br>`3`: AES-128-GCM<br>`4`: AES-192-GCM<br>`5`: AES-256-GCM<br>**Importante:** Debe coincidir estrictamente con el `DATA_ENCRYPTION_METHOD` del Cliente. |
-| `PROTOCOL_TYPE` | `"SOCKS5"` | `"SOCKS5"`, `"TCP"` | **Tipo de Protocolo del Túnel:**<br><br>• `"SOCKS5"`:<br> Altamente recomendado (Optimizado).<br>• `"TCP"`:<br> Reenvío TCP en bruto.<br>**Nota**: Debe coincidir con la configuración del Cliente. |
-| `USE_EXTERNAL_SOCKS5` | `false` | `true` o `false` | **Usar Proxy SOCKS5 Externo:**<br><br>• `false` (Proxy Interno): El servidor Python gestiona nativamente el proxy SOCKS directamente al destino (Más rápido/Menos recursos).<br>• `true` (Externo): El servidor se conecta a un proxy de terceros (Xray, Tor, Dante) que corre en `FORWARD_IP:FORWARD_PORT`.<br>**Recomendado:** `PROTOCOL_TYPE="SOCKS5"` y `USE_EXTERNAL_SOCKS5=false`. |
-| `FORWARD_IP` | `"127.0.0.1"` | IP válida | Dirección IP del proxy externo o destino TCP en bruto. Se usa solo si `USE_EXTERNAL_SOCKS5=true` o el protocolo es `TCP`. |
-| `FORWARD_PORT` | `1080` | Número de puerto | Puerto del proxy/destino externo. |
-| `SOCKS5_AUTH` | `false` | `true` o `false` | Habilita la lógica de autenticación para el proxy SOCKS5 *Externo*. Solo se usa si `USE_EXTERNAL_SOCKS5=true`. |
-| `SOCKS5_USER` | `"admin"` | Cadena personalizada | Nombre de usuario para el proxy SOCKS externo. |
-| `SOCKS5_PASS` | `"123456"` | Cadena personalizada | Contraseña para el proxy SOCKS externo. |
-| `SUPPORTED_UPLOAD_COMPRESSION_TYPES` | `[0, 1, 2, 3]` | Lista de `0..3` | Tipos de compresión permitidos por el servidor para subida. Valores inválidos se eliminan y `0` (OFF) se garantiza siempre como fallback. |
-| `SUPPORTED_DOWNLOAD_COMPRESSION_TYPES` | `[0, 1, 2, 3]` | Lista de `0..3` | Tipos de compresión permitidos por el servidor para bajada. Valores inválidos se eliminan y `0` (OFF) se garantiza siempre como fallback. |
-| `ARQ_INITIAL_RTO` | `1.0` | Float (Segundos) | Timeout ARQ inicial. Ver tabla de configuración del cliente para más detalles. |
-| `ARQ_MAX_RTO` | `3.0` | Float (Segundos) | Límite máximo de retransmisión ARQ. Ver tabla del cliente. |
-| `ARQ_WINDOW_SIZE` | `3000` | Entero | Tamaño de ventana del lado del servidor. Debe escalar con la RAM del Servidor. |
-| `MAX_CONCURRENT_REQUESTS` | `1000` | Entero | Máximo de consultas DNS asíncronas concurrentes gestionadas por el servidor. 5000 para servidores potentes, 1000 para los más débiles. |
-| `MAX_PACKETS_PER_BATCH` | `20` | Entero | Cantidad máxima de paquetes de control pequeños fusionados. De 5 a 20 es ideal. `1` desactiva el empaquetado (reduce latencia pero aumenta la carga de CPU). |
-| `SOCKET_BUFFER_SIZE` | `8388608` | Entero (Bytes) | Tamaño del buffer UDP del socket del servidor. Se recomiendan valores altos. |
-| `LOG_LEVEL` | `"INFO"` | `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`, `"CRITICAL"` | Nivel de detalle de los registros del servidor. |
-| `SESSION_TIMEOUT` | `300` | Entero (Segundos) | Duración de inactividad antes de que una Sesión se considere expirada y se termine. 300 (5 minutos) es un buen equilibrio. |
-| `SESSION_CLEANUP_INTERVAL` | `60` | Entero (Segundos) | Frecuencia con la que el trabajador en segundo plano analiza y elimina sesiones muertas para liberar memoria. |
-| `CONFIG_VERSION` | `2.0` | Número (float/int) | Versión del esquema de configuración usada para validar compatibilidad con los valores actuales del servidor. |
-
----
+| `UDP_HOST` | `"0.0.0.0"` | IP válida | Dirección en la que el servidor escucha consultas DNS. |
+| `UDP_PORT` | `53` | Puerto válido | Puerto DNS del servidor. En producción normalmente debe ser 53. |
+| `DOMAIN` | `["v.domain.com"]` | Lista de cadenas | Dominios para los que el servidor es autoritativo. Debe coincidir con `DOMAINS` del cliente y con los registros `NS`. |
+| `PROTOCOL_TYPE` | `"SOCKS5"` | `"SOCKS5"`, `"TCP"` | Tipo de forwarding del servidor. `SOCKS5` es el modo principal y optimizado. `TCP` es el túnel TCP bruto. Debe coincidir con el cliente. |
+| `USE_EXTERNAL_SOCKS5` | `false` | `true` o `false` | Si es `false`, el servidor conecta directo al destino. Si es `true`, encadena tráfico a un upstream SOCKS5 externo en `FORWARD_IP:FORWARD_PORT`. |
+| `FORWARD_IP` | `"127.0.0.1"` | IP válida | Dirección del upstream externo en modo `USE_EXTERNAL_SOCKS5=true` o del destino en modo `TCP`. |
+| `FORWARD_PORT` | `1080` | Puerto válido | Puerto del upstream externo o del destino. |
+| `SOCKS5_AUTH` | `false` | `true` o `false` | Si está activo, el servidor usa usuario y contraseña al conectarse al upstream SOCKS5 externo. |
+| `SOCKS5_USER` | `"admin"` | Cadena | Usuario del SOCKS5 externo. |
+| `SOCKS5_PASS` | `"123456"` | Cadena | Contraseña del SOCKS5 externo. |
+| `SOCKS_HANDSHAKE_TIMEOUT` | `180.0` | Float (Segundos) | Tiempo máximo permitido para activar streams que están en connect o handshake. Si upstream o resolutores son lentos, evita cortar streams sanos demasiado pronto. |
+| `MAX_CONCURRENT_SOCKS_CONNECTS` | `16` | Entero positivo | Límite de streams simultáneos en fase `CONNECTING` o `SOCKS_CONNECTING`. No limita streams ya conectados; solo controla las ráfagas de nuevas conexiones. |
+| `INVALID_COOKIE_ERROR_THRESHOLD` | `10` | Entero positivo | Si para un `(session_id, expected_cookie, packet_cookie)` se registran esta cantidad de mismatches dentro de la ventana configurada, el servidor emite `ERROR_DROP` para forzar reinicio de sesión. |
+| `INVALID_COOKIE_WINDOW_SECONDS` | `2.0` | Float (Segundos) | Ventana deslizante usada para contar errores de cookie inválida. |
+| `DATA_ENCRYPTION_METHOD` | `1` | `0` a `5` | Algoritmo de cifrado del payload. Debe coincidir exactamente con el cliente. |
+| `SUPPORTED_UPLOAD_COMPRESSION_TYPES` | `[0, 1, 2, 3]` | Lista de `0..3` | Algoritmos de compresión permitidos para tráfico cliente -> servidor. Los valores inválidos se descartan y `0` siempre queda como fallback válido. |
+| `SUPPORTED_DOWNLOAD_COMPRESSION_TYPES` | `[0, 1, 2, 3]` | Lista de `0..3` | Algoritmos de compresión permitidos para tráfico servidor -> cliente. |
+| `ARQ_WINDOW_SIZE` | `1000` | Entero positivo | Tamaño de ventana del ARQ de datos en el servidor. |
+| `ARQ_INITIAL_RTO` | `0.5` | Float (Segundos) | Timeout inicial de retransmisión para datos en ARQ del servidor. |
+| `ARQ_MAX_RTO` | `3.0` | Float (Segundos) | Límite máximo de backoff para retransmisiones de datos. |
+| `ARQ_CONTROL_INITIAL_RTO` | `0.5` | Float (Segundos) | Timeout inicial para paquetes de control confiables del servidor como SYN/FIN/RST y controles SOCKS. |
+| `ARQ_CONTROL_MAX_RTO` | `3.0` | Float (Segundos) | Límite máximo de backoff para el plano de control. |
+| `ARQ_CONTROL_MAX_RETRIES` | `80` | Entero positivo | Tope de retries para paquetes de control antes de abortar el camino. |
+| `SESSION_TIMEOUT` | `300` | Entero (Segundos) | Si una sesión permanece inactiva este tiempo, expira y sus recursos se liberan. |
+| `SESSION_CLEANUP_INTERVAL` | `30` | Entero (Segundos) | Intervalo del loop de limpieza de sesiones expiradas. |
+| `MAX_SESSIONS` | `255` | Entero positivo hasta `255` | Máximo de sesiones activas. El límite duro del protocolo es 255. |
+| `MAX_CONCURRENT_REQUESTS` | `500` | Entero positivo | Tamaño de la cola limitada de requests DNS que esperan workers. Afecta directamente backpressure y uso de RAM. |
+| `DNS_REQUEST_WORKERS` | `4` | Entero positivo | Cantidad fija de workers que procesan requests DNS. |
+| `CPU_WORKER_THREADS` | `0` | `-1`, `0`, entero positivo | Tamaño del pool de hilos para parse/codec/compresión en el servidor. `0` usa auto-detección por núcleos reales. |
+| `MAX_PACKETS_PER_BATCH` | `1000` | Entero positivo | Límite superior para empaquetar control blocks pequeños en una respuesta. En runtime también queda acotado por el MTU de descarga negociado. |
+| `SOCKET_BUFFER_SIZE` | `8388608` | Entero (Bytes) | Buffer UDP del socket del servidor. Ayuda en ráfagas y pérdida alta. |
+| `LOG_LEVEL` | `"INFO"` | `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`, `"CRITICAL"` | Nivel de detalle de los logs del servidor. |
+| `CONFIG_VERSION` | `5.0` | Número | Versión del esquema de configuración usada para comprobar compatibilidad con el código actual. |
 
 ## Sección 3.5: Mejor Comprensión del MTU y Configuraciones de Oro para un Arranque Rápido ⚠️
 
@@ -374,7 +401,7 @@ Calcular y asignar correctamente los valores de MTU es vital en este proyecto ta
 ### Sección 4.1: Cortes Graves de Red (Intranet Nacional) ⚠️
 Cuando internet esté completamente cortado, la pérdida de paquetes sea masiva y solo se permita el tráfico DNS, hacé los siguientes ajustes en `client_config.toml` para garantizar la conexión:
 
-1. **Maximizar Resolutores:** Encontrá tantas IPs DNS públicas válidas como sea posible y agregalas a `client_resolvers.txt` (una IP por línea). Combinar resolutores diversos (como Google `8.8.8.8`, Cloudflare `1.1.1.1`, Quad9 `9.9.9.9`, OpenDNS `208.67.222.222`) maximiza la diversidad de enrutamiento.
+1. **Maximizar Resolutores:** Encontrá tantos resolutores DNS públicos válidos como sea posible y agregalos a `client_resolvers.txt`. Los formatos soportados son `IP`, `IP:PORT`, `CIDR` y `CIDR:PORT`. Combinar resolutores diversos (como Google `8.8.8.8`, Cloudflare `1.1.1.1`, Quad9 `9.9.9.9`, OpenDNS `208.67.222.222`) maximiza la diversidad de enrutamiento.
 
 2. **Aumentar la Duplicación de Paquetes:** Subí el parámetro `PACKET_DUPLICATION_COUNT`. Este define cuántas veces cada fragmento de payload se envía **simultáneamente** por rutas diferentes.
 - **Ejemplo:** Configurar esto en `5` significa que un paquete se lanza a 5 resolutores a la vez. ¡Incluso si 4 rutas están bloqueadas o pierden el paquete, la 5ª lo entrega! La capa ARQ del servidor detecta y descarta nativamente los duplicados, manteniendo el tráfico fluido.

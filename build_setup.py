@@ -30,17 +30,20 @@ extensions = build_extensions()
 if not extensions:
     raise RuntimeError("No Python modules found for Cython build.")
 
+
 setup(
     name="masterdnsvpn_cython_build",
     ext_modules=cythonize(
         extensions,
         compiler_directives={
             "language_level": "3",
+            "annotation_typing": False,
             "boundscheck": False,
             "wraparound": False,
             "cdivision": True,
             "nonecheck": False,
         },
+        force=True,
         annotate=False,
     ),
 )
