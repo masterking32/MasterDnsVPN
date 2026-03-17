@@ -652,7 +652,7 @@ class DnsPacketParser:
         return b"".join((self._serialize_dns_name(question["qName"]), packed_q))
 
     def _serialize_resource_record(
-        self, record: dict, compress_pointer: Optional[bytes] = None
+        self, record: dict, compress_pointer: bytes | None = None
     ) -> bytes:
         """
         Serialize a DNS resource record to bytes, with optional pointer compression.
@@ -769,17 +769,17 @@ class DnsPacketParser:
         self.codec_transform = self._codec_transform_dynamic
 
     def _no_crypto(
-        self, data: bytes, key: Optional[bytes] = None, method: Optional[int] = None
+        self, data: bytes, key: bytes | None = None, method: int | None = None
     ) -> bytes:
         return data
 
     def _xor_crypto(
-        self, data: bytes, key: Optional[bytes] = None, method: Optional[int] = None
+        self, data: bytes, key: bytes | None = None, method: int | None = None
     ) -> bytes:
         return self.xor_data(data, key or self.key)
 
     def _aes_encrypt(
-        self, data: bytes, key: Optional[bytes] = None, method: Optional[int] = None
+        self, data: bytes, key: bytes | None = None, method: int | None = None
     ) -> bytes:
         if not data:
             return data
@@ -792,7 +792,7 @@ class DnsPacketParser:
             return b""
 
     def _aes_decrypt(
-        self, data: bytes, key: Optional[bytes] = None, method: Optional[int] = None
+        self, data: bytes, key: bytes | None = None, method: int | None = None
     ) -> bytes:
         if len(data) <= 12:
             return b""
@@ -803,7 +803,7 @@ class DnsPacketParser:
             return b""
 
     def _chacha_encrypt(
-        self, data: bytes, key: Optional[bytes] = None, method: Optional[int] = None
+        self, data: bytes, key: bytes | None = None, method: int | None = None
     ) -> bytes:
         if not data:
             return data
@@ -816,7 +816,7 @@ class DnsPacketParser:
         return nonce + cipher.encryptor().update(data)
 
     def _chacha_decrypt(
-        self, data: bytes, key: Optional[bytes] = None, method: Optional[int] = None
+        self, data: bytes, key: bytes | None = None, method: int | None = None
     ) -> bytes:
         if len(data) <= 16:
             return b""
@@ -1032,7 +1032,7 @@ class DnsPacketParser:
 
     def extract_vpn_response(
         self, parsed_packet: dict, is_encoded: bool = False
-    ) -> tuple[Optional[dict], bytes]:
+    ) -> tuple[dict | None, bytes]:
         """
         Extracts header and assembles chunked data from the DNS answers section.
         Returns (parsed_header_dict, decrypted_data_bytes).
