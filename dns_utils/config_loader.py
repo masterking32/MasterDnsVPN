@@ -5,7 +5,6 @@
 
 import os
 import sys
-from typing import Any
 
 try:
     import tomllib
@@ -36,7 +35,7 @@ def get_config_path(config_filename: str) -> str:
     return os.path.join(get_app_dir(), config_filename)
 
 
-def load_config(config_filename: str) -> dict[str, Any]:
+def load_config(config_filename: str) -> dict:
     """
     Load configuration from a TOML file located next to the executable or main script.
     Returns an empty dict if the file is not found or cannot be parsed.

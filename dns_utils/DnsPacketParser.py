@@ -360,7 +360,7 @@ class DnsPacketParser:
                 offset = end_rd
 
             return records, offset
-        except (IndexError, struct.error):
+        except (IndexError, struct.debug):
             self.logger.debug(f"Failed to parse DNS {section_name}: Truncated packet.")
             return None, offset
         except Exception as e:
