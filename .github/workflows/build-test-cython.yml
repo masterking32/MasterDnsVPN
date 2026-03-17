@@ -45,6 +45,34 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Generate build version module (Windows)
+        if: ${{ matrix.os == 'windows-latest' }}
+        shell: powershell
+        run: |
+          $shortSha = "${{ github.sha }}".Substring(0, 7)
+          $buildVersion = "test-${{ github.run_number }}-$shortSha"
+          @"
+          BUILD_VERSION = "$buildVersion"
+
+
+          def get_build_version() -> str:
+              return str(BUILD_VERSION or "dev").strip() or "dev"
+          "@ | Set-Content -Path build_version.py -Encoding UTF8
+
+      - name: Generate build version module (non-Windows)
+        if: ${{ matrix.os != 'windows-latest' }}
+        shell: bash
+        run: |
+          SHORT_SHA="$(printf '%s' '${{ github.sha }}' | cut -c1-7)"
+          BUILD_VERSION="test-${{ github.run_number }}-${SHORT_SHA}"
+          cat > build_version.py <<PY
+          BUILD_VERSION = "${BUILD_VERSION}"
+
+
+          def get_build_version() -> str:
+              return str(BUILD_VERSION or "dev").strip() or "dev"
+          PY
+
       - name: Set up Python (Host, with pip cache)
         if: ${{ matrix.platform != 'Linux-Legacy' }}
         uses: actions/setup-python@v5

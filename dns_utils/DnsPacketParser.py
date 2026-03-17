@@ -134,6 +134,11 @@ class DnsPacketParser:
             Packet_Type.SOCKS5_SYN,
         }
     )
+
+    # Every VPN header now reserves two integrity bytes:
+    # - 1 byte session cookie
+    # - 1 byte lightweight header check byte
+    _VPN_HEADER_INTEGRITY_LEN = 2
     _PT_COMP_EXT = frozenset(
         {
             # Compress only data-heavy payloads to avoid CPU overhead on control/handshake packets.
@@ -174,7 +179,7 @@ class DnsPacketParser:
         )
         self.encryption_method = encryption_method
         if self.encryption_method not in (0, 1, 2, 3, 4, 5):
-            self.logger.error(
+            self.logger.debug(
                 f"Invalid encryption_method value: {self.encryption_method}. Defaulting to 1 (XOR encryption)."
             )
             self.encryption_method = 1
@@ -194,7 +199,7 @@ class DnsPacketParser:
                 self._aesgcm = AESGCM(self.key)
             except ImportError:
                 if self.logger:
-                    self.logger.error("AES-GCM missing.")
+                    self.logger.debug("AES-GCM missing.")
 
         elif self.encryption_method == 2:
             try:
@@ -212,6 +217,42 @@ class DnsPacketParser:
         self._int_bytes_cache = {
             i: (str(i) + ".").encode("ascii", errors="ignore") for i in range(512)
         }
+        self._max_vpn_header_raw_size = max(
+            self.get_vpn_header_raw_size(v)
+            for k, v in Packet_Type.__dict__.items()
+            if not k.startswith("__") and isinstance(v, int)
+        )
+
+    def get_vpn_header_raw_size(self, packet_type: int) -> int:
+        """
+        Return the raw VPN header byte length for a packet type, including the
+        fixed session-cookie and header-check bytes.
+        """
+        size = 2
+        if packet_type in self._PT_STREAM_EXT:
+            size += 2
+        if packet_type in self._PT_SEQ_EXT:
+            size += 2
+        if packet_type in self._PT_FRAG_EXT:
+            size += 4
+        if packet_type in self._PT_COMP_EXT:
+            size += 1
+        return size + self._VPN_HEADER_INTEGRITY_LEN
+
+    def get_max_vpn_header_raw_size(self) -> int:
+        """Return the largest raw VPN header size across all packet types."""
+        return self._max_vpn_header_raw_size
+
+    def _compute_header_check_byte(self, header_bytes: bytes) -> int:
+        """
+        Compute a lightweight 1-byte integrity check for the full raw header
+        (including session cookie, excluding the check byte itself).
+        """
+        acc = (len(header_bytes) * 17 + 0x5D) & 0xFF
+        for idx, value in enumerate(header_bytes):
+            acc = (acc + value + idx) & 0xFF
+            acc ^= (value << (idx & 0x03)) & 0xFF
+        return acc & 0xFF
 
     """
     Default DNS Packet Parsers
@@ -323,7 +364,7 @@ class DnsPacketParser:
             self.logger.debug(f"Failed to parse DNS {section_name}: Truncated packet.")
             return None, offset
         except Exception as e:
-            self.logger.error(f"Failed to parse DNS {section_name}: {e}")
+            self.logger.debug(f"Failed to parse DNS {section_name}: {e}")
             return None, offset
 
     def _parse_dns_name_from_bytes(self, data: bytes, offset: int) -> tuple[str, int]:
@@ -424,7 +465,7 @@ class DnsPacketParser:
 
             return header + request_data[12:]
         except Exception as e:
-            self.logger.error(f"Failed to create Server Failure response: {e}")
+            self.logger.debug(f"Failed to create Server Failure response: {e}")
             return b""
 
     def _basic_response_with_rcode(self, request_data: bytes, rcode: int) -> bytes:
@@ -526,7 +567,7 @@ class DnsPacketParser:
 
             return b"".join(parts)
         except Exception as e:
-            self.logger.error(f"Failed to create answer packet: {e}")
+            self.logger.debug(f"Failed to create answer packet: {e}")
             return b""
 
     def simple_question_packet(self, domain: str, qType: int) -> bytes:
@@ -551,7 +592,7 @@ class DnsPacketParser:
             )
 
         except Exception as e:
-            self.logger.error(f"Failed to create simple question packet: {e}")
+            self.logger.debug(f"Failed to create simple question packet: {e}")
             return b""
 
     def create_packet(
@@ -649,7 +690,7 @@ class DnsPacketParser:
             label_len = len(p)
             if label_len:
                 if label_len > 63:
-                    self.logger.error("Label too long")
+                    self.logger.debug("Label too long")
                     return b"\x00"
                 _append(label_len)
                 _extend(p)
@@ -747,7 +788,7 @@ class DnsPacketParser:
             return nonce + self._aesgcm.encrypt(nonce, data, None)
         except Exception as e:
             if self.logger:
-                self.logger.error(f"AES Encrypt failed: {e}")
+                self.logger.debug(f"AES Encrypt failed: {e}")
             return b""
 
     def _aes_decrypt(
@@ -841,6 +882,7 @@ class DnsPacketParser:
         total_fragments: int = 0,
         total_data_length: int = 0,
         compression_type: int = 0,
+        session_cookie: int = 0,
     ) -> list[bytes]:
         gen = self.generate_labels
         sq = self.simple_question_packet
@@ -858,6 +900,7 @@ class DnsPacketParser:
             total_fragments,
             total_data_length,
             compression_type,
+            session_cookie,
         )
 
         if not labels:
@@ -879,6 +922,7 @@ class DnsPacketParser:
         total_fragments: int = 0,
         total_data_length: int = 0,
         compression_type: int = 0,
+        session_cookie: int = 0,
     ) -> list:
         if encode_data and data:
             data_str = self.base_encode(data, lowerCaseOnly=True)
@@ -895,7 +939,7 @@ class DnsPacketParser:
         )
 
         if calculated_total_fragments > 255:
-            self.logger.error("Data too large, exceeds maximum 255 fragments.")
+            self.logger.debug("Data too large, exceeds maximum 255 fragments.")
             return []
 
         # Localize hot-path functions
@@ -918,6 +962,7 @@ class DnsPacketParser:
                 total_fragments=calculated_total_fragments,
                 total_data_length=raw_data_len,
                 compression_type=compression_type,
+                session_cookie=session_cookie,
             )
 
             if data_len:
@@ -949,6 +994,7 @@ class DnsPacketParser:
                 total_fragments=calculated_total_fragments,
                 total_data_length=raw_data_len,
                 compression_type=compression_type,
+                session_cookie=session_cookie,
             )
 
             if chunk_str:
@@ -1085,6 +1131,7 @@ class DnsPacketParser:
         total_data_length: int = 0,
         encode_data: bool = False,
         compression_type: int = 0,
+        session_cookie: int = 0,
     ) -> bytes:
         header_b = self.create_vpn_header(
             session_id,
@@ -1096,6 +1143,7 @@ class DnsPacketParser:
             total_fragments,
             total_data_length,
             compression_type=compression_type,
+            session_cookie=session_cookie,
             encrypt_data=False,
             base_encode=False,
         )
@@ -1166,7 +1214,7 @@ class DnsPacketParser:
         )
 
         if total_chunks > 255:
-            self.logger.error("Data too large, exceeds maximum 255 fragments.")
+            self.logger.debug("Data too large, exceeds maximum 255 fragments.")
             return simple_ans(answers, question_packet)
 
         # Append Chunk 0
@@ -1257,17 +1305,9 @@ class DnsPacketParser:
         _ceil = math.ceil
         _len = len
 
-        # Determine header raw byte length for STREAM_DATA test-case
-        hb_len = 2
-        if Packet_Type.STREAM_DATA in self._PT_STREAM_EXT:
-            hb_len += 2
-        if Packet_Type.STREAM_DATA in self._PT_SEQ_EXT:
-            hb_len += 2
-        if Packet_Type.STREAM_DATA in self._PT_FRAG_EXT:
-            # frag byte + the special-case extra 3 bytes when seq==0 and frag==0
-            hb_len += 4
-        if Packet_Type.STREAM_DATA in self._PT_COMP_EXT:
-            hb_len += 1
+        # MTU discovery must assume the largest possible VPN header so later
+        # real traffic never exceeds the tested boundary.
+        hb_len = self.get_max_vpn_header_raw_size()
 
         # include marker byte added before base-encoding
         bits = (hb_len + 1) * 8
@@ -1277,7 +1317,7 @@ class DnsPacketParser:
         available_chars_space = MAX_DNS_TOTAL - total_overhead
 
         if available_chars_space <= 0:
-            self.logger.error(f"Domain {domain} is too long, no space for data.")
+            self.logger.debug(f"Domain {domain} is too long, no space for data.")
             return 0, 0
 
         max_payload_chars = (available_chars_space * MAX_LABEL_LEN) // (
@@ -1426,7 +1466,7 @@ class DnsPacketParser:
 
             return decoded_data
         except Exception as e:
-            self.logger.error(
+            self.logger.debug(
                 f"<red>Failed to extract VPN data: {e}, labels: {labels}</red>"
             )
             return b""
@@ -1483,6 +1523,18 @@ class DnsPacketParser:
             header_data["compression_type"] = hb[off]
             off += 1
 
+        if ln < off + self._VPN_HEADER_INTEGRITY_LEN:
+            return (None, 0) if return_length else None
+
+        session_cookie = hb[off]
+        check_byte = hb[off + 1]
+        expected_check = self._compute_header_check_byte(hb[offset : off + 1])
+        if check_byte != expected_check:
+            return (None, 0) if return_length else None
+
+        header_data["session_cookie"] = session_cookie
+        off += self._VPN_HEADER_INTEGRITY_LEN
+
         if return_length:
             return header_data, off - offset
         return header_data
@@ -1524,6 +1576,7 @@ class DnsPacketParser:
         total_fragments: int = 0,
         total_data_length: int = 0,
         compression_type: int = 0,
+        session_cookie: int = 0,
         encrypt_data: bool = True,
         base_encode: bool = True,
     ):
@@ -1569,7 +1622,8 @@ class DnsPacketParser:
         if packet_type in self._PT_COMP_EXT:
             h_list.append(compression_type & 0xFF)
 
-        raw_header = bytes(h_list)
+        raw_header = bytes(h_list + [session_cookie & 0xFF])
+        raw_header += bytes([self._compute_header_check_byte(raw_header)])
 
         if not encrypt_data or self.encryption_method == 0:
             encrypted_header = raw_header

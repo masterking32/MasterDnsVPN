@@ -182,56 +182,56 @@ class TestEffectivePriority:
 class TestTrackMainPacketOnce:
     def test_stream_data_tracks_first(self, mixin: ConcreteQueue) -> None:
         owner: dict = {}
-        result = mixin._track_main_packet_once(owner, Packet_Type.STREAM_DATA, 42)
+        result = mixin._track_main_packet_once(owner, 0, Packet_Type.STREAM_DATA, 42)
         assert result is True
         assert 42 in owner["track_data"]
 
     def test_stream_data_deduplicates(self, mixin: ConcreteQueue) -> None:
         owner: dict = {}
-        mixin._track_main_packet_once(owner, Packet_Type.STREAM_DATA, 42)
-        result = mixin._track_main_packet_once(owner, Packet_Type.STREAM_DATA, 42)
+        mixin._track_main_packet_once(owner, 0, Packet_Type.STREAM_DATA, 42)
+        result = mixin._track_main_packet_once(owner, 0, Packet_Type.STREAM_DATA, 42)
         assert result is False
 
     def test_stream_data_ack_tracks_first(self, mixin: ConcreteQueue) -> None:
         owner: dict = {}
-        result = mixin._track_main_packet_once(owner, Packet_Type.STREAM_DATA_ACK, 10)
+        result = mixin._track_main_packet_once(owner, 0, Packet_Type.STREAM_DATA_ACK, 10)
         assert result is True
 
     def test_stream_data_ack_deduplicates(self, mixin: ConcreteQueue) -> None:
         owner: dict = {}
-        mixin._track_main_packet_once(owner, Packet_Type.STREAM_DATA_ACK, 10)
-        result = mixin._track_main_packet_once(owner, Packet_Type.STREAM_DATA_ACK, 10)
+        mixin._track_main_packet_once(owner, 0, Packet_Type.STREAM_DATA_ACK, 10)
+        result = mixin._track_main_packet_once(owner, 0, Packet_Type.STREAM_DATA_ACK, 10)
         assert result is False
 
     def test_stream_resend_tracks_once(self, mixin: ConcreteQueue) -> None:
         owner: dict = {}
-        r1 = mixin._track_main_packet_once(owner, Packet_Type.STREAM_RESEND, 5)
-        r2 = mixin._track_main_packet_once(owner, Packet_Type.STREAM_RESEND, 5)
+        r1 = mixin._track_main_packet_once(owner, 0, Packet_Type.STREAM_RESEND, 5)
+        r2 = mixin._track_main_packet_once(owner, 0, Packet_Type.STREAM_RESEND, 5)
         assert r1 is True
         assert r2 is False
 
     def test_stream_resend_blocked_by_existing_data(self, mixin: ConcreteQueue) -> None:
         owner: dict = {"track_data": {5}}
-        result = mixin._track_main_packet_once(owner, Packet_Type.STREAM_RESEND, 5)
+        result = mixin._track_main_packet_once(owner, 0, Packet_Type.STREAM_RESEND, 5)
         assert result is False
 
     def test_stream_fin_tracks_once(self, mixin: ConcreteQueue) -> None:
         owner: dict = {}
-        r1 = mixin._track_main_packet_once(owner, Packet_Type.STREAM_FIN, 0)
-        r2 = mixin._track_main_packet_once(owner, Packet_Type.STREAM_FIN, 0)
+        r1 = mixin._track_main_packet_once(owner, 0, Packet_Type.STREAM_FIN, 0)
+        r2 = mixin._track_main_packet_once(owner, 0, Packet_Type.STREAM_FIN, 0)
         assert r1 is True
         assert r2 is False
 
     def test_stream_syn_tracks_once(self, mixin: ConcreteQueue) -> None:
         owner: dict = {}
-        r1 = mixin._track_main_packet_once(owner, Packet_Type.STREAM_SYN, 0)
-        r2 = mixin._track_main_packet_once(owner, Packet_Type.STREAM_SYN, 0)
+        r1 = mixin._track_main_packet_once(owner, 0, Packet_Type.STREAM_SYN, 0)
+        r2 = mixin._track_main_packet_once(owner, 0, Packet_Type.STREAM_SYN, 0)
         assert r1 is True
         assert r2 is False
 
     def test_other_packet_type_always_true(self, mixin: ConcreteQueue) -> None:
         owner: dict = {}
-        result = mixin._track_main_packet_once(owner, Packet_Type.PING, 0)
+        result = mixin._track_main_packet_once(owner, 0, Packet_Type.PING, 0)
         assert result is True
 
 
@@ -302,34 +302,36 @@ class TestTrackStreamPacketOnce:
 class TestReleaseTrackingOnPop:
     def test_releases_stream_data(self, mixin: ConcreteQueue) -> None:
         owner: dict = {"track_data": {5, 6, 7}}
-        mixin._release_tracking_on_pop(owner, Packet_Type.STREAM_DATA, 5)
+        mixin._release_tracking_on_pop(owner, Packet_Type.STREAM_DATA, 0, 5)
         assert 5 not in owner["track_data"]
 
     def test_releases_socks5_syn(self, mixin: ConcreteQueue) -> None:
+        # SOCKS5_SYN is not in any tracked set; call must not raise and
+        # must leave unrelated tracking data intact.
         owner: dict = {"track_data": {1}}
-        mixin._release_tracking_on_pop(owner, Packet_Type.SOCKS5_SYN, 1)
-        assert 1 not in owner["track_data"]
+        mixin._release_tracking_on_pop(owner, Packet_Type.SOCKS5_SYN, 0, 1)
+        assert 1 in owner["track_data"]
 
     def test_releases_stream_data_ack(self, mixin: ConcreteQueue) -> None:
         owner: dict = {"track_ack": {3}}
-        mixin._release_tracking_on_pop(owner, Packet_Type.STREAM_DATA_ACK, 3)
+        mixin._release_tracking_on_pop(owner, Packet_Type.STREAM_DATA_ACK, 0, 3)
         assert 3 not in owner["track_ack"]
 
     def test_releases_stream_resend(self, mixin: ConcreteQueue) -> None:
         owner: dict = {"track_resend": {9}}
-        mixin._release_tracking_on_pop(owner, Packet_Type.STREAM_RESEND, 9)
+        mixin._release_tracking_on_pop(owner, Packet_Type.STREAM_RESEND, 0, 9)
         assert 9 not in owner["track_resend"]
 
     def test_releases_stream_fin(self, mixin: ConcreteQueue) -> None:
         ptype = Packet_Type.STREAM_FIN
         owner: dict = {"track_fin": {ptype}, "track_types": {ptype}}
-        mixin._release_tracking_on_pop(owner, ptype, 0)
+        mixin._release_tracking_on_pop(owner, ptype, 0, 0)
         assert ptype not in owner["track_fin"]
 
     def test_releases_stream_syn(self, mixin: ConcreteQueue) -> None:
         ptype = Packet_Type.STREAM_SYN
         owner: dict = {"track_syn_ack": {ptype}, "track_types": {ptype}}
-        mixin._release_tracking_on_pop(owner, ptype, 0)
+        mixin._release_tracking_on_pop(owner, ptype, 0, 0)
         assert ptype not in owner["track_syn_ack"]
 
 
@@ -342,7 +344,7 @@ class TestPushAndPop:
     def test_push_adds_to_heap(self, mixin: ConcreteQueue) -> None:
         queue: list = []
         owner: dict = {}
-        item = (0, 1, Packet_Type.STREAM_DATA, "session", 10, b"")
+        item = (0, 1, Packet_Type.STREAM_DATA, 1, 10, b"")
         mixin._push_queue_item(queue, owner, item)
         assert len(queue) == 1
         assert owner["priority_counts"][0] == 1
@@ -357,13 +359,13 @@ class TestPushAndPop:
 
         queue: list = []
         owner: dict = {}
-        item = (0, 1, Packet_Type.STREAM_DATA, "session", 10, b"")
+        item = (0, 1, Packet_Type.STREAM_DATA, 1, 10, b"")
         mixin._push_queue_item(queue, owner, item, tx_event=event)
         event.set.assert_called_once()
 
     def test_on_queue_pop_decrements_counter(self, mixin: ConcreteQueue) -> None:
         owner: dict = {"priority_counts": {0: 1}}
-        item = (0, 1, Packet_Type.STREAM_DATA, "session", 10, b"")
+        item = (0, 1, Packet_Type.STREAM_DATA, 1, 10, b"")
         mixin._on_queue_pop(owner, item)
         assert 0 not in owner["priority_counts"]
 
@@ -382,7 +384,7 @@ class TestPopPackableControlBlock:
     def test_returns_none_when_wrong_priority(self, mixin: ConcreteQueue) -> None:
         queue: list = []
         owner: dict = {}
-        item = (1, 1, Packet_Type.STREAM_FIN, "session", 0, b"")  # priority=1
+        item = (1, 1, Packet_Type.STREAM_FIN, 1, 0, b"")  # priority=1
         heapq.heappush(queue, item)
         owner.setdefault("priority_counts", {})[1] = 1
         result = mixin._pop_packable_control_block(queue, owner, 0)  # looking for priority=0
@@ -391,7 +393,7 @@ class TestPopPackableControlBlock:
     def test_returns_none_when_has_payload(self, mixin: ConcreteQueue) -> None:
         queue: list = []
         owner: dict = {}
-        item = (0, 1, Packet_Type.STREAM_FIN, "session", 0, b"payload")  # has payload
+        item = (0, 1, Packet_Type.STREAM_FIN, 1, 0, b"payload")  # has payload
         heapq.heappush(queue, item)
         owner.setdefault("priority_counts", {})[0] = 1
         result = mixin._pop_packable_control_block(queue, owner, 0)
@@ -400,7 +402,7 @@ class TestPopPackableControlBlock:
     def test_pops_valid_packable(self, mixin: ConcreteQueue) -> None:
         queue: list = []
         owner: dict = {}
-        item = (0, 1, Packet_Type.STREAM_FIN, "session", 0, b"")  # STREAM_FIN is packable
+        item = (0, 1, Packet_Type.STREAM_FIN, 1, 0, b"")  # STREAM_FIN is packable
         heapq.heappush(queue, item)
         owner.setdefault("priority_counts", {})[0] = 1
         result = mixin._pop_packable_control_block(queue, owner, 0)
@@ -410,7 +412,7 @@ class TestPopPackableControlBlock:
     def test_returns_none_when_not_packable_type(self, mixin: ConcreteQueue) -> None:
         queue: list = []
         owner: dict = {}
-        item = (0, 1, Packet_Type.STREAM_DATA, "session", 0, b"")  # STREAM_DATA not packable
+        item = (0, 1, Packet_Type.STREAM_DATA, 1, 0, b"")  # STREAM_DATA not packable
         heapq.heappush(queue, item)
         owner.setdefault("priority_counts", {})[0] = 1
         result = mixin._pop_packable_control_block(queue, owner, 0)

@@ -42,18 +42,37 @@ SOCKS5_USER = "master_dns_vpn"
 SOCKS5_PASS = "master_dns_vpn"
 
 # Maximum time (seconds) allowed for SOCKS handshake completion per stream.
-SOCKS_HANDSHAKE_TIMEOUT = 240.0
+# For high-loss / slow-resolver networks, use a slightly larger timeout to
+# avoid aborting streams that are still progressing slowly.
+SOCKS_HANDSHAKE_TIMEOUT = 300.0
 
 # ------------------------------------------------------------------------------
 # 3) Resolver Selection & DNS Strategy
 # ------------------------------------------------------------------------------
 
-# Resolver pool moved to client_resolvers.txt (one IP per line).
+# Resolver pool moved to client_resolvers.txt.
+# Supported formats per line:
+# - IP
+# - IP:PORT
+# - CIDR
+# - CIDR:PORT
+# Examples:
+# - 1.1.1.1
+# - 1.1.1.1:5353
+# - 1.1.1.0/24
+# - 1.1.1.0/24:99
 # This file must exist next to client executable/config file.
 
 # Send each DNS query N times for reliability in lossy networks.
-# 1 = no duplication.
+# 1 = no duplication. 2 is the recommended starting point for unstable links.
+# Higher values increase bandwidth/CPU pressure quickly.
 PACKET_DUPLICATION_COUNT = 2
+
+# Stream-level soft affinity: after this many STREAM_RESEND packets in a row,
+# switch the stream's preferred resolver if another active resolver is available.
+STREAM_RESOLVER_FAILOVER_RESEND_THRESHOLD = 2
+# Minimum seconds between preferred-resolver switches for the same stream.
+STREAM_RESOLVER_FAILOVER_COOLDOWN = 1.0
 
 # Max packet/control blocks packed per DNS operation (user upper bound).
 # Runtime value = min(MAX_PACKETS_PER_BATCH, MTU-based upload limit).
@@ -89,12 +108,12 @@ DOWNLOAD_COMPRESSION_TYPE = 0
 # Minimum accepted MTU values during resolver validation (0 disables each bound).
 # Please set these according to your network conditions.
 # Note: The software will suggest the best MTUs for you based on your domain.
-MIN_UPLOAD_MTU = 100
-MIN_DOWNLOAD_MTU = 100
+MIN_UPLOAD_MTU = 70
+MIN_DOWNLOAD_MTU = 150
 
 # Initial upper bounds for MTU probing.
 # Note: The software will suggest the best MTUs for you based on your domain.
-MAX_UPLOAD_MTU = 220
+MAX_UPLOAD_MTU = 150
 MAX_DOWNLOAD_MTU = 200
 
 # MTU test aggressiveness.
@@ -108,7 +127,7 @@ AUTO_SCALE_PROFILES = true
 # Number of resolver-domain pairs tested in parallel during initial MTU scan.
 # Note: when AUTO_SCALE_PROFILES=true, runtime value is auto-tuned by list size.
 # Higher values speed up startup but increase temporary CPU/network usage.
-MTU_TEST_PARALLELISM = 10
+MTU_TEST_PARALLELISM = 6
 
 # If true, successful MTU-tested resolvers are saved to file.
 SAVE_MTU_SERVERS_TO_FILE = false
@@ -143,7 +162,7 @@ MTU_ADDED_SERVER_LOG_FORMAT = "Server {IP} re-added at {TIME} (UP MTU: {UP_MTU},
 # Auto-disable a resolver/domain pair during runtime if it has 100% timeouts
 # across the configured observation window (while at least one other active server exists).
 AUTO_DISABLE_TIMEOUT_SERVERS = true
-AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS = 300
+AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS = 120
 
 # Minimum resolved observations (timeout/success events) required before disable decision.
 # Higher value reduces false positives on low-traffic clients.
@@ -157,7 +176,7 @@ RECHECK_INACTIVE_SERVERS_ENABLED = true
 
 # A full recheck cycle starts this many seconds after initial scan completion,
 # then repeats with the same interval.
-RECHECK_INACTIVE_INTERVAL_SECONDS = 1800
+RECHECK_INACTIVE_INTERVAL_SECONDS = 300
 
 # Delay between testing two inactive servers in background mode.
 # Minimum is always enforced as 3 seconds.
@@ -177,13 +196,13 @@ MAX_CONNECTION_ATTEMPTS = 10
 # Data-plane ARQ settings.
 # Rediuce ARQ_WINDOW_SIZE if your RAM is limited or if you have very high MTUs and want to reduce memory usage.
 ARQ_WINDOW_SIZE = 1000
-ARQ_INITIAL_RTO = 0.2
-ARQ_MAX_RTO = 1.0
+ARQ_INITIAL_RTO = 0.5
+ARQ_MAX_RTO = 3.0
 
 # Control-plane ARQ settings (SYN/FIN/RST/SOCKS control packets).
-ARQ_CONTROL_INITIAL_RTO = 0.4
-ARQ_CONTROL_MAX_RTO = 1.0
-ARQ_CONTROL_MAX_RETRIES = 180
+ARQ_CONTROL_INITIAL_RTO = 0.5
+ARQ_CONTROL_MAX_RTO = 3.0
+ARQ_CONTROL_MAX_RETRIES = 80
 
 # ------------------------------------------------------------------------------
 # 6) Runtime Performance & Memory Caps
@@ -191,14 +210,15 @@ ARQ_CONTROL_MAX_RETRIES = 180
 
 # Worker counts for receive and DNS TX loops.
 NUM_RX_WORKERS = 2
-NUM_DNS_WORKERS = 3
+NUM_DNS_WORKERS = 2
 
 # CPU thread-pool size for parser/codec offload.
 # 0 = auto (recommended). Set a positive number to force size. Set -1 to disable.
+# For a 2-core system, 2 is a safer default than an aggressive auto profile.
 CPU_WORKER_THREADS = 0
 
 # Max in-flight RX packet processing tasks.
-RX_SEMAPHORE_LIMIT = 1000
+RX_SEMAPHORE_LIMIT = 500
 
 # Max closed-stream records retained for duplicate-close protection.
 MAX_CLOSED_STREAM_RECORDS = 2000
@@ -212,5 +232,5 @@ LOG_LEVEL = "INFO"
 # ------------------------------------------------------------------------------
 # 7) Version Marker
 # ------------------------------------------------------------------------------
-CONFIG_VERSION = 3.0
+CONFIG_VERSION = 5.0
 
