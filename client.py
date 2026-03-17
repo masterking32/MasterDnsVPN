@@ -1,4 +1,4 @@
-# MasterDnsVPN Client
+﻿# MasterDnsVPN Client
 # Author: MasterkinG32
 # Github: https://github.com/masterking32
 # Year: 2026
