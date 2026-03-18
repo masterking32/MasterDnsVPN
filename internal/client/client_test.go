@@ -769,6 +769,89 @@ func TestStream0RuntimeQueuesPingAfterDNSActivity(t *testing.T) {
 	}
 }
 
+func TestStream0RuntimeRetriesDNSQueryAfterTransientFailure(t *testing.T) {
+	oldBaseDelay := stream0DNSRetryBaseDelay
+	oldMaxDelay := stream0DNSRetryMaxDelay
+	stream0DNSRetryBaseDelay = 20 * time.Millisecond
+	stream0DNSRetryMaxDelay = 40 * time.Millisecond
+	defer func() {
+		stream0DNSRetryBaseDelay = oldBaseDelay
+		stream0DNSRetryMaxDelay = oldMaxDelay
+	}()
+
+	codec, err := security.NewCodec(0, "")
+	if err != nil {
+		t.Fatalf("NewCodec returned error: %v", err)
+	}
+
+	c := New(config.ClientConfig{
+		LocalDNSPendingTimeoutSec: 1,
+	}, nil, codec)
+	c.connections = []Connection{{
+		Domain:        "v.example.com",
+		Resolver:      "127.0.0.1",
+		ResolverPort:  5353,
+		ResolverLabel: "127.0.0.1:5353",
+		Key:           "127.0.0.1|5353|v.example.com",
+		IsValid:       true,
+	}}
+	c.connectionsByKey = map[string]int{c.connections[0].Key: 0}
+	c.rebuildBalancer()
+	c.sessionID = 7
+	c.sessionCookie = 9
+	c.responseMode = mtuProbeRawResponse
+
+	rawQuery := buildClientTestDNSQuery(0x1234, "example.com", Enums.DNS_RECORD_TYPE_A, Enums.DNSQ_CLASS_IN)
+	serverFailure, err := DnsParser.BuildServerFailureResponse(rawQuery)
+	if err != nil {
+		t.Fatalf("BuildServerFailureResponse returned error: %v", err)
+	}
+
+	callCount := 0
+	c.exchangeQueryFn = func(conn Connection, packet []byte, timeout time.Duration) ([]byte, error) {
+		callCount++
+		if callCount == 1 {
+			return nil, errors.New("temporary failure")
+		}
+
+		queryPacket, err := DnsParser.ParsePacketLite(packet)
+		if err != nil || !queryPacket.HasQuestion {
+			t.Fatalf("unexpected tunnel dns query: err=%v", err)
+		}
+		vpnPacket, err := VpnProto.ParseFromLabels(extractTestTunnelLabels(queryPacket.FirstQuestion.Name, "v.example.com"), c.codec)
+		if err != nil {
+			t.Fatalf("ParseFromLabels returned error: %v", err)
+		}
+		return DnsParser.BuildVPNResponsePacket(packet, queryPacket.FirstQuestion.Name, VpnProto.Packet{
+			SessionID:      c.sessionID,
+			SessionCookie:  c.sessionCookie,
+			PacketType:     Enums.PACKET_DNS_QUERY_RES,
+			StreamID:       0,
+			SequenceNum:    vpnPacket.SequenceNum,
+			FragmentID:     0,
+			TotalFragments: 1,
+			Payload:        serverFailure,
+		}, false)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := c.startStream0Runtime(ctx); err != nil {
+		t.Fatalf("startStream0Runtime returned error: %v", err)
+	}
+
+	packet, err := c.stream0Runtime.ExchangeDNSQuery(rawQuery, time.Second)
+	if err != nil {
+		t.Fatalf("ExchangeDNSQuery returned error: %v", err)
+	}
+	if packet.PacketType != Enums.PACKET_DNS_QUERY_RES {
+		t.Fatalf("unexpected packet type: got=%d want=%d", packet.PacketType, Enums.PACKET_DNS_QUERY_RES)
+	}
+	if callCount < 2 {
+		t.Fatalf("expected retry to happen, got callCount=%d", callCount)
+	}
+}
+
 func TestDispatchDNSQueryFailsWithoutValidConnections(t *testing.T) {
 	codec, err := security.NewCodec(0, "")
 	if err != nil {

@@ -96,7 +96,6 @@ func (c *Client) sendMainStreamPacket(packetType uint8, sequenceNum uint16, payl
 		if err == nil {
 			return packet, nil
 		}
-		c.SetConnectionValidity(connection.Key, false)
 		lastErr = err
 	}
 
@@ -373,14 +372,12 @@ func (c *Client) sendSessionControlPacket(packetType uint8, payload []byte, conn
 
 		response, err := c.exchangeDNSOverConnection(connection, query, timeout)
 		if err != nil {
-			c.SetConnectionValidity(connection.Key, false)
 			lastErr = err
 			continue
 		}
 
 		packet, err := DnsParser.ExtractVPNResponse(response, c.responseMode == mtuProbeBase64Reply)
 		if err != nil || !c.validateServerPacket(packet) {
-			c.SetConnectionValidity(connection.Key, false)
 			lastErr = ErrTunnelDNSDispatchFailed
 			continue
 		}

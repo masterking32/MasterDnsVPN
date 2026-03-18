@@ -26,6 +26,8 @@ const (
 )
 
 var (
+	stream0DNSRetryBaseDelay         = 350 * time.Millisecond
+	stream0DNSRetryMaxDelay          = 2 * time.Second
 	stream0PingIdleNoStreamThreshold = 20 * time.Second
 	stream0PingIdleHighThreshold     = 10 * time.Second
 	stream0PingIdleMediumThreshold   = 5 * time.Second
@@ -44,6 +46,15 @@ type stream0Result struct {
 	err    error
 }
 
+type stream0Pending struct {
+	packetType     uint8
+	payload        []byte
+	resultCh       chan stream0Result
+	deadline       time.Time
+	retryDelay     time.Duration
+	retryScheduled bool
+}
+
 type stream0Runtime struct {
 	client    *Client
 	scheduler *arq.Scheduler
@@ -54,7 +65,7 @@ type stream0Runtime struct {
 	cancel           context.CancelFunc
 	wg               sync.WaitGroup
 	wakeCh           chan struct{}
-	pendingBySeq     map[uint16]chan stream0Result
+	pendingBySeq     map[uint16]*stream0Pending
 	dnsActivitySeen  bool
 	lastDataActivity time.Time
 	lastPingTime     time.Time
@@ -66,7 +77,7 @@ func newStream0Runtime(client *Client) *stream0Runtime {
 		client:           client,
 		scheduler:        arq.NewScheduler(1),
 		wakeCh:           make(chan struct{}, 1),
-		pendingBySeq:     make(map[uint16]chan stream0Result, 16),
+		pendingBySeq:     make(map[uint16]*stream0Pending, 16),
 		lastDataActivity: now,
 		lastPingTime:     now,
 	}
@@ -129,13 +140,22 @@ func (r *stream0Runtime) ExchangeDNSQuery(payload []byte, timeout time.Duration)
 
 	sequenceNum := r.client.nextMainSequence()
 	resultCh := make(chan stream0Result, 1)
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
 
 	r.mu.Lock()
 	if !r.running {
 		r.mu.Unlock()
 		return VpnProto.Packet{}, ErrStream0RuntimeStopped
 	}
-	r.pendingBySeq[sequenceNum] = resultCh
+	r.pendingBySeq[sequenceNum] = &stream0Pending{
+		packetType: packetTypeForDNSQuery(),
+		payload:    append([]byte(nil), payload...),
+		resultCh:   resultCh,
+		deadline:   time.Now().Add(timeout),
+		retryDelay: stream0DNSRetryBaseDelay,
+	}
 	r.dnsActivitySeen = true
 	r.lastDataActivity = time.Now()
 	r.mu.Unlock()
@@ -152,10 +172,6 @@ func (r *stream0Runtime) ExchangeDNSQuery(payload []byte, timeout time.Duration)
 		return VpnProto.Packet{}, ErrTunnelDNSDispatchFailed
 	}
 	r.notifyWake()
-
-	if timeout <= 0 {
-		timeout = 5 * time.Second
-	}
 
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
@@ -289,7 +305,7 @@ func (r *stream0Runtime) processDequeue(packet arq.QueuedPacket) {
 	response, err := r.client.sendStream0Packet(packet)
 	if err != nil {
 		if packet.PacketType == Enums.PACKET_DNS_QUERY_REQ {
-			r.completePending(packet.SequenceNum, VpnProto.Packet{}, err)
+			r.scheduleRetry(packet.SequenceNum, err)
 		}
 		return
 	}
@@ -300,6 +316,14 @@ func (r *stream0Runtime) processDequeue(packet arq.QueuedPacket) {
 		r.noteServerDataActivity()
 	case Enums.PACKET_PONG:
 		r.noteServerDataActivity()
+	case 0:
+		if packet.PacketType == Enums.PACKET_DNS_QUERY_REQ {
+			r.scheduleRetry(packet.SequenceNum, ErrTunnelDNSDispatchFailed)
+		}
+	default:
+		if packet.PacketType == Enums.PACKET_DNS_QUERY_REQ {
+			r.scheduleRetry(packet.SequenceNum, ErrTunnelDNSDispatchFailed)
+		}
 	}
 }
 
@@ -318,13 +342,13 @@ func (r *stream0Runtime) notifyWake() {
 
 func (r *stream0Runtime) completePending(sequenceNum uint16, packet VpnProto.Packet, err error) {
 	r.mu.Lock()
-	resultCh, ok := r.pendingBySeq[sequenceNum]
+	pending, ok := r.pendingBySeq[sequenceNum]
 	if ok {
 		delete(r.pendingBySeq, sequenceNum)
 	}
 	r.mu.Unlock()
 	if ok {
-		resultCh <- stream0Result{packet: packet, err: err}
+		pending.resultCh <- stream0Result{packet: packet, err: err}
 	}
 }
 
@@ -337,11 +361,89 @@ func (r *stream0Runtime) removePending(sequenceNum uint16) {
 func (r *stream0Runtime) failAllPending(err error) {
 	r.mu.Lock()
 	pending := r.pendingBySeq
-	r.pendingBySeq = make(map[uint16]chan stream0Result, 4)
+	r.pendingBySeq = make(map[uint16]*stream0Pending, 4)
 	r.running = false
 	r.mu.Unlock()
 
-	for _, resultCh := range pending {
-		resultCh <- stream0Result{err: err}
+	for _, entry := range pending {
+		entry.resultCh <- stream0Result{err: err}
 	}
+}
+
+func (r *stream0Runtime) scheduleRetry(sequenceNum uint16, err error) {
+	r.mu.Lock()
+	entry, ok := r.pendingBySeq[sequenceNum]
+	if !ok {
+		r.mu.Unlock()
+		return
+	}
+	now := time.Now()
+	if !entry.deadline.After(now) {
+		delete(r.pendingBySeq, sequenceNum)
+		resultCh := entry.resultCh
+		r.mu.Unlock()
+		resultCh <- stream0Result{err: err}
+		return
+	}
+	if entry.retryScheduled {
+		r.mu.Unlock()
+		return
+	}
+	delay := entry.retryDelay
+	if delay <= 0 {
+		delay = stream0DNSRetryBaseDelay
+	}
+	entry.retryScheduled = true
+	if entry.retryDelay < stream0DNSRetryMaxDelay {
+		nextDelay := entry.retryDelay * 2
+		if nextDelay > stream0DNSRetryMaxDelay {
+			nextDelay = stream0DNSRetryMaxDelay
+		}
+		entry.retryDelay = nextDelay
+	}
+	packetType := entry.packetType
+	payload := append([]byte(nil), entry.payload...)
+	r.mu.Unlock()
+
+	timer := time.NewTimer(delay)
+	go func() {
+		defer timer.Stop()
+		select {
+		case <-r.ctx.Done():
+			return
+		case <-timer.C:
+		}
+
+		r.mu.Lock()
+		entry, ok := r.pendingBySeq[sequenceNum]
+		if !ok {
+			r.mu.Unlock()
+			return
+		}
+		entry.retryScheduled = false
+		if !entry.deadline.After(time.Now()) || !r.running {
+			delete(r.pendingBySeq, sequenceNum)
+			resultCh := entry.resultCh
+			r.mu.Unlock()
+			resultCh <- stream0Result{err: err}
+			return
+		}
+		r.mu.Unlock()
+
+		if !r.scheduler.Enqueue(arq.QueueTargetMain, arq.QueuedPacket{
+			PacketType:  packetType,
+			StreamID:    0,
+			SequenceNum: sequenceNum,
+			Payload:     payload,
+			Priority:    stream0DNSPriority,
+		}) {
+			r.scheduleRetry(sequenceNum, err)
+			return
+		}
+		r.notifyWake()
+	}()
+}
+
+func packetTypeForDNSQuery() uint8 {
+	return Enums.PACKET_DNS_QUERY_REQ
 }
