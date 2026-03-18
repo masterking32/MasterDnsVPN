@@ -38,19 +38,27 @@ type sessionRecord struct {
 	VerifyCode          [4]byte
 	Signature           [sessionInitDataSize]byte
 	CreatedAt           time.Time
+	LastActivityAt      time.Time
 	ReuseUntil          time.Time
 }
 
+type closedSessionRecord struct {
+	Cookie    uint8
+	ExpiresAt time.Time
+}
+
 type sessionStore struct {
-	mu     sync.Mutex
-	nextID uint16
-	byID   [maxServerSessions]*sessionRecord
-	bySig  map[[sessionInitDataSize]byte]uint8
+	mu           sync.Mutex
+	nextID       uint16
+	byID         [maxServerSessions]*sessionRecord
+	bySig        map[[sessionInitDataSize]byte]uint8
+	recentClosed map[uint8]closedSessionRecord
 }
 
 func newSessionStore() *sessionStore {
 	return &sessionStore{
-		bySig: make(map[[sessionInitDataSize]byte]uint8, 64),
+		bySig:        make(map[[sessionInitDataSize]byte]uint8, 64),
+		recentClosed: make(map[uint8]closedSessionRecord, 32),
 	}
 }
 
@@ -71,6 +79,7 @@ func (s *sessionStore) findOrCreate(payload []byte, uploadCompressionType uint8,
 	if sessionID, ok := s.bySig[signature]; ok {
 		if existing := s.byID[sessionID]; existing != nil {
 			if now.Before(existing.ReuseUntil) || now.Equal(existing.ReuseUntil) {
+				existing.LastActivityAt = now
 				return existing, true, nil
 			}
 		}
@@ -83,11 +92,12 @@ func (s *sessionStore) findOrCreate(payload []byte, uploadCompressionType uint8,
 	}
 
 	record := &sessionRecord{
-		ID:           uint8(slot),
-		ResponseMode: payload[0],
-		CreatedAt:    now,
-		ReuseUntil:   now.Add(sessionInitTTL),
-		Signature:    signature,
+		ID:             uint8(slot),
+		ResponseMode:   payload[0],
+		CreatedAt:      now,
+		LastActivityAt: now,
+		ReuseUntil:     now.Add(sessionInitTTL),
+		Signature:      signature,
 	}
 	record.UploadCompression = compression.NormalizeType(uploadCompressionType)
 	record.DownloadCompression = compression.NormalizeType(downloadCompressionType)
@@ -98,6 +108,7 @@ func (s *sessionStore) findOrCreate(payload []byte, uploadCompressionType uint8,
 
 	s.byID[slot] = record
 	s.bySig[signature] = uint8(slot)
+	delete(s.recentClosed, uint8(slot))
 	s.nextID = uint16((slot + 1) % maxServerSessions)
 	return record, false, nil
 }
@@ -109,6 +120,109 @@ func (s *sessionStore) expireReuseLocked(now time.Time) {
 			delete(s.bySig, signature)
 		}
 	}
+}
+
+func (s *sessionStore) Touch(sessionID uint8, now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	record := s.byID[sessionID]
+	if record == nil {
+		return false
+	}
+	record.LastActivityAt = now
+	return true
+}
+
+func (s *sessionStore) Active(sessionID uint8) (*sessionRecord, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	record := s.byID[sessionID]
+	if record == nil {
+		return nil, false
+	}
+	copyRecord := *record
+	return &copyRecord, true
+}
+
+func (s *sessionStore) ExpectedCookie(sessionID uint8) (uint8, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if record := s.byID[sessionID]; record != nil {
+		return record.Cookie, true
+	}
+	if record, ok := s.recentClosed[sessionID]; ok {
+		return record.Cookie, true
+	}
+	return 0, false
+}
+
+func (s *sessionStore) ValidateCookie(sessionID uint8, cookie uint8) bool {
+	expected, ok := s.ExpectedCookie(sessionID)
+	return ok && expected == cookie
+}
+
+func (s *sessionStore) Close(sessionID uint8, now time.Time, retention time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	record := s.byID[sessionID]
+	if record == nil {
+		return false
+	}
+
+	delete(s.bySig, record.Signature)
+	s.byID[sessionID] = nil
+	if retention > 0 {
+		s.recentClosed[sessionID] = closedSessionRecord{
+			Cookie:    record.Cookie,
+			ExpiresAt: now.Add(retention),
+		}
+	} else {
+		delete(s.recentClosed, sessionID)
+	}
+	return true
+}
+
+func (s *sessionStore) Cleanup(now time.Time, idleTimeout time.Duration, closedRetention time.Duration) []uint8 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.expireReuseLocked(now)
+
+	for sessionID, record := range s.recentClosed {
+		if !now.Before(record.ExpiresAt) {
+			delete(s.recentClosed, sessionID)
+		}
+	}
+
+	if idleTimeout <= 0 {
+		return nil
+	}
+
+	expired := make([]uint8, 0, 8)
+	for sessionID, record := range s.byID {
+		if record == nil {
+			continue
+		}
+		if now.Sub(record.LastActivityAt) < idleTimeout {
+			continue
+		}
+
+		delete(s.bySig, record.Signature)
+		s.byID[sessionID] = nil
+		if closedRetention > 0 {
+			s.recentClosed[uint8(sessionID)] = closedSessionRecord{
+				Cookie:    record.Cookie,
+				ExpiresAt: now.Add(closedRetention),
+			}
+		}
+		expired = append(expired, uint8(sessionID))
+	}
+
+	return expired
 }
 
 func (s *sessionStore) allocateSlotLocked() int {

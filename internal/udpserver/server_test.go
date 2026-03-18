@@ -312,6 +312,59 @@ func TestSessionStoreExpiresReuseSignatureWithoutDroppingSession(t *testing.T) {
 	store.mu.Unlock()
 }
 
+func TestSessionStoreCleanupMovesExpiredSessionToRecentClosed(t *testing.T) {
+	store := newSessionStore()
+	payload := []byte{1, 0x21, 0x00, 0x96, 0x00, 0xC8, 0x44, 0x33, 0x22, 0x11}
+
+	record, reused, err := store.findOrCreate(payload, 3, 0)
+	if err != nil {
+		t.Fatalf("findOrCreate returned error: %v", err)
+	}
+	if reused || record == nil {
+		t.Fatal("expected a new session record")
+	}
+
+	store.mu.Lock()
+	record.LastActivityAt = time.Now().Add(-2 * time.Minute)
+	expectedCookie := record.Cookie
+	store.mu.Unlock()
+
+	expired := store.Cleanup(time.Now(), time.Minute, 10*time.Minute)
+	if len(expired) != 1 || expired[0] != record.ID {
+		t.Fatalf("unexpected expired sessions: %#v", expired)
+	}
+	if _, ok := store.Active(record.ID); ok {
+		t.Fatal("expired session should no longer be active")
+	}
+	if cookie, ok := store.ExpectedCookie(record.ID); !ok || cookie != expectedCookie {
+		t.Fatalf("recently closed cookie missing: ok=%v cookie=%d expected=%d", ok, cookie, expectedCookie)
+	}
+}
+
+func TestSessionStoreTouchRefreshesActivity(t *testing.T) {
+	store := newSessionStore()
+	payload := []byte{1, 0x21, 0x00, 0x96, 0x00, 0xC8, 0x44, 0x33, 0x22, 0x11}
+
+	record, _, err := store.findOrCreate(payload, 0, 0)
+	if err != nil {
+		t.Fatalf("findOrCreate returned error: %v", err)
+	}
+
+	old := record.LastActivityAt
+	time.Sleep(5 * time.Millisecond)
+	if !store.Touch(record.ID, time.Now()) {
+		t.Fatal("Touch returned false")
+	}
+
+	active, ok := store.Active(record.ID)
+	if !ok {
+		t.Fatal("Active returned false")
+	}
+	if !active.LastActivityAt.After(old) {
+		t.Fatal("last activity timestamp was not updated")
+	}
+}
+
 func buildServerTestQuery(id uint16, name string, qtype uint16) []byte {
 	qname := encodeServerTestName(name)
 	packet := make([]byte, 12+len(qname)+4)

@@ -30,6 +30,9 @@ type ServerConfig struct {
 	DNSRequestWorkers                 int      `toml:"DNS_REQUEST_WORKERS"`
 	MaxPacketSize                     int      `toml:"MAX_PACKET_SIZE"`
 	DropLogIntervalSecs               float64  `toml:"DROP_LOG_INTERVAL_SECONDS"`
+	SessionTimeoutSecs                float64  `toml:"SESSION_TIMEOUT_SECONDS"`
+	SessionCleanupIntervalSecs        float64  `toml:"SESSION_CLEANUP_INTERVAL_SECONDS"`
+	ClosedSessionRetentionSecs        float64  `toml:"CLOSED_SESSION_RETENTION_SECONDS"`
 	Domain                            []string `toml:"DOMAIN"`
 	MinVPNLabelLength                 int      `toml:"MIN_VPN_LABEL_LENGTH"`
 	SupportedUploadCompressionTypes   []int    `toml:"SUPPORTED_UPLOAD_COMPRESSION_TYPES"`
@@ -53,6 +56,9 @@ func defaultServerConfig() ServerConfig {
 		DNSRequestWorkers:                 workers,
 		MaxPacketSize:                     65535,
 		DropLogIntervalSecs:               2.0,
+		SessionTimeoutSecs:                300.0,
+		SessionCleanupIntervalSecs:        30.0,
+		ClosedSessionRetentionSecs:        600.0,
 		Domain:                            nil,
 		MinVPNLabelLength:                 3,
 		SupportedUploadCompressionTypes:   []int{0, 3},
@@ -112,6 +118,15 @@ func LoadServerConfig(filename string) (ServerConfig, error) {
 	if cfg.DropLogIntervalSecs <= 0 {
 		cfg.DropLogIntervalSecs = 2.0
 	}
+	if cfg.SessionTimeoutSecs <= 0 {
+		cfg.SessionTimeoutSecs = 300.0
+	}
+	if cfg.SessionCleanupIntervalSecs <= 0 {
+		cfg.SessionCleanupIntervalSecs = 30.0
+	}
+	if cfg.ClosedSessionRetentionSecs <= 0 {
+		cfg.ClosedSessionRetentionSecs = 600.0
+	}
 
 	if cfg.MinVPNLabelLength <= 0 {
 		cfg.MinVPNLabelLength = 3
@@ -140,6 +155,18 @@ func (c ServerConfig) Address() string {
 
 func (c ServerConfig) DropLogInterval() time.Duration {
 	return time.Duration(c.DropLogIntervalSecs * float64(time.Second))
+}
+
+func (c ServerConfig) SessionTimeout() time.Duration {
+	return time.Duration(c.SessionTimeoutSecs * float64(time.Second))
+}
+
+func (c ServerConfig) SessionCleanupInterval() time.Duration {
+	return time.Duration(c.SessionCleanupIntervalSecs * float64(time.Second))
+}
+
+func (c ServerConfig) ClosedSessionRetention() time.Duration {
+	return time.Duration(c.ClosedSessionRetentionSecs * float64(time.Second))
 }
 
 func (c ServerConfig) EncryptionKeyPath() string {

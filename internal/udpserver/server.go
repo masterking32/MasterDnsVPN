@@ -15,6 +15,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"masterdnsvpn-go/internal/compression"
 	"masterdnsvpn-go/internal/config"
@@ -71,6 +72,9 @@ func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Se
 }
 
 func (s *Server) Run(ctx context.Context) error {
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{
 		IP:   net.ParseIP(s.cfg.UDPHost),
 		Port: s.cfg.UDPPort,
@@ -97,17 +101,23 @@ func (s *Server) Run(ctx context.Context) error {
 
 	reqCh := make(chan request, s.cfg.MaxConcurrentRequests)
 	var workerWG sync.WaitGroup
+	cleanupDone := make(chan struct{})
+
+	go func() {
+		defer close(cleanupDone)
+		s.sessionCleanupLoop(runCtx)
+	}()
 
 	for i := range s.cfg.DNSRequestWorkers {
 		workerWG.Add(1)
 		go func(workerID int) {
 			defer workerWG.Done()
-			s.worker(ctx, conn, reqCh, workerID)
+			s.worker(runCtx, conn, reqCh, workerID)
 		}(i + 1)
 	}
 
 	go func() {
-		<-ctx.Done()
+		<-runCtx.Done()
 		_ = conn.Close()
 	}()
 
@@ -117,7 +127,7 @@ func (s *Server) Run(ctx context.Context) error {
 		readerWG.Add(1)
 		go func(readerID int) {
 			defer readerWG.Done()
-			if err := s.readLoop(ctx, conn, reqCh, readerID); err != nil {
+			if err := s.readLoop(runCtx, conn, reqCh, readerID); err != nil {
 				select {
 				case readErrCh <- err:
 				default:
@@ -129,6 +139,8 @@ func (s *Server) Run(ctx context.Context) error {
 	readerWG.Wait()
 	close(reqCh)
 	workerWG.Wait()
+	cancel()
+	<-cleanupDone
 
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -139,6 +151,32 @@ func (s *Server) Run(ctx context.Context) error {
 		return err
 	default:
 		return nil
+	}
+}
+
+func (s *Server) sessionCleanupLoop(ctx context.Context) {
+	interval := s.cfg.SessionCleanupInterval()
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			expired := s.sessions.Cleanup(now, s.cfg.SessionTimeout(), s.cfg.ClosedSessionRetention())
+			if len(expired) == 0 {
+				continue
+			}
+			s.log.Infof(
+				"🧹 <green>Expired Sessions Cleaned</green> <magenta>|</magenta> <blue>Count</blue>: <cyan>%d</cyan>",
+				len(expired),
+			)
+		}
 	}
 }
 
