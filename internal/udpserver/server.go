@@ -418,7 +418,12 @@ func (s *Server) handleSessionInitRequest(questionPacket []byte, decision domain
 	resolvedUpload := resolveCompressionType(requestedUpload, s.uploadCompressionMask)
 	resolvedDownload := resolveCompressionType(requestedDownload, s.downloadCompressionMask)
 
-	record, _, err := s.sessions.findOrCreate(vpnPacket.Payload, resolvedUpload, resolvedDownload)
+	record, _, err := s.sessions.findOrCreate(
+		vpnPacket.Payload,
+		resolvedUpload,
+		resolvedDownload,
+		s.cfg.MaxPacketsPerBatch,
+	)
 	if err != nil || record == nil {
 		return nil
 	}

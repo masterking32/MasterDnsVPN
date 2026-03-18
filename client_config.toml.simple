@@ -28,6 +28,10 @@ LOCAL_DNS_CACHE_FLUSH_INTERVAL_SECONDS = 60.0
 # 0=Round Robin (default), 1=Random, 2=Round Robin, 3=Least Loss, 4=Lowest Latency
 RESOLVER_BALANCING_STRATEGY = 0
 
+# Hard cap for how many small control packets may be packed into one block.
+# The effective runtime value is also limited by 50% of synced upload MTU.
+MAX_PACKETS_PER_BATCH = 5
+
 # If true, MTU test responses request Base64 TXT payloads from server.
 # If false, server returns raw byte TXT payloads.
 BASE_ENCODE_DATA = false

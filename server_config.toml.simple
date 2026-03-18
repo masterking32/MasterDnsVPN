@@ -40,6 +40,10 @@ SESSION_TIMEOUT_SECONDS = 300.0
 SESSION_CLEANUP_INTERVAL_SECONDS = 30.0
 CLOSED_SESSION_RETENTION_SECONDS = 600.0
 
+# Hard cap for how many small control packets may be packed into one block.
+# The effective runtime value is also limited by 80% of session download MTU.
+MAX_PACKETS_PER_BATCH = 20
+
 # Allowed tunnel domains.
 DOMAIN = ["v.domain.com"]
 

@@ -395,7 +395,7 @@ func TestSessionStoreExpiresReuseSignatureWithoutDroppingSession(t *testing.T) {
 	store := newSessionStore()
 	payload := []byte{1, 0x21, 0x00, 0x96, 0x00, 0xC8, 0x44, 0x33, 0x22, 0x11}
 
-	record, reused, err := store.findOrCreate(payload, 2, 1)
+	record, reused, err := store.findOrCreate(payload, 2, 1, 20)
 	if err != nil {
 		t.Fatalf("findOrCreate returned error: %v", err)
 	}
@@ -428,7 +428,7 @@ func TestSessionStoreCleanupMovesExpiredSessionToRecentClosed(t *testing.T) {
 	store := newSessionStore()
 	payload := []byte{1, 0x21, 0x00, 0x96, 0x00, 0xC8, 0x44, 0x33, 0x22, 0x11}
 
-	record, reused, err := store.findOrCreate(payload, 3, 0)
+	record, reused, err := store.findOrCreate(payload, 3, 0, 20)
 	if err != nil {
 		t.Fatalf("findOrCreate returned error: %v", err)
 	}
@@ -464,7 +464,7 @@ func TestSessionStoreTouchRefreshesActivity(t *testing.T) {
 	store := newSessionStore()
 	payload := []byte{1, 0x21, 0x00, 0x96, 0x00, 0xC8, 0x44, 0x33, 0x22, 0x11}
 
-	record, _, err := store.findOrCreate(payload, 0, 0)
+	record, _, err := store.findOrCreate(payload, 0, 0, 20)
 	if err != nil {
 		t.Fatalf("findOrCreate returned error: %v", err)
 	}
@@ -488,7 +488,7 @@ func TestSessionStoreValidateAndTouchRefreshesActivity(t *testing.T) {
 	store := newSessionStore()
 	payload := []byte{1, 0x21, 0x00, 0x96, 0x00, 0xC8, 0x44, 0x33, 0x22, 0x11}
 
-	record, _, err := store.findOrCreate(payload, 0, 0)
+	record, _, err := store.findOrCreate(payload, 0, 0, 20)
 	if err != nil {
 		t.Fatalf("findOrCreate returned error: %v", err)
 	}

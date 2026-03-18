@@ -35,6 +35,7 @@ type ServerConfig struct {
 	SessionTimeoutSecs                float64  `toml:"SESSION_TIMEOUT_SECONDS"`
 	SessionCleanupIntervalSecs        float64  `toml:"SESSION_CLEANUP_INTERVAL_SECONDS"`
 	ClosedSessionRetentionSecs        float64  `toml:"CLOSED_SESSION_RETENTION_SECONDS"`
+	MaxPacketsPerBatch                int      `toml:"MAX_PACKETS_PER_BATCH"`
 	Domain                            []string `toml:"DOMAIN"`
 	MinVPNLabelLength                 int      `toml:"MIN_VPN_LABEL_LENGTH"`
 	SupportedUploadCompressionTypes   []int    `toml:"SUPPORTED_UPLOAD_COMPRESSION_TYPES"`
@@ -63,6 +64,7 @@ func defaultServerConfig() ServerConfig {
 		SessionTimeoutSecs:                300.0,
 		SessionCleanupIntervalSecs:        30.0,
 		ClosedSessionRetentionSecs:        600.0,
+		MaxPacketsPerBatch:                20,
 		Domain:                            nil,
 		MinVPNLabelLength:                 3,
 		SupportedUploadCompressionTypes:   []int{0, 3},
@@ -136,6 +138,9 @@ func LoadServerConfig(filename string) (ServerConfig, error) {
 	}
 	if cfg.ClosedSessionRetentionSecs <= 0 {
 		cfg.ClosedSessionRetentionSecs = 600.0
+	}
+	if cfg.MaxPacketsPerBatch < 1 {
+		cfg.MaxPacketsPerBatch = 20
 	}
 
 	if cfg.MinVPNLabelLength <= 0 {

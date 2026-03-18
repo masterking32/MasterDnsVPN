@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"masterdnsvpn-go/internal/arq"
 	"masterdnsvpn-go/internal/compression"
 	"masterdnsvpn-go/internal/config"
 	"masterdnsvpn-go/internal/dnscache"
@@ -41,6 +42,7 @@ type Client struct {
 	syncedUploadMTU     int
 	syncedDownloadMTU   int
 	syncedUploadChars   int
+	maxPackedBlocks     int
 }
 
 type Connection struct {
@@ -91,6 +93,7 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 	c.ResetRuntimeState(true)
 	c.uploadCompression = uint8(cfg.UploadCompressionType)
 	c.downloadCompression = uint8(cfg.DownloadCompressionType)
+	c.maxPackedBlocks = 1
 	return c
 }
 
@@ -138,12 +141,27 @@ func (c *Client) SessionCookie() uint8 {
 	return c.sessionCookie
 }
 
+func (c *Client) MaxPackedBlocks() int {
+	if c.maxPackedBlocks < 1 {
+		return 1
+	}
+	return c.maxPackedBlocks
+}
+
 func (c *Client) ResetRuntimeState(resetSessionCookie bool) {
 	c.enqueueSeq = 0
 	c.sessionID = 0
 	if resetSessionCookie {
 		c.sessionCookie = 0
 	}
+	c.maxPackedBlocks = 1
+}
+
+func (c *Client) updateMaxPackedBlocks() {
+	c.maxPackedBlocks = arq.ComputeClientPackedControlBlockLimit(
+		c.syncedUploadMTU,
+		c.cfg.MaxPacketsPerBatch,
+	)
 }
 
 func (c *Client) applySessionCompressionPolicy() {

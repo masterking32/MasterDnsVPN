@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"masterdnsvpn-go/internal/arq"
 	"masterdnsvpn-go/internal/compression"
 )
 
@@ -37,6 +38,7 @@ type sessionRecord struct {
 	DownloadMTU         uint16
 	VerifyCode          [4]byte
 	Signature           [sessionInitDataSize]byte
+	MaxPackedBlocks     int
 	CreatedAt           time.Time
 	LastActivityAt      time.Time
 	ReuseUntil          time.Time
@@ -83,7 +85,7 @@ func newSessionStore() *sessionStore {
 	}
 }
 
-func (s *sessionStore) findOrCreate(payload []byte, uploadCompressionType uint8, downloadCompressionType uint8) (*sessionRecord, bool, error) {
+func (s *sessionStore) findOrCreate(payload []byte, uploadCompressionType uint8, downloadCompressionType uint8, maxPacketsPerBatch int) (*sessionRecord, bool, error) {
 	if len(payload) != sessionInitDataSize || !isValidSessionResponseMode(payload[0]) {
 		return nil, false, nil
 	}
@@ -124,6 +126,7 @@ func (s *sessionStore) findOrCreate(payload []byte, uploadCompressionType uint8,
 	record.DownloadCompression = compression.NormalizeType(downloadCompressionType)
 	record.UploadMTU = clampMTU(binary.BigEndian.Uint16(payload[2:4]))
 	record.DownloadMTU = clampMTU(binary.BigEndian.Uint16(payload[4:6]))
+	record.MaxPackedBlocks = arq.ComputeServerPackedControlBlockLimit(int(record.DownloadMTU), maxPacketsPerBatch)
 	copy(record.VerifyCode[:], payload[6:10])
 	record.Cookie = randomCookie()
 
