@@ -34,3 +34,29 @@ func TestParseTargetPayloadRejectsUnsupportedType(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestParseAndBuildUDPDatagram(t *testing.T) {
+	packet := BuildUDPDatagram(Target{
+		AddressType: AddressTypeDomain,
+		Host:        "example.com",
+		Port:        53,
+	}, []byte{0x01, 0x02, 0x03})
+
+	datagram, err := ParseUDPDatagram(packet)
+	if err != nil {
+		t.Fatalf("ParseUDPDatagram returned error: %v", err)
+	}
+	if datagram.Target.Host != "example.com" || datagram.Target.Port != 53 {
+		t.Fatalf("unexpected datagram target: %+v", datagram.Target)
+	}
+	if string(datagram.Payload) != string([]byte{0x01, 0x02, 0x03}) {
+		t.Fatalf("unexpected datagram payload: %v", datagram.Payload)
+	}
+}
+
+func TestParseUDPDatagramRejectsFragments(t *testing.T) {
+	packet := []byte{0x00, 0x00, 0x01, 0x01, 127, 0, 0, 1, 0x00, 0x35, 0xAA}
+	if _, err := ParseUDPDatagram(packet); err != ErrUDPFragmented {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

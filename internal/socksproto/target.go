@@ -70,3 +70,29 @@ func ParseTargetPayload(payload []byte) (Target, error) {
 	target.Port = binary.BigEndian.Uint16(payload[offset : offset+2])
 	return target, nil
 }
+
+func ParseIPv4(host string) net.IP {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return net.IPv4zero.To4()
+	}
+	if ipv4 := ip.To4(); ipv4 != nil {
+		return ipv4
+	}
+	return net.IPv4zero.To4()
+}
+
+func ParseIPv6(host string) net.IP {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return net.IPv6zero
+	}
+	if ipv4 := ip.To4(); ipv4 != nil {
+		return net.IPv6zero
+	}
+	ip = ip.To16()
+	if ip == nil {
+		return net.IPv6zero
+	}
+	return ip
+}

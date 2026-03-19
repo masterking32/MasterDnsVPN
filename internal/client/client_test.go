@@ -22,6 +22,7 @@ import (
 	DnsParser "masterdnsvpn-go/internal/dnsparser"
 	Enums "masterdnsvpn-go/internal/enums"
 	"masterdnsvpn-go/internal/security"
+	SocksProto "masterdnsvpn-go/internal/socksproto"
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 
@@ -981,13 +982,17 @@ func TestPerformSOCKS5HandshakeParsesConnectRequest(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		defer close(done)
-		payload, err := performSOCKS5Handshake(serverConn)
+		request, err := performSOCKS5Handshake(serverConn)
 		if err != nil {
 			done <- err
 			return
 		}
+		if request.Command != 0x01 {
+			done <- errors.New("unexpected socks5 command")
+			return
+		}
 		expected := []byte{0x03, 0x0B, 'e', 'x', 'a', 'm', 'p', 'l', 'e', '.', 'c', 'o', 'm', 0x01, 0xBB}
-		if string(payload) != string(expected) {
+		if string(request.TargetPayload) != string(expected) {
 			done <- errors.New("unexpected socks5 payload")
 			return
 		}
@@ -1010,6 +1015,85 @@ func TestPerformSOCKS5HandshakeParsesConnectRequest(t *testing.T) {
 	}
 	if err := <-done; err != nil {
 		t.Fatalf("performSOCKS5Handshake returned error: %v", err)
+	}
+}
+
+func TestPerformSOCKS5HandshakeParsesUDPAssociateRequest(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		defer close(done)
+		request, err := performSOCKS5Handshake(serverConn)
+		if err != nil {
+			done <- err
+			return
+		}
+		if request.Command != 0x03 {
+			done <- errors.New("unexpected socks5 udp associate command")
+			return
+		}
+		expected := []byte{0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+		if string(request.TargetPayload) != string(expected) {
+			done <- errors.New("unexpected socks5 udp associate payload")
+			return
+		}
+		done <- nil
+	}()
+
+	if _, err := clientConn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+		t.Fatalf("Write returned error: %v", err)
+	}
+	reply := make([]byte, 2)
+	if _, err := io.ReadFull(clientConn, reply); err != nil {
+		t.Fatalf("ReadFull returned error: %v", err)
+	}
+	request := []byte{0x05, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	if _, err := clientConn.Write(request); err != nil {
+		t.Fatalf("Write returned error: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("performSOCKS5Handshake returned error: %v", err)
+	}
+}
+
+func TestHandleSOCKS5UDPDatagramResolvesDNS(t *testing.T) {
+	codec, err := security.NewCodec(0, "")
+	if err != nil {
+		t.Fatalf("NewCodec returned error: %v", err)
+	}
+	c := New(config.ClientConfig{}, nil, codec)
+
+	query := buildClientTestDNSQuery(0x2201, "example.com", Enums.DNS_RECORD_TYPE_A, Enums.DNSQ_CLASS_IN)
+	serverFailure, err := DnsParser.BuildServerFailureResponse(query)
+	if err != nil {
+		t.Fatalf("BuildServerFailureResponse returned error: %v", err)
+	}
+
+	cacheKey := dnscache.BuildKey("example.com", Enums.DNS_RECORD_TYPE_A, Enums.DNSQ_CLASS_IN)
+	c.localDNSCache.SetReady(cacheKey, "example.com", Enums.DNS_RECORD_TYPE_A, Enums.DNSQ_CLASS_IN, serverFailure, c.now())
+
+	packet := SocksProto.BuildUDPDatagram(SocksProto.Target{
+		AddressType: SocksProto.AddressTypeIPv4,
+		Host:        "8.8.8.8",
+		Port:        53,
+	}, query)
+	response := c.handleSOCKS5UDPDatagram(packet)
+	if len(response) == 0 {
+		t.Fatal("expected udp associate dns response")
+	}
+
+	datagram, err := SocksProto.ParseUDPDatagram(response)
+	if err != nil {
+		t.Fatalf("ParseUDPDatagram returned error: %v", err)
+	}
+	if datagram.Target.Port != 53 || datagram.Target.Host != "8.8.8.8" {
+		t.Fatalf("unexpected udp response target: %+v", datagram.Target)
+	}
+	if binary.BigEndian.Uint16(datagram.Payload[:2]) != 0x2201 {
+		t.Fatalf("expected dns response id to be preserved, got=%#x", binary.BigEndian.Uint16(datagram.Payload[:2]))
 	}
 }
 
