@@ -24,10 +24,11 @@ var streamOutboundAckTypeByPending = buildStreamOutboundAckTypeByPending()
 var streamOutboundAckRequired = buildStreamOutboundAckRequired()
 
 type streamOutboundStore struct {
-	mu         sync.Mutex
-	sessions   map[uint8]*streamOutboundSession
-	window     int
-	queueLimit int
+	mu                   sync.Mutex
+	sessions             map[uint8]*streamOutboundSession
+	configuredPackedCaps [256]uint16
+	window               int
+	queueLimit           int
 }
 
 type outboundPendingPacket struct {
@@ -72,12 +73,13 @@ func (s *streamOutboundStore) ConfigureSession(sessionID uint8, maxPackedBlocks 
 	if s == nil || sessionID == 0 {
 		return
 	}
+	limit := uint16(max(1, maxPackedBlocks))
 	s.mu.Lock()
-	session := s.ensureSessionLocked(sessionID)
-	maxPackedBlocks = max(1, maxPackedBlocks)
-	if session.maxPackedBlocks != maxPackedBlocks {
-		session.maxPackedBlocks = maxPackedBlocks
-		session.scheduler.SetMaxPackedBlocks(maxPackedBlocks)
+	s.configuredPackedCaps[sessionID] = limit
+	session := s.sessions[sessionID]
+	if session != nil && session.maxPackedBlocks != int(limit) {
+		session.maxPackedBlocks = int(limit)
+		session.scheduler.SetMaxPackedBlocks(int(limit))
 	}
 	s.mu.Unlock()
 }
@@ -271,6 +273,7 @@ func (s *streamOutboundStore) RemoveSession(sessionID uint8) {
 	}
 	s.mu.Lock()
 	delete(s.sessions, sessionID)
+	s.configuredPackedCaps[sessionID] = 0
 	s.mu.Unlock()
 }
 
@@ -279,11 +282,15 @@ func (s *streamOutboundStore) ensureSessionLocked(sessionID uint8) *streamOutbou
 	if session != nil {
 		return session
 	}
+	maxPackedBlocks := int(s.configuredPackedCaps[sessionID])
+	if maxPackedBlocks < 1 {
+		maxPackedBlocks = 1
+	}
 	session = &streamOutboundSession{
-		scheduler:       arq.NewScheduler(1),
+		scheduler:       arq.NewScheduler(maxPackedBlocks),
 		pending:         make([]outboundPendingPacket, 0, s.window),
 		retryBase:       streamOutboundInitialRetryDelay,
-		maxPackedBlocks: 1,
+		maxPackedBlocks: maxPackedBlocks,
 	}
 	s.sessions[sessionID] = session
 	return session

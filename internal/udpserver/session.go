@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"masterdnsvpn-go/internal/arq"
-	"masterdnsvpn-go/internal/compression"
 )
 
 var ErrSessionTableFull = errors.New("session table full")
@@ -160,8 +159,8 @@ func (s *sessionStore) findOrCreate(payload []byte, uploadCompressionType uint8,
 	}
 	record.reuseUntilUnixNano = record.ReuseUntil.UnixNano()
 	record.setLastActivityUnixNano(nowUnixNano)
-	record.UploadCompression = compression.NormalizeType(uploadCompressionType)
-	record.DownloadCompression = compression.NormalizeType(downloadCompressionType)
+	record.UploadCompression = uploadCompressionType
+	record.DownloadCompression = downloadCompressionType
 	record.UploadMTU = clampMTU(binary.BigEndian.Uint16(payload[2:4]))
 	record.DownloadMTU = clampMTU(binary.BigEndian.Uint16(payload[4:6]))
 	record.MaxPackedBlocks = arq.ComputeServerPackedControlBlockLimit(int(record.DownloadMTU), maxPacketsPerBatch)
