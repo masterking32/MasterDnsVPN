@@ -149,6 +149,7 @@ func BuildVPNResponsePacket(questionPacket []byte, answerName string, packet Vpn
 		CompressionType: packet.CompressionType,
 		Payload:         packet.Payload,
 	}, compression.DefaultMinSize)
+
 	if err != nil {
 		return nil, err
 	}
@@ -157,6 +158,7 @@ func BuildVPNResponsePacket(questionPacket []byte, answerName string, packet Vpn
 	if err != nil {
 		return nil, err
 	}
+
 	return BuildTXTResponsePacket(questionPacket, answerName, answerPayloads)
 }
 
@@ -285,31 +287,36 @@ func buildTXTAnswerChunk(data []byte, baseEncode bool) []byte {
 	if !baseEncode {
 		return appendLengthPrefixedTXT(data)
 	}
-	return appendLengthPrefixedTXT(baseCodec.EncodeRawBase64(data))
+	return appendLengthPrefixedBase64TXT(data)
 }
 
 func appendRawTXTAnswerChunks(chunks [][]byte, payload []byte, cursor int, maxChunkNData int) [][]byte {
 	for chunkID := 1; cursor < len(payload); chunkID++ {
 		end := min(cursor+maxChunkNData, len(payload))
-		rawChunk := make([]byte, 1+end-cursor)
-		rawChunk[0] = byte(chunkID)
-		copy(rawChunk[1:], payload[cursor:end])
-		chunks = append(chunks, appendLengthPrefixedTXT(rawChunk))
+		chunks = append(chunks, buildLengthPrefixedTXTChunk(byte(chunkID), payload[cursor:end]))
 		cursor = end
 	}
 	return chunks
 }
 
 func appendBase64TXTAnswerChunks(chunks [][]byte, payload []byte, cursor int, maxChunkNData int) [][]byte {
+	rawChunk := make([]byte, 1+maxChunkNData)
 	for chunkID := 1; cursor < len(payload); chunkID++ {
 		end := min(cursor+maxChunkNData, len(payload))
-		rawChunk := make([]byte, 1+end-cursor)
 		rawChunk[0] = byte(chunkID)
-		copy(rawChunk[1:], payload[cursor:end])
-		chunks = append(chunks, appendLengthPrefixedTXT(baseCodec.EncodeRawBase64(rawChunk)))
+		size := copy(rawChunk[1:], payload[cursor:end])
+		chunks = append(chunks, appendLengthPrefixedBase64TXT(rawChunk[:1+size]))
 		cursor = end
 	}
 	return chunks
+}
+
+func buildLengthPrefixedTXTChunk(prefix byte, data []byte) []byte {
+	out := make([]byte, 2+len(data))
+	out[0] = byte(1 + len(data))
+	out[1] = prefix
+	copy(out[2:], data)
+	return out
 }
 
 func appendLengthPrefixedTXT(data []byte) []byte {
@@ -331,6 +338,13 @@ func appendLengthPrefixedTXT(data []byte) []byte {
 		out = append(out, data[start:end]...)
 	}
 	return out
+}
+
+func appendLengthPrefixedBase64TXT(data []byte) []byte {
+	encodedLen := baseCodec.EncodedRawBase64Len(len(data))
+	out := make([]byte, 1, 1+encodedLen)
+	out[0] = byte(encodedLen)
+	return baseCodec.EncodeRawBase64To(out, data)
 }
 
 func extractTXTAnswerPayloads(parsed Packet) [][]byte {
