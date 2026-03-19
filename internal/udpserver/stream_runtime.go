@@ -35,8 +35,7 @@ func (s *Server) startStreamUpstreamReadLoop(sessionID uint8, streamID uint16, c
 					)
 				}
 				now := time.Now()
-				if rstSeq, ok := s.streams.NextOutboundSequence(sessionID, streamID, now); ok {
-					_ = s.streams.MarkReset(sessionID, streamID, rstSeq, now)
+				if rstSeq, ok := s.streams.ResetWithNextOutboundSequence(sessionID, streamID, now); ok {
 					_ = s.queueSessionPacket(sessionID, VpnProto.Packet{
 						PacketType:  Enums.PACKET_STREAM_RST,
 						StreamID:    streamID,
@@ -71,8 +70,7 @@ func (s *Server) startStreamUpstreamReadLoop(sessionID uint8, streamID uint16, c
 						)
 					}
 					rstNow := time.Now()
-					if rstSeq, ok := s.streams.NextOutboundSequence(sessionID, streamID, rstNow); ok {
-						_ = s.streams.MarkReset(sessionID, streamID, rstSeq, rstNow)
+					if rstSeq, ok := s.streams.ResetWithNextOutboundSequence(sessionID, streamID, rstNow); ok {
 						_ = s.queueSessionPacket(sessionID, VpnProto.Packet{
 							PacketType:  Enums.PACKET_STREAM_RST,
 							StreamID:    streamID,

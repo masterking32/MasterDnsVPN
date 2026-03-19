@@ -214,6 +214,37 @@ func (s *streamStateStore) NextOutboundSequence(sessionID uint8, streamID uint16
 	return nextSeq, true
 }
 
+func (s *streamStateStore) ResetWithNextOutboundSequence(sessionID uint8, streamID uint16, now time.Time) (uint16, bool) {
+	s.mu.Lock()
+	streams := s.sessions[sessionID]
+	record := s.lookupLocked(sessionID, streamID)
+	if record == nil {
+		s.mu.Unlock()
+		return 0, false
+	}
+
+	nextSeq := record.OutboundSeq + 1
+	if nextSeq == 0 {
+		nextSeq = 1
+	}
+	record.OutboundSeq = nextSeq
+
+	conn := record.UpstreamConn
+	record.UpstreamConn = nil
+	record.Connected = false
+	record.LastActivityAt = now
+	record.LastSequence = nextSeq
+	record.State = Enums.STREAM_STATE_RESET
+	delete(streams, streamID)
+	if len(streams) == 0 {
+		delete(s.sessions, sessionID)
+	}
+	s.mu.Unlock()
+
+	streamutil.SafeClose(conn)
+	return nextSeq, true
+}
+
 func (s *streamStateStore) MarkReset(sessionID uint8, streamID uint16, sequenceNum uint16, now time.Time) bool {
 	s.mu.Lock()
 	streams := s.sessions[sessionID]
