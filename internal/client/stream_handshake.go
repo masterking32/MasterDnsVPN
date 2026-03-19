@@ -40,9 +40,7 @@ func (c *Client) OpenSOCKS5Stream(targetPayload []byte, timeout time.Duration) (
 	if len(targetPayload) == 0 {
 		return 0, ErrStreamHandshakeFailed
 	}
-	if timeout <= 0 {
-		timeout = 5 * time.Second
-	}
+	timeout = normalizeTimeout(timeout, defaultRuntimeTimeout)
 
 	streamID := c.nextStreamID()
 	synPacket, err := c.exchangeStreamControlPacket(Enums.PACKET_STREAM_SYN, streamID, 1, nil, timeout)
@@ -76,9 +74,7 @@ func (c *Client) OpenTCPStream(timeout time.Duration) (uint16, error) {
 	if !c.SessionReady() {
 		return 0, ErrSessionInitFailed
 	}
-	if timeout <= 0 {
-		timeout = 5 * time.Second
-	}
+	timeout = normalizeTimeout(timeout, defaultRuntimeTimeout)
 
 	streamID := c.nextStreamID()
 	synPacket, err := c.exchangeStreamControlPacket(
@@ -101,21 +97,14 @@ func (c *Client) exchangeStreamControlPacket(packetType uint8, streamID uint16, 
 	if c == nil {
 		return VpnProto.Packet{}, ErrStreamHandshakeFailed
 	}
-
-	connections := c.GetUniqueConnections(3)
-	if len(connections) == 0 {
-		return VpnProto.Packet{}, ErrNoValidConnections
+	timeout = normalizeTimeout(timeout, defaultRuntimeTimeout)
+	connections, err := c.runtimeConnections(nil)
+	if err != nil {
+		return VpnProto.Packet{}, err
 	}
-
-	lastErr := ErrStreamHandshakeFailed
-	for _, connection := range connections {
-		packet, err := c.sendStreamControlPacketWithConnection(connection, packetType, streamID, sequenceNum, payload, timeout)
-		if err == nil {
-			return packet, nil
-		}
-		lastErr = err
-	}
-	return VpnProto.Packet{}, lastErr
+	return tryConnections(connections, ErrStreamHandshakeFailed, func(connection Connection) (VpnProto.Packet, error) {
+		return c.sendStreamControlPacketWithConnection(connection, packetType, streamID, sequenceNum, payload, timeout)
+	})
 }
 
 func (c *Client) sendStreamControlPacketWithConnection(connection Connection, packetType uint8, streamID uint16, sequenceNum uint16, payload []byte, timeout time.Duration) (VpnProto.Packet, error) {

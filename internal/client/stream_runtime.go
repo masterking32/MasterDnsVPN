@@ -269,9 +269,7 @@ func (c *Client) runClientStreamTXLoop(stream *clientStream, timeout time.Durati
 			c.deleteStream(stream.ID)
 		}
 	}()
-	if timeout <= 0 {
-		timeout = 5 * time.Second
-	}
+	timeout = normalizeTimeout(timeout, defaultRuntimeTimeout)
 
 	for {
 		if c.expireClientStreamTX(stream, time.Now()) {
