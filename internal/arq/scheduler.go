@@ -560,20 +560,16 @@ func computePackedControlBlockLimit(mtu int, usagePercent int, maxPacketsPerBatc
 	}
 
 	usableBudget := (mtu * usagePercent) / 100
-	if usableBudget < PackedControlBlockSize {
-		return defaultPackedControlBlockLimit
-	}
-
 	mtuLimit := usableBudget / PackedControlBlockSize
 	if mtuLimit < 1 {
 		mtuLimit = defaultPackedControlBlockLimit
 	}
 
 	userLimit := normalizePackedBlockLimit(maxPacketsPerBatch)
-	if mtuLimit < userLimit {
-		return mtuLimit
+	if userLimit < mtuLimit {
+		return userLimit
 	}
-	return userLimit
+	return mtuLimit
 }
 
 func normalizePackedBlockLimit(limit int) int {

@@ -537,6 +537,7 @@ func (s *Server) handleSessionInitRequest(questionPacket []byte, decision domain
 	if vpnPacket.SessionID != 0 || len(vpnPacket.Payload) != sessionInitDataSize {
 		return nil
 	}
+
 	requestedUpload, requestedDownload := compression.SplitPair(vpnPacket.Payload[1])
 	resolvedUpload := resolveCompressionType(requestedUpload, s.uploadCompressionMask)
 	resolvedDownload := resolveCompressionType(requestedDownload, s.downloadCompressionMask)
@@ -547,6 +548,7 @@ func (s *Server) handleSessionInitRequest(questionPacket []byte, decision domain
 		resolvedDownload,
 		s.cfg.MaxPacketsPerBatch,
 	)
+
 	if err != nil || record == nil {
 		return nil
 	}
@@ -562,9 +564,11 @@ func (s *Server) handleSessionInitRequest(questionPacket []byte, decision domain
 		PacketType: Enums.PACKET_SESSION_ACCEPT,
 		Payload:    responsePayload,
 	}, record.ResponseMode == mtuProbeModeBase64)
+
 	if err != nil {
 		return nil
 	}
+
 	return response
 }
 

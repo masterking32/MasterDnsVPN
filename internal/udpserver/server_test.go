@@ -1111,10 +1111,12 @@ func TestSessionStoreExpiresReuseSignatureWithoutDroppingSession(t *testing.T) {
 	store.mu.Lock()
 	store.bySig[record.Signature] = record.ID
 	record.ReuseUntil = time.Now().Add(-time.Second)
+	record.reuseUntilUnixNano = record.ReuseUntil.UnixNano()
+	store.nextReuseSweepUnixNano = record.reuseUntilUnixNano
 	store.mu.Unlock()
 
 	store.mu.Lock()
-	store.expireReuseLocked(time.Now())
+	store.expireReuseLocked(time.Now().UnixNano())
 	if store.byID[record.ID] == nil {
 		store.mu.Unlock()
 		t.Fatal("expired reuse window must not remove active session record")

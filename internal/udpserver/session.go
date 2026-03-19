@@ -42,6 +42,7 @@ type sessionRecord struct {
 	MaxPackedBlocks      int
 	CreatedAt            time.Time
 	ReuseUntil           time.Time
+	reuseUntilUnixNano   int64
 	lastActivityUnixNano int64
 }
 
@@ -97,17 +98,22 @@ type sessionValidationResult struct {
 }
 
 type sessionStore struct {
-	mu           sync.Mutex
-	nextID       uint16
-	byID         [maxServerSessions]*sessionRecord
-	bySig        map[[sessionInitDataSize]byte]uint8
-	recentClosed map[uint8]closedSessionRecord
+	mu                     sync.Mutex
+	nextID                 uint16
+	activeCount            uint16
+	nextReuseSweepUnixNano int64
+	cookieBytes            [32]byte
+	cookieIndex            int
+	byID                   [maxServerSessions]*sessionRecord
+	bySig                  map[[sessionInitDataSize]byte]uint8
+	recentClosed           map[uint8]closedSessionRecord
 }
 
 func newSessionStore() *sessionStore {
 	return &sessionStore{
 		bySig:        make(map[[sessionInitDataSize]byte]uint8, 64),
 		recentClosed: make(map[uint8]closedSessionRecord, 32),
+		cookieIndex:  32,
 	}
 }
 
@@ -120,15 +126,16 @@ func (s *sessionStore) findOrCreate(payload []byte, uploadCompressionType uint8,
 	copy(signature[:], payload[:sessionInitDataSize])
 
 	now := time.Now()
+	nowUnixNano := now.UnixNano()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.expireReuseLocked(now)
+	s.expireReuseLocked(nowUnixNano)
 
 	if sessionID, ok := s.bySig[signature]; ok {
 		if existing := s.byID[sessionID]; existing != nil {
-			if now.Before(existing.ReuseUntil) || now.Equal(existing.ReuseUntil) {
-				existing.setLastActivity(now)
+			if nowUnixNano <= existing.reuseUntilUnixNano {
+				existing.setLastActivityUnixNano(nowUnixNano)
 				return existing, true, nil
 			}
 		}
@@ -147,29 +154,46 @@ func (s *sessionStore) findOrCreate(payload []byte, uploadCompressionType uint8,
 		ReuseUntil:   now.Add(sessionInitTTL),
 		Signature:    signature,
 	}
-	record.setLastActivity(now)
+	record.reuseUntilUnixNano = record.ReuseUntil.UnixNano()
+	record.setLastActivityUnixNano(nowUnixNano)
 	record.UploadCompression = compression.NormalizeType(uploadCompressionType)
 	record.DownloadCompression = compression.NormalizeType(downloadCompressionType)
 	record.UploadMTU = clampMTU(binary.BigEndian.Uint16(payload[2:4]))
 	record.DownloadMTU = clampMTU(binary.BigEndian.Uint16(payload[4:6]))
 	record.MaxPackedBlocks = arq.ComputeServerPackedControlBlockLimit(int(record.DownloadMTU), maxPacketsPerBatch)
 	copy(record.VerifyCode[:], payload[6:10])
-	record.Cookie = randomCookie()
+	record.Cookie = s.randomCookieLocked()
 
 	s.byID[slot] = record
+	s.activeCount++
 	s.bySig[signature] = uint8(slot)
+	s.updateNextReuseSweepLocked(record.reuseUntilUnixNano)
 	delete(s.recentClosed, uint8(slot))
 	s.nextID = uint16((slot + 1) % maxServerSessions)
 	return record, false, nil
 }
 
-func (s *sessionStore) expireReuseLocked(now time.Time) {
+func (s *sessionStore) expireReuseLocked(nowUnixNano int64) {
+	if len(s.bySig) == 0 {
+		s.nextReuseSweepUnixNano = 0
+		return
+	}
+	if s.nextReuseSweepUnixNano != 0 && nowUnixNano < s.nextReuseSweepUnixNano {
+		return
+	}
+
+	nextReuseSweepUnixNano := int64(0)
 	for signature, sessionID := range s.bySig {
 		record := s.byID[sessionID]
-		if record == nil || now.After(record.ReuseUntil) {
+		if record == nil || nowUnixNano > record.reuseUntilUnixNano {
 			delete(s.bySig, signature)
+			continue
+		}
+		if nextReuseSweepUnixNano == 0 || record.reuseUntilUnixNano < nextReuseSweepUnixNano {
+			nextReuseSweepUnixNano = record.reuseUntilUnixNano
 		}
 	}
+	s.nextReuseSweepUnixNano = nextReuseSweepUnixNano
 }
 
 func (s *sessionStore) Touch(sessionID uint8, now time.Time) bool {
@@ -276,6 +300,9 @@ func (s *sessionStore) Close(sessionID uint8, now time.Time, retention time.Dura
 
 	delete(s.bySig, record.Signature)
 	s.byID[sessionID] = nil
+	if s.activeCount > 0 {
+		s.activeCount--
+	}
 	if retention > 0 {
 		s.recentClosed[sessionID] = closedSessionRecord{
 			Cookie:       record.Cookie,
@@ -292,7 +319,8 @@ func (s *sessionStore) Cleanup(now time.Time, idleTimeout time.Duration, closedR
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.expireReuseLocked(now)
+	nowUnixNano := now.UnixNano()
+	s.expireReuseLocked(nowUnixNano)
 
 	for sessionID, record := range s.recentClosed {
 		if !now.Before(record.ExpiresAt) {
@@ -306,7 +334,6 @@ func (s *sessionStore) Cleanup(now time.Time, idleTimeout time.Duration, closedR
 
 	expired := make([]uint8, 0, 8)
 	idleTimeoutNanos := idleTimeout.Nanoseconds()
-	nowUnixNano := now.UnixNano()
 	for sessionID, record := range s.byID {
 		if record == nil {
 			continue
@@ -318,6 +345,9 @@ func (s *sessionStore) Cleanup(now time.Time, idleTimeout time.Duration, closedR
 
 		delete(s.bySig, record.Signature)
 		s.byID[sessionID] = nil
+		if s.activeCount > 0 {
+			s.activeCount--
+		}
 		if closedRetention > 0 {
 			s.recentClosed[uint8(sessionID)] = closedSessionRecord{
 				Cookie:       record.Cookie,
@@ -332,8 +362,17 @@ func (s *sessionStore) Cleanup(now time.Time, idleTimeout time.Duration, closedR
 }
 
 func (s *sessionStore) allocateSlotLocked() int {
-	for i := range maxServerSessions {
-		slot := int((s.nextID + uint16(i)) % maxServerSessions)
+	if s.activeCount >= maxServerSessions {
+		return -1
+	}
+
+	start := int(s.nextID)
+	for slot := start; slot < maxServerSessions; slot++ {
+		if s.byID[slot] == nil {
+			return slot
+		}
+	}
+	for slot := 0; slot < start; slot++ {
 		if s.byID[slot] == nil {
 			return slot
 		}
@@ -341,12 +380,23 @@ func (s *sessionStore) allocateSlotLocked() int {
 	return -1
 }
 
-func randomCookie() uint8 {
-	var buf [1]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		return 0
+func (s *sessionStore) randomCookieLocked() uint8 {
+	if s.cookieIndex >= len(s.cookieBytes) {
+		if _, err := rand.Read(s.cookieBytes[:]); err != nil {
+			s.cookieIndex = len(s.cookieBytes)
+			return 0
+		}
+		s.cookieIndex = 0
 	}
-	return buf[0]
+	value := s.cookieBytes[s.cookieIndex]
+	s.cookieIndex++
+	return value
+}
+
+func (s *sessionStore) updateNextReuseSweepLocked(reuseUntilUnixNano int64) {
+	if s.nextReuseSweepUnixNano == 0 || reuseUntilUnixNano < s.nextReuseSweepUnixNano {
+		s.nextReuseSweepUnixNano = reuseUntilUnixNano
+	}
 }
 
 func clampMTU(value uint16) uint16 {
@@ -360,11 +410,15 @@ func clampMTU(value uint16) uint16 {
 }
 
 func isValidSessionResponseMode(value uint8) bool {
-	return value == mtuProbeModeRaw || value == mtuProbeModeBase64
+	return value <= mtuProbeModeBase64
 }
 
 func (r *sessionRecord) setLastActivity(now time.Time) {
-	atomic.StoreInt64(&r.lastActivityUnixNano, now.UnixNano())
+	r.setLastActivityUnixNano(now.UnixNano())
+}
+
+func (r *sessionRecord) setLastActivityUnixNano(nowUnixNano int64) {
+	atomic.StoreInt64(&r.lastActivityUnixNano, nowUnixNano)
 }
 
 func (r *sessionRecord) lastActivity() int64 {
