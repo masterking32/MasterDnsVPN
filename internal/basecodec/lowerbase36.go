@@ -36,9 +36,7 @@ func EncodeLowerBase36(data []byte) string {
 
 	if leadingZeros == len(data) {
 		encoded := make([]byte, leadingZeros)
-		for i := range encoded {
-			encoded[i] = '0'
-		}
+		fillASCII(encoded, '0')
 		return string(encoded)
 	}
 
@@ -91,31 +89,7 @@ func DecodeLowerBase36(data []byte) ([]byte, error) {
 		return decodeLowerBase36Small(significant, leadingZeros)
 	}
 
-	decodedLE := make([]byte, 0, len(significant)*13/20+1)
-	for _, ch := range significant {
-		value := lowerBase36DecodeMap[ch]
-		if value == 0xFF {
-			return nil, ErrInvalidLowerBase36
-		}
-
-		carry := int(value)
-		for i := 0; i < len(decodedLE); i++ {
-			carry += int(decodedLE[i]) * 36
-			decodedLE[i] = byte(carry)
-			carry >>= 8
-		}
-		for carry > 0 {
-			decodedLE = append(decodedLE, byte(carry))
-			carry >>= 8
-		}
-	}
-
-	decoded := make([]byte, leadingZeros+len(decodedLE))
-	for i := 0; i < len(decodedLE); i++ {
-		decoded[len(decoded)-1-i] = decodedLE[i]
-	}
-
-	return decoded, nil
+	return decodeLowerBase36LargeBytes(significant, leadingZeros)
 }
 
 func DecodeLowerBase36String(data string) ([]byte, error) {
@@ -137,32 +111,7 @@ func DecodeLowerBase36String(data string) ([]byte, error) {
 		return decodeLowerBase36SmallString(significant, leadingZeros)
 	}
 
-	decodedLE := make([]byte, 0, len(significant)*13/20+1)
-	for i := 0; i < len(significant); i++ {
-		ch := significant[i]
-		value := lowerBase36DecodeMap[ch]
-		if value == 0xFF {
-			return nil, ErrInvalidLowerBase36
-		}
-
-		carry := int(value)
-		for j := 0; j < len(decodedLE); j++ {
-			carry += int(decodedLE[j]) * 36
-			decodedLE[j] = byte(carry)
-			carry >>= 8
-		}
-		for carry > 0 {
-			decodedLE = append(decodedLE, byte(carry))
-			carry >>= 8
-		}
-	}
-
-	decoded := make([]byte, leadingZeros+len(decodedLE))
-	for i := 0; i < len(decodedLE); i++ {
-		decoded[len(decoded)-1-i] = decodedLE[i]
-	}
-
-	return decoded, nil
+	return decodeLowerBase36LargeString(significant, leadingZeros)
 }
 
 func encodeLowerBase36Small(data []byte, leadingZeros int) string {
@@ -246,6 +195,9 @@ func newLowerBase36DecodeMap() [256]byte {
 	}
 	for i, ch := range lowerBase36Alphabet {
 		table[ch] = byte(i)
+		if ch >= 'a' && ch <= 'z' {
+			table[ch-'a'+'A'] = byte(i)
+		}
 	}
 	return table
 }
@@ -254,4 +206,64 @@ func reverseBytes(data []byte) {
 	for left, right := 0, len(data)-1; left < right; left, right = left+1, right-1 {
 		data[left], data[right] = data[right], data[left]
 	}
+}
+
+func fillASCII(data []byte, value byte) {
+	for i := 0; i < len(data); i++ {
+		data[i] = value
+	}
+}
+
+func decodeLowerBase36LargeBytes(data []byte, leadingZeros int) ([]byte, error) {
+	decodedLE := make([]byte, 0, len(data)*13/20+1)
+	for i := 0; i < len(data); i++ {
+		value := lowerBase36DecodeMap[data[i]]
+		if value == 0xFF {
+			return nil, ErrInvalidLowerBase36
+		}
+
+		var carry uint16 = uint16(value)
+		for j := 0; j < len(decodedLE); j++ {
+			carry += uint16(decodedLE[j]) * 36
+			decodedLE[j] = byte(carry)
+			carry >>= 8
+		}
+		for carry > 0 {
+			decodedLE = append(decodedLE, byte(carry))
+			carry >>= 8
+		}
+	}
+
+	return expandLittleEndianBase256(decodedLE, leadingZeros), nil
+}
+
+func decodeLowerBase36LargeString(data string, leadingZeros int) ([]byte, error) {
+	decodedLE := make([]byte, 0, len(data)*13/20+1)
+	for i := 0; i < len(data); i++ {
+		value := lowerBase36DecodeMap[data[i]]
+		if value == 0xFF {
+			return nil, ErrInvalidLowerBase36
+		}
+
+		var carry uint16 = uint16(value)
+		for j := 0; j < len(decodedLE); j++ {
+			carry += uint16(decodedLE[j]) * 36
+			decodedLE[j] = byte(carry)
+			carry >>= 8
+		}
+		for carry > 0 {
+			decodedLE = append(decodedLE, byte(carry))
+			carry >>= 8
+		}
+	}
+
+	return expandLittleEndianBase256(decodedLE, leadingZeros), nil
+}
+
+func expandLittleEndianBase256(decodedLE []byte, leadingZeros int) []byte {
+	decoded := make([]byte, leadingZeros+len(decodedLE))
+	for i := 0; i < len(decodedLE); i++ {
+		decoded[len(decoded)-1-i] = decodedLE[i]
+	}
+	return decoded
 }

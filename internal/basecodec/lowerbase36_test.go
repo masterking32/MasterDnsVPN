@@ -47,7 +47,6 @@ func TestDecodeLowerBase36RoundTrip(t *testing.T) {
 
 func TestDecodeLowerBase36RejectsInvalidCharacters(t *testing.T) {
 	invalidSamples := [][]byte{
-		[]byte("ABCDEF"),
 		[]byte("abc-123"),
 		[]byte("abc="),
 	}
@@ -55,6 +54,43 @@ func TestDecodeLowerBase36RejectsInvalidCharacters(t *testing.T) {
 	for _, sample := range invalidSamples {
 		if _, err := DecodeLowerBase36(sample); err == nil {
 			t.Fatalf("DecodeLowerBase36 should reject %q", sample)
+		}
+	}
+}
+
+func TestDecodeLowerBase36AcceptsUppercaseASCII(t *testing.T) {
+	original := []byte{0x00, 0x01, 0xAB, 0xCD, 0xEF}
+	encoded := EncodeLowerBase36(original)
+	upper := []byte(encoded)
+	for i := 0; i < len(upper); i++ {
+		if upper[i] >= 'a' && upper[i] <= 'z' {
+			upper[i] -= 'a' - 'A'
+		}
+	}
+
+	decoded, err := DecodeLowerBase36(upper)
+	if err != nil {
+		t.Fatalf("DecodeLowerBase36 returned error for uppercase input: %v", err)
+	}
+	if len(decoded) != len(original) {
+		t.Fatalf("unexpected decoded length: got=%d want=%d", len(decoded), len(original))
+	}
+	for i := range original {
+		if decoded[i] != original[i] {
+			t.Fatalf("unexpected decoded byte at %d: got=%d want=%d", i, decoded[i], original[i])
+		}
+	}
+
+	decodedString, err := DecodeLowerBase36String(string(upper))
+	if err != nil {
+		t.Fatalf("DecodeLowerBase36String returned error for uppercase input: %v", err)
+	}
+	if len(decodedString) != len(original) {
+		t.Fatalf("unexpected decoded string length: got=%d want=%d", len(decodedString), len(original))
+	}
+	for i := range original {
+		if decodedString[i] != original[i] {
+			t.Fatalf("unexpected decoded string byte at %d: got=%d want=%d", i, decodedString[i], original[i])
 		}
 	}
 }
