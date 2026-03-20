@@ -79,6 +79,7 @@ type Client struct {
 	streamsMu                             sync.RWMutex
 	streams                               map[uint16]*clientStream
 	closedStreams                         map[uint16]int64
+	closedStreamsQueue                    []uint16
 	mtuTestRetries                        int
 	mtuTestTimeout                        time.Duration
 	packetDuplicationCount                int
@@ -218,6 +219,7 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		localDNSFragTTL:                       time.Duration(cfg.LocalDNSFragmentTimeoutSec * float64(time.Second)),
 		streams:                               make(map[uint16]*clientStream, 16),
 		closedStreams:                         make(map[uint16]int64, 16),
+		closedStreamsQueue:                    make([]uint16, 0, 16),
 		mtuTestRetries:                        cfg.MTUTestRetries,
 		mtuTestTimeout:                        time.Duration(cfg.MTUTestTimeout * float64(time.Second)),
 		packetDuplicationCount:                cfg.PacketDuplicationCount,
@@ -375,6 +377,7 @@ func (c *Client) ResetRuntimeState(resetSessionCookie bool) {
 	c.streamsMu.Lock()
 	c.streams = make(map[uint16]*clientStream, 16)
 	c.closedStreams = make(map[uint16]int64, 16)
+	c.closedStreamsQueue = make([]uint16, 0, 16)
 	c.streamsMu.Unlock()
 	c.resolverHealthMu.Lock()
 	c.resolverHealth = make(map[string]*resolverHealthState, len(c.connections))
@@ -385,20 +388,15 @@ func (c *Client) ResetRuntimeState(resetSessionCookie bool) {
 	c.clearSessionInitBusyUntil()
 
 	c.resolverConnsMu.Lock()
-	for _, pool := range c.resolverConns {
-		for {
-			select {
-			case conn := <-pool:
-				if conn != nil {
-					_ = conn.Close()
-				}
-			default:
-				goto nextPool
+	for key, pool := range c.resolverConns {
+		close(pool)
+		for conn := range pool {
+			if conn != nil {
+				_ = conn.Close()
 			}
 		}
-	nextPool:
+		delete(c.resolverConns, key)
 	}
-	c.resolverConns = make(map[string]chan *net.UDPConn)
 	c.resolverConnsMu.Unlock()
 }
 
@@ -699,16 +697,7 @@ func (c *Client) isRecentlyClosedStream(streamID uint16, now time.Time) bool {
 	if !ok {
 		return false
 	}
-	if now.UnixNano()-closedAt <= clientClosedStreamRecordTTL.Nanoseconds() {
-		return true
-	}
-
-	c.streamsMu.Lock()
-	if staleAt, stale := c.closedStreams[streamID]; stale && staleAt == closedAt && now.UnixNano()-staleAt > clientClosedStreamRecordTTL.Nanoseconds() {
-		delete(c.closedStreams, streamID)
-	}
-	c.streamsMu.Unlock()
-	return false
+	return now.UnixNano()-closedAt <= clientClosedStreamRecordTTL.Nanoseconds()
 }
 
 func (c *Client) noteClosedStreamLocked(streamID uint16, now time.Time) {
@@ -717,30 +706,26 @@ func (c *Client) noteClosedStreamLocked(streamID uint16, now time.Time) {
 	}
 	if c.closedStreams == nil {
 		c.closedStreams = make(map[uint16]int64, 16)
-	}
-	nowUnix := now.UnixNano()
-	expiredBefore := nowUnix - clientClosedStreamRecordTTL.Nanoseconds()
-	for closedID, closedAt := range c.closedStreams {
-		if closedAt < expiredBefore {
-			delete(c.closedStreams, closedID)
-		}
-	}
-	c.closedStreams[streamID] = nowUnix
-	if len(c.closedStreams) <= clientClosedStreamRecordCap {
-		return
+		c.closedStreamsQueue = make([]uint16, 0, 16)
 	}
 
-	var oldestID uint16
-	var oldestAt int64
-	first := true
-	for closedID, closedAt := range c.closedStreams {
-		if first || closedAt < oldestAt {
-			oldestID = closedID
-			oldestAt = closedAt
-			first = false
+	nowUnix := now.UnixNano()
+	expiredBefore := nowUnix - clientClosedStreamRecordTTL.Nanoseconds()
+
+	// O(1) Amortized cleanup using the queue
+	for len(c.closedStreamsQueue) > 0 {
+		oldestID := c.closedStreamsQueue[0]
+		oldestAt, ok := c.closedStreams[oldestID]
+		if !ok || oldestAt < expiredBefore || len(c.closedStreams) > clientClosedStreamRecordCap {
+			delete(c.closedStreams, oldestID)
+			c.closedStreamsQueue = c.closedStreamsQueue[1:]
+			continue
 		}
+		break
 	}
-	delete(c.closedStreams, oldestID)
+
+	c.closedStreams[streamID] = nowUnix
+	c.closedStreamsQueue = append(c.closedStreamsQueue, streamID)
 }
 
 func (c *Client) activeStreamCount() int {
@@ -767,7 +752,7 @@ func (c *Client) connectionIndexByKey(serverKey string) (int, bool) {
 	if c == nil {
 		return 0, false
 	}
-	idx, ok := c.connectionsByKey[strings.TrimSpace(serverKey)]
+	idx, ok := c.connectionsByKey[serverKey]
 	return idx, ok
 }
 
