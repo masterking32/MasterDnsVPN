@@ -425,6 +425,7 @@ func (c *Client) applySyncedMTUState(uploadMTU int, downloadMTU int, uploadChars
 	c.syncedUploadChars = uploadChars
 	c.safeUploadMTU = computeSafeUploadMTU(uploadMTU, c.mtuCryptoOverhead)
 	c.updateMaxPackedBlocks()
+	c.applySessionCompressionPolicy()
 }
 
 func (c *Client) HasSuccessfulMTUChecks() bool {
@@ -451,10 +452,24 @@ func (c *Client) applySessionCompressionPolicy() {
 	uploadCompression := compression.NormalizeAvailableType(c.uploadCompression)
 	downloadCompression := compression.NormalizeAvailableType(c.downloadCompression)
 
-	if c.syncedUploadMTU > 0 && c.syncedUploadMTU <= minSize {
+	// User requirement: Disable and Warn if MTU < 100
+	const mtuWarningThreshold = 100
+
+	if c.syncedUploadMTU > 0 && c.syncedUploadMTU < mtuWarningThreshold {
+		if uploadCompression != compression.TypeOff && c.log != nil {
+			c.log.Warnf(
+				"⚠️ <red>Session Compression Upload: <cyan>%s</cyan> (Disabled due to low MTU: <cyan>%d</cyan>)</red>",
+				compression.TypeName(uploadCompression),
+				c.syncedUploadMTU,
+			)
+		}
+		uploadCompression = compression.TypeOff
+		// Sync with config to persist for this session and match server's off-state
+		c.cfg.UploadCompressionType = int(compression.TypeOff)
+	} else if c.syncedUploadMTU > 0 && c.syncedUploadMTU <= minSize {
 		if uploadCompression != compression.TypeOff && c.log != nil {
 			c.log.Infof(
-				"\U0001F5DC <green>Session Compression Upload: <cyan>%s</cyan> (Disabled due to MTU: <cyan>%d</cyan>)</green>",
+				"\U0001F5DC <green>Session Compression Upload: <cyan>%s</cyan> (Disabled due to MinSize MTU: <cyan>%d</cyan>)</green>",
 				compression.TypeName(uploadCompression),
 				c.syncedUploadMTU,
 			)
@@ -462,10 +477,21 @@ func (c *Client) applySessionCompressionPolicy() {
 		uploadCompression = compression.TypeOff
 	}
 
-	if c.syncedDownloadMTU > 0 && c.syncedDownloadMTU <= minSize {
+	if c.syncedDownloadMTU > 0 && c.syncedDownloadMTU < mtuWarningThreshold {
+		if downloadCompression != compression.TypeOff && c.log != nil {
+			c.log.Warnf(
+				"⚠️ <red>Session Compression Download: <cyan>%s</cyan> (Disabled due to low MTU: <cyan>%d</cyan>)</red>",
+				compression.TypeName(downloadCompression),
+				c.syncedDownloadMTU,
+			)
+		}
+		downloadCompression = compression.TypeOff
+		// Sync with config to persist for this session and match server's off-state
+		c.cfg.DownloadCompressionType = int(compression.TypeOff)
+	} else if c.syncedDownloadMTU > 0 && c.syncedDownloadMTU <= minSize {
 		if downloadCompression != compression.TypeOff && c.log != nil {
 			c.log.Infof(
-				"\U0001F5DC <green>Session Compression Download: <cyan>%s</cyan> (Disabled due to MTU: <cyan>%d</cyan>)</green>",
+				"\U0001F5DC <green>Session Compression Download: <cyan>%s</cyan> (Disabled due to MinSize MTU: <cyan>%d</cyan>)</green>",
 				compression.TypeName(downloadCompression),
 				c.syncedDownloadMTU,
 			)

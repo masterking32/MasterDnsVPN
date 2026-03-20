@@ -1,17 +1,14 @@
-// ==============================================================================
-// MasterDnsVPN
-// Author: MasterkinG32
-// Github: https://github.com/masterking32
-// Year: 2026
-// ==============================================================================
-
 package compression
 
 import (
 	"bytes"
 	"compress/flate"
+	"encoding/binary"
 	"io"
 	"sync"
+
+	"github.com/klauspost/compress/zstd"
+	"github.com/pierrec/lz4/v4"
 )
 
 const (
@@ -23,7 +20,7 @@ const (
 	DefaultMinSize = 100
 )
 
-const availableTypeMask uint8 = (1 << TypeOff) | (1 << TypeZLIB)
+const availableTypeMask uint8 = (1 << TypeOff) | (1 << TypeZSTD) | (1 << TypeLZ4) | (1 << TypeZLIB)
 
 var normalizedPackedPairNibble = [16]uint8{
 	TypeOff,
@@ -59,6 +56,19 @@ var (
 		New: func() any {
 			writer, _ := flate.NewWriter(io.Discard, 1)
 			return writer
+		},
+	}
+
+	zstdEncoderPool = sync.Pool{
+		New: func() any {
+			encoder, _ := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedFastest))
+			return encoder
+		},
+	}
+	zstdDecoderPool = sync.Pool{
+		New: func() any {
+			decoder, _ := zstd.NewReader(nil)
+			return decoder
 		},
 	}
 )
@@ -125,38 +135,23 @@ func CompressPayload(data []byte, compType uint8, minSize int) ([]byte, uint8) {
 		return data, TypeOff
 	}
 
+	var compData []byte
+	var err error
+
 	switch compType {
 	case TypeZLIB:
-		buffer := deflateBufferPool.Get().(*bytes.Buffer)
-		buffer.Reset()
+		compData, err = compressZLIB(data)
+	case TypeZSTD:
+		compData, err = compressZSTD(data)
+	case TypeLZ4:
+		compData, err = compressLZ4(data)
+	}
 
-		writer := deflateWriterPool.Get().(*flate.Writer)
-		writer.Reset(buffer)
-		_, err := writer.Write(data)
-		if err == nil {
-			err = writer.Close()
-		}
-		deflateWriterPool.Put(writer)
-		if err != nil {
-			buffer.Reset()
-			deflateBufferPool.Put(buffer)
-			return data, TypeOff
-		}
-
-		if buffer.Len() >= len(data) {
-			buffer.Reset()
-			deflateBufferPool.Put(buffer)
-			return data, TypeOff
-		}
-
-		out := make([]byte, buffer.Len())
-		copy(out, buffer.Bytes())
-		buffer.Reset()
-		deflateBufferPool.Put(buffer)
-		return out, TypeZLIB
-	default:
+	if err != nil || len(compData) >= len(data) {
 		return data, TypeOff
 	}
+
+	return compData, compType
 }
 
 func TryDecompressPayload(data []byte, compType uint8) ([]byte, bool) {
@@ -169,29 +164,124 @@ func TryDecompressPayload(data []byte, compType uint8) ([]byte, bool) {
 		return data, true
 	}
 
+	var out []byte
+	var err error
+
 	switch compType {
 	case TypeZLIB:
-		reader := bytes.NewReader(data)
-		stream := deflateReaderPool.Get().(io.ReadCloser)
-		stream.(flate.Resetter).Reset(reader, nil)
-		buffer := deflateBufferPool.Get().(*bytes.Buffer)
-		buffer.Reset()
+		out, err = decompressZLIB(data)
+	case TypeZSTD:
+		out, err = decompressZSTD(data)
+	case TypeLZ4:
+		out, err = decompressLZ4(data)
+	}
 
-		_, err := buffer.ReadFrom(stream)
-		closeErr := stream.Close()
-		deflateReaderPool.Put(stream)
-		if err != nil || closeErr != nil || reader.Len() != 0 {
-			buffer.Reset()
-			deflateBufferPool.Put(buffer)
-			return nil, false
-		}
-
-		out := make([]byte, buffer.Len())
-		copy(out, buffer.Bytes())
-		buffer.Reset()
-		deflateBufferPool.Put(buffer)
-		return out, true
-	default:
+	if err != nil {
 		return nil, false
 	}
+	return out, true
+}
+
+func compressZLIB(data []byte) ([]byte, error) {
+	buffer := deflateBufferPool.Get().(*bytes.Buffer)
+	buffer.Reset()
+	defer deflateBufferPool.Put(buffer)
+
+	writer := deflateWriterPool.Get().(*flate.Writer)
+	writer.Reset(buffer)
+	_, err := writer.Write(data)
+	if err == nil {
+		err = writer.Close()
+	}
+	deflateWriterPool.Put(writer)
+
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]byte, buffer.Len())
+	copy(out, buffer.Bytes())
+	return out, nil
+}
+
+func decompressZLIB(data []byte) ([]byte, error) {
+	reader := bytes.NewReader(data)
+	stream := deflateReaderPool.Get().(io.ReadCloser)
+	stream.(flate.Resetter).Reset(reader, nil)
+	defer deflateReaderPool.Put(stream)
+
+	buffer := deflateBufferPool.Get().(*bytes.Buffer)
+	buffer.Reset()
+	defer deflateBufferPool.Put(buffer)
+
+	_, err := buffer.ReadFrom(stream)
+	_ = stream.Close()
+
+	if err != nil || reader.Len() != 0 {
+		return nil, io.ErrUnexpectedEOF
+	}
+
+	out := make([]byte, buffer.Len())
+	copy(out, buffer.Bytes())
+	return out, nil
+}
+
+func compressZSTD(data []byte) ([]byte, error) {
+	encoder := zstdEncoderPool.Get().(*zstd.Encoder)
+	defer zstdEncoderPool.Put(encoder)
+
+	// Single-pass compression into a fresh buffer (to avoid holding pooled buffer refs in result)
+	out := encoder.EncodeAll(data, nil)
+	return out, nil
+}
+
+func decompressZSTD(data []byte) ([]byte, error) {
+	decoder := zstdDecoderPool.Get().(*zstd.Decoder)
+	defer zstdDecoderPool.Put(decoder)
+
+	out, err := decoder.DecodeAll(data, nil)
+	return out, err
+}
+
+func compressLZ4(data []byte) ([]byte, error) {
+	// Calculate max possible compressed size
+	maxSize := lz4.CompressBlockBound(len(data))
+	// We need 4 bytes for the original size header (Python's store_size=True)
+	buf := make([]byte, maxSize+4)
+
+	// Store 4-byte little-endian size first (matches Python lz4.block behavior)
+	binary.LittleEndian.PutUint32(buf[0:4], uint32(len(data)))
+
+	n, err := lz4.CompressBlock(data, buf[4:], nil)
+	if err != nil {
+		return nil, err
+	}
+	if n == 0 {
+		return nil, io.ErrShortBuffer
+	}
+
+	return buf[:n+4], nil
+}
+
+func decompressLZ4(data []byte) ([]byte, error) {
+	if len(data) < 4 {
+		return nil, io.ErrUnexpectedEOF
+	}
+
+	// Read 4-byte original size (matches Python lz4.block behavior)
+	origSize := binary.LittleEndian.Uint32(data[0:4])
+	if origSize > 10*1024*1024 { // 10MB safety cap
+		return nil, io.ErrShortBuffer
+	}
+
+	out := make([]byte, origSize)
+	n, err := lz4.UncompressBlock(data[4:], out)
+	if err != nil {
+		return nil, err
+	}
+	if uint32(n) != origSize {
+		return nil, io.ErrUnexpectedEOF
+	}
+
+	return out, nil
 }
