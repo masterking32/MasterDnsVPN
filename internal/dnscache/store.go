@@ -8,6 +8,7 @@
 package dnscache
 
 import (
+	"bufio"
 	"container/list"
 	"encoding/binary"
 	"fmt"
@@ -404,9 +405,9 @@ func (s *Store) LoadFromFile(path string, now time.Time) (int, error) {
 	}
 
 	loaded := 0
-	buf := make([]byte, 4096)
+	br := bufio.NewReader(file)
 	for i := 0; i < int(count); i++ {
-		entry, key, err := readBinaryEntry(file, buf)
+		entry, key, err := readBinaryEntry(br)
 		if err != nil {
 			if err == io.EOF {
 				break
@@ -451,12 +452,18 @@ func (s *Store) SaveToFile(path string, now time.Time) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer file.Close()
+	defer func() {
+		_ = file.Close()
+		if err != nil {
+			_ = os.Remove(tempPath)
+		}
+	}()
 
-	if err := binary.Write(file, binary.BigEndian, binaryMagic); err != nil {
+	bw := bufio.NewWriter(file)
+	if err = binary.Write(bw, binary.BigEndian, binaryMagic); err != nil {
 		return 0, err
 	}
-	if err := binary.Write(file, binary.BigEndian, binaryVersion); err != nil {
+	if err = binary.Write(bw, binary.BigEndian, binaryVersion); err != nil {
 		return 0, err
 	}
 
@@ -473,7 +480,7 @@ func (s *Store) SaveToFile(path string, now time.Time) (int, error) {
 		shard.mu.RUnlock()
 	}
 
-	if err := binary.Write(file, binary.BigEndian, total); err != nil {
+	if err = binary.Write(bw, binary.BigEndian, total); err != nil {
 		return 0, err
 	}
 
@@ -484,25 +491,30 @@ func (s *Store) SaveToFile(path string, now time.Time) (int, error) {
 		for element := shard.order.Front(); element != nil; element = element.Next() {
 			node := element.Value.(*cacheNode)
 			if node.entry.Status == StatusReady && !s.isExpired(&node.entry, now) {
-				if err := writeBinaryEntry(file, node.key, &node.entry); err == nil {
-					saved++
+				if err = writeBinaryEntry(bw, node.key, &node.entry); err != nil {
+					shard.mu.RUnlock()
+					return saved, err
 				}
+				saved++
 			}
 		}
 		shard.mu.RUnlock()
 	}
 
-	if err := file.Close(); err != nil {
-		return 0, err
+	if err = bw.Flush(); err != nil {
+		return saved, err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return 0, err
+	if err = file.Close(); err != nil {
+		return saved, err
 	}
 
-	if err := os.Rename(tempPath, path); err != nil {
-		_ = os.Remove(tempPath)
-		return 0, err
+	if err = os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return saved, err
+	}
+
+	if err = os.Rename(tempPath, path); err != nil {
+		return saved, err
 	}
 
 	s.dirty.Store(0)
@@ -521,7 +533,7 @@ func (s *Store) touchEntryLocked(shard *shard, entry *Entry, now time.Time) {
 	entry.LastUsedAt = now
 }
 
-func readBinaryEntry(r io.Reader, buf []byte) (Entry, string, error) {
+func readBinaryEntry(r io.Reader) (Entry, string, error) {
 	var keyLen uint16
 	if err := binary.Read(r, binary.BigEndian, &keyLen); err != nil {
 		return Entry{}, "", err
@@ -541,8 +553,12 @@ func readBinaryEntry(r io.Reader, buf []byte) (Entry, string, error) {
 	}
 
 	var qType, qClass uint16
-	_ = binary.Read(r, binary.BigEndian, &qType)
-	_ = binary.Read(r, binary.BigEndian, &qClass)
+	if err := binary.Read(r, binary.BigEndian, &qType); err != nil {
+		return Entry{}, "", err
+	}
+	if err := binary.Read(r, binary.BigEndian, &qClass); err != nil {
+		return Entry{}, "", err
+	}
 
 	var resLen uint16
 	if err := binary.Read(r, binary.BigEndian, &resLen); err != nil {
@@ -554,8 +570,12 @@ func readBinaryEntry(r io.Reader, buf []byte) (Entry, string, error) {
 	}
 
 	var createdAt, lastUsedAt int64
-	_ = binary.Read(r, binary.BigEndian, &createdAt)
-	_ = binary.Read(r, binary.BigEndian, &lastUsedAt)
+	if err := binary.Read(r, binary.BigEndian, &createdAt); err != nil {
+		return Entry{}, "", err
+	}
+	if err := binary.Read(r, binary.BigEndian, &lastUsedAt); err != nil {
+		return Entry{}, "", err
+	}
 
 	return Entry{
 		Domain:        string(domainBuf),
@@ -569,20 +589,40 @@ func readBinaryEntry(r io.Reader, buf []byte) (Entry, string, error) {
 }
 
 func writeBinaryEntry(w io.Writer, key string, entry *Entry) error {
-	_ = binary.Write(w, binary.BigEndian, uint16(len(key)))
-	_, _ = w.Write([]byte(key))
+	if err := binary.Write(w, binary.BigEndian, uint16(len(key))); err != nil {
+		return err
+	}
+	if _, err := w.Write([]byte(key)); err != nil {
+		return err
+	}
 
-	_ = binary.Write(w, binary.BigEndian, uint16(len(entry.Domain)))
-	_, _ = w.Write([]byte(entry.Domain))
+	if err := binary.Write(w, binary.BigEndian, uint16(len(entry.Domain))); err != nil {
+		return err
+	}
+	if _, err := w.Write([]byte(entry.Domain)); err != nil {
+		return err
+	}
 
-	_ = binary.Write(w, binary.BigEndian, entry.QuestionType)
-	_ = binary.Write(w, binary.BigEndian, entry.QuestionClass)
+	if err := binary.Write(w, binary.BigEndian, entry.QuestionType); err != nil {
+		return err
+	}
+	if err := binary.Write(w, binary.BigEndian, entry.QuestionClass); err != nil {
+		return err
+	}
 
-	_ = binary.Write(w, binary.BigEndian, uint16(len(entry.Response)))
-	_, _ = w.Write(entry.Response)
+	if err := binary.Write(w, binary.BigEndian, uint16(len(entry.Response))); err != nil {
+		return err
+	}
+	if _, err := w.Write(entry.Response); err != nil {
+		return err
+	}
 
-	_ = binary.Write(w, binary.BigEndian, entry.CreatedAt.Unix())
-	_ = binary.Write(w, binary.BigEndian, entry.LastUsedAt.Unix())
+	if err := binary.Write(w, binary.BigEndian, entry.CreatedAt.Unix()); err != nil {
+		return err
+	}
+	if err := binary.Write(w, binary.BigEndian, entry.LastUsedAt.Unix()); err != nil {
+		return err
+	}
 
 	return nil
 }
