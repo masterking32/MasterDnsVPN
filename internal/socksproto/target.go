@@ -44,7 +44,8 @@ func ParseTargetPayload(payload []byte) (Target, error) {
 		if len(payload) < offset+4+2 {
 			return Target{}, ErrTargetTooShort
 		}
-		target.Host = net.IP(payload[offset : offset+4]).String()
+		ip := net.IP(payload[offset : offset+4])
+		target.Host = ip.String()
 		offset += 4
 	case AddressTypeDomain:
 		if len(payload) < offset+1 {
@@ -61,7 +62,8 @@ func ParseTargetPayload(payload []byte) (Target, error) {
 		if len(payload) < offset+16+2 {
 			return Target{}, ErrTargetTooShort
 		}
-		target.Host = net.IP(payload[offset : offset+16]).String()
+		ip := net.IP(payload[offset : offset+16])
+		target.Host = ip.String()
 		offset += 16
 	default:
 		return Target{}, ErrUnsupportedAddressType
