@@ -95,6 +95,14 @@ func (m *MultiLevelQueue[T]) popLocked(keyExtractor func(T) uint32) (T, int, boo
 	q.Items[0] = zero
 	q.Items = q.Items[1:]
 
+	// Compact the backing array when it becomes significantly oversized
+	// to prevent unbounded memory growth from repeated push/pop cycles.
+	if cap(q.Items) > 64 && len(q.Items) < cap(q.Items)/4 {
+		compact := make([]T, len(q.Items))
+		copy(compact, q.Items)
+		q.Items = compact
+	}
+
 	// Update census and bitmask
 	if keyExtractor != nil {
 		delete(m.census, keyExtractor(item))
@@ -192,6 +200,13 @@ func (m *MultiLevelQueue[T]) PopIf(priority int, predicate func(T) bool, keyExtr
 	// Allowed to pop!
 	q.Items[0] = zero // Memory safety
 	q.Items = q.Items[1:]
+
+	// Compact the backing array when it becomes significantly oversized
+	if cap(q.Items) > 64 && len(q.Items) < cap(q.Items)/4 {
+		compact := make([]T, len(q.Items))
+		copy(compact, q.Items)
+		q.Items = compact
+	}
 
 	if keyExtractor != nil {
 		delete(m.census, keyExtractor(item))
