@@ -163,17 +163,27 @@ drainRX:
 }
 
 // asyncWriterWorker fires packets from txChannel at the destination.
+// Uses a per-worker address cache to avoid repeated net.ResolveUDPAddr calls.
 func (c *Client) asyncWriterWorker(ctx context.Context, id int, conn *net.UDPConn) {
 	defer c.asyncWG.Done()
 	c.log.Debugf("\U0001F680 <green>Writer Worker <cyan>#%d</cyan> started</green>", id)
+
+	addrCache := make(map[string]*net.UDPAddr, 16)
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case pkt := <-c.txChannel:
-			addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", pkt.conn.Resolver, pkt.conn.ResolverPort))
-			if err != nil {
-				continue
+			resolverKey := fmt.Sprintf("%s:%d", pkt.conn.Resolver, pkt.conn.ResolverPort)
+			addr, ok := addrCache[resolverKey]
+			if !ok {
+				var err error
+				addr, err = net.ResolveUDPAddr("udp", resolverKey)
+				if err != nil {
+					continue
+				}
+				addrCache[resolverKey] = addr
 			}
 
 			if c.tunnelPacketTimeout > 0 {
