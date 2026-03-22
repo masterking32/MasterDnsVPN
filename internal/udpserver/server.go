@@ -783,10 +783,10 @@ func (s *Server) dequeueSessionResponse(sessionID uint8, now time.Time) (*VpnPro
 	defer record.mu.Unlock()
 
 	// 1. Try MainQueue (Stream 0) first (Higher overall priority)
-	if item, _, ok := record.MainQueue.Pop(txPacketKeyExtractor); ok {
+	if item, prio, ok := record.MainQueue.Pop(txPacketKeyExtractor); ok {
 		pkt := vpnPacketFromTX(item)
 		if isPackableControlPacket(pkt) && record.MaxPackedBlocks > 1 {
-			return s.packControlBlocks(record, pkt), true
+			return s.packControlBlocks(record, pkt, prio), true
 		}
 		return &pkt, true
 	}
@@ -816,11 +816,12 @@ func (s *Server) dequeueSessionResponse(sessionID uint8, now time.Time) (*VpnPro
 			continue
 		}
 
-		if item, _, ok := stream.TXQueue.Pop(txPacketKeyExtractor); ok {
+		if item, prio, ok := stream.TXQueue.Pop(txPacketKeyExtractor); ok {
 			record.RRStreamID = streamID
 			pkt := vpnPacketFromTX(item)
+			pkt.StreamID = streamID
 			if isPackableControlPacket(pkt) && record.MaxPackedBlocks > 1 {
-				return s.packControlBlocks(record, pkt), true
+				return s.packControlBlocks(record, pkt, prio), true
 			}
 			return &pkt, true
 		}
@@ -829,8 +830,7 @@ func (s *Server) dequeueSessionResponse(sessionID uint8, now time.Time) (*VpnPro
 	return nil, false
 }
 
-func (s *Server) packControlBlocks(record *sessionRecord, first VpnProto.Packet) *VpnProto.Packet {
-	// Replicates Python's _pack_selected_response_blocks
+func (s *Server) packControlBlocks(record *sessionRecord, first VpnProto.Packet, firstPriority int) *VpnProto.Packet {
 	limit := record.MaxPackedBlocks
 	if limit <= 1 {
 		return &first
@@ -838,10 +838,46 @@ func (s *Server) packControlBlocks(record *sessionRecord, first VpnProto.Packet)
 
 	payload := make([]byte, 0, limit*PackedControlBlockSize)
 	payload = appendPackedControlBlock(payload, first)
-	// count := 1
+	count := 1
 
-	// For now, only pack the first one to avoid complexity in this step
-	// Real implementation would loop here to dequeue more compatible blocks
+	// Pack more control blocks from MainQueue at the same priority
+	for count < limit {
+		popped, ok := record.MainQueue.PopIf(firstPriority, func(p *serverStreamTXPacket) bool {
+			return isPackableControlPacketFromTX(p)
+		}, txPacketKeyExtractor)
+		if !ok {
+			break
+		}
+		pkt := vpnPacketFromTX(popped)
+		// MainQueue is Stream 0, StreamID stays 0
+		payload = appendPackedControlBlock(payload, pkt)
+		count++
+		putTXPacketToPool(popped)
+	}
+
+	// Pack more from active streams
+	for _, streamID := range record.ActiveStreams {
+		if count >= limit {
+			break
+		}
+		stream := record.Streams[streamID]
+		if stream == nil {
+			continue
+		}
+		for count < limit {
+			popped, ok := stream.TXQueue.PopIf(firstPriority, func(p *serverStreamTXPacket) bool {
+				return isPackableControlPacketFromTX(p)
+			}, txPacketKeyExtractor)
+			if !ok {
+				break
+			}
+			pkt := vpnPacketFromTX(popped)
+			pkt.StreamID = streamID
+			payload = appendPackedControlBlock(payload, pkt)
+			count++
+			putTXPacketToPool(popped)
+		}
+	}
 
 	first.PacketType = Enums.PACKET_PACKED_CONTROL_BLOCKS
 	first.Payload = payload
@@ -863,6 +899,22 @@ func vpnPacketFromTX(p *serverStreamTXPacket) VpnProto.Packet {
 }
 
 func isPackableControlPacket(p VpnProto.Packet) bool {
+	if len(p.Payload) != 0 {
+		return false
+	}
+	switch p.PacketType {
+	case Enums.PACKET_STREAM_DATA_ACK,
+		Enums.PACKET_STREAM_SYN_ACK,
+		Enums.PACKET_STREAM_FIN_ACK,
+		Enums.PACKET_STREAM_RST_ACK,
+		Enums.PACKET_SOCKS5_SYN_ACK:
+		return true
+	default:
+		return false
+	}
+}
+
+func isPackableControlPacketFromTX(p *serverStreamTXPacket) bool {
 	if len(p.Payload) != 0 {
 		return false
 	}
