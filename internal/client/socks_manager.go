@@ -9,6 +9,7 @@ package client
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"time"
@@ -46,6 +47,8 @@ const (
 	SOCKS5_USER_AUTH_SUCCESS = 0x00
 	SOCKS5_USER_AUTH_FAILURE = 0x01
 )
+
+var errLateSocksResult = errors.New("late socks result for closed or terminal local stream")
 
 // HandleSOCKS5 manages the SOCKS5 handshake and specialized requests.
 func (c *Client) HandleSOCKS5(ctx context.Context, conn net.Conn) {
@@ -263,10 +266,32 @@ func (c *Client) getStream(streamID uint16) (*Stream_client, bool) {
 func (c *Client) writeSocksConnectResult(streamID uint16, rep byte) error {
 	s, ok := c.getStream(streamID)
 	if !ok || s == nil || s.NetConn == nil {
-		return nil
+		return errLateSocksResult
+	}
+
+	switch s.StatusValue() {
+	case streamStatusCancelled, streamStatusDraining, streamStatusClosing, streamStatusTimeWait, streamStatusClosed:
+		return errLateSocksResult
+	}
+
+	if !s.TerminalSince().IsZero() {
+		return errLateSocksResult
 	}
 
 	s.stopPendingSOCKSWatch(true)
+
+	if err := c.sendSocksReply(s.NetConn, rep, SOCKS5_ATYP_IPV4, net.IPv4zero, 0); err != nil {
+		if errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe) {
+			return errLateSocksResult
+		}
+		var opErr *net.OpError
+		if errors.As(err, &opErr) && opErr.Err != nil {
+			if errors.Is(opErr.Err, net.ErrClosed) || errors.Is(opErr.Err, io.ErrClosedPipe) {
+				return errLateSocksResult
+			}
+		}
+		return err
+	}
 
 	if rep == SOCKS5_REPLY_SUCCESS {
 		s.SetStatus(streamStatusActive)
@@ -274,7 +299,7 @@ func (c *Client) writeSocksConnectResult(streamID uint16, rep byte) error {
 		s.SetStatus(streamStatusSocksFailed)
 	}
 
-	return c.sendSocksReply(s.NetConn, rep, SOCKS5_ATYP_IPV4, net.IPv4zero, 0)
+	return nil
 }
 
 func socksReplyForPacketType(packetType uint8) byte {
@@ -464,6 +489,9 @@ func (c *Client) HandleSocksConnected(packet VpnProto.Packet) error {
 	}
 
 	if err := c.writeSocksConnectResult(packet.StreamID, SOCKS5_REPLY_SUCCESS); err != nil {
+		if errors.Is(err, errLateSocksResult) {
+			return nil
+		}
 		c.handlePendingSOCKSLocalClose(packet.StreamID, "failed to write SOCKS success reply")
 		return err
 	}
@@ -499,6 +527,9 @@ func (c *Client) HandleSocksFailure(packet VpnProto.Packet) error {
 	}
 
 	if err := c.writeSocksConnectResult(packet.StreamID, socksReplyForPacketType(packet.PacketType)); err != nil {
+		if errors.Is(err, errLateSocksResult) {
+			return nil
+		}
 		c.handlePendingSOCKSLocalClose(packet.StreamID, "failed to write SOCKS failure reply")
 		return err
 	}

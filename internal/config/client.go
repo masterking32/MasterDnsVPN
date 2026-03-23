@@ -60,6 +60,7 @@ type ClientConfig struct {
 	MTURemovedServerLogFormat   string            `toml:"MTU_REMOVED_SERVER_LOG_FORMAT"`
 	MTUAddedServerLogFormat     string            `toml:"MTU_ADDED_SERVER_LOG_FORMAT"`
 	LogLevel                    string            `toml:"LOG_LEVEL"`
+	MaxPacketsPerBatch          int               `toml:"MAX_PACKETS_PER_BATCH"`
 	ARQWindowSize               int               `toml:"ARQ_WINDOW_SIZE"`
 	Resolvers                   []ResolverAddress `toml:"-"`
 	ResolverMap                 map[string]int    `toml:"-"`
@@ -105,6 +106,7 @@ func defaultClientConfig() ClientConfig {
 		MTURemovedServerLogFormat:   "",
 		MTUAddedServerLogFormat:     "",
 		LogLevel:                    "INFO",
+		MaxPacketsPerBatch:          5,
 		ARQWindowSize:               2000,
 	}
 }
@@ -189,6 +191,7 @@ func LoadClientConfig(filename string) (ClientConfig, error) {
 
 	cfg.PacketDuplicationCount = clampInt(defaultIntBelow(cfg.PacketDuplicationCount, 1, 1), 1, 8)
 	cfg.SetupPacketDuplicationCount = clampInt(defaultIntBelow(cfg.SetupPacketDuplicationCount, 1, max(2, cfg.PacketDuplicationCount)), cfg.PacketDuplicationCount, 8)
+	cfg.MaxPacketsPerBatch = clampInt(defaultIntBelow(cfg.MaxPacketsPerBatch, 1, 5), 1, 64)
 	cfg.ARQWindowSize = clampInt(defaultIntBelow(cfg.ARQWindowSize, 1, 600), 1, 4096)
 
 	if cfg.MinUploadMTU < 0 || cfg.MinDownloadMTU < 0 || cfg.MaxUploadMTU < 0 || cfg.MaxDownloadMTU < 0 {

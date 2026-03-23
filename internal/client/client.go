@@ -172,6 +172,8 @@ func (c *Client) HandleStreamPacket(packet VpnProto.Packet) error {
 		arqObj.ReceiveData(packet.SequenceNum, packet.Payload)
 	case Enums.PACKET_STREAM_DATA_ACK:
 		arqObj.ReceiveAck(packet.SequenceNum)
+	case Enums.PACKET_STREAM_FIN:
+		arqObj.MarkFinReceived(packet.SequenceNum)
 	case Enums.PACKET_STREAM_RST:
 		arqObj.MarkRstReceived(packet.SequenceNum)
 		c.removeStream(packet.StreamID)

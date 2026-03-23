@@ -15,10 +15,13 @@ import (
 	"net"
 	"time"
 
+	"masterdnsvpn-go/internal/arq"
 	"masterdnsvpn-go/internal/client/handlers"
 	DnsParser "masterdnsvpn-go/internal/dnsparser"
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
+
+const clientTerminalStreamRetention = 45 * time.Second
 
 type asyncPacket struct {
 	conn       Connection
@@ -124,7 +127,11 @@ func (c *Client) StartAsyncRuntime(parentCtx context.Context) error {
 	c.asyncWG.Add(1)
 	go c.asyncStreamDispatcher(runtimeCtx)
 
-	// 7. Lifecycle cleanup.
+	// 8. Stream lifecycle cleanup.
+	c.asyncWG.Add(1)
+	go c.asyncStreamCleanupWorker(runtimeCtx)
+
+	// 9. Lifecycle cleanup.
 	c.asyncWG.Add(1)
 	go func() {
 		defer c.asyncWG.Done()
@@ -132,10 +139,75 @@ func (c *Client) StartAsyncRuntime(parentCtx context.Context) error {
 		conn.Close()
 	}()
 
-	// 8. Start Ping Manager (Autonomous adaptive pinging)
+	// 10. Start Ping Manager (Autonomous adaptive pinging)
 	c.pingManager.Start(runtimeCtx)
 
 	return nil
+}
+
+func (c *Client) asyncStreamCleanupWorker(ctx context.Context) {
+	defer c.asyncWG.Done()
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			c.streamsMu.RLock()
+			streams := make([]*Stream_client, 0, len(c.active_streams))
+			for _, s := range c.active_streams {
+				if s != nil {
+					streams = append(streams, s)
+				}
+			}
+			c.streamsMu.RUnlock()
+
+			var removeIDs []uint16
+			for _, s := range streams {
+				if s == nil || s.StreamID == 0 {
+					continue
+				}
+				a, ok := s.Stream.(*arq.ARQ)
+				if !ok || a == nil {
+					continue
+				}
+
+				switch a.State() {
+				case arq.StateDraining:
+					if s.StatusValue() != streamStatusCancelled {
+						s.SetStatus(streamStatusDraining)
+					}
+				case arq.StateHalfClosedLocal, arq.StateHalfClosedRemote, arq.StateClosing:
+					if s.StatusValue() != streamStatusCancelled {
+						s.SetStatus(streamStatusClosing)
+					}
+				case arq.StateTimeWait:
+					if s.StatusValue() != streamStatusCancelled {
+						s.SetStatus(streamStatusTimeWait)
+					}
+				}
+
+				if !a.IsClosed() {
+					continue
+				}
+
+				s.MarkTerminal(now)
+				if s.StatusValue() != streamStatusCancelled {
+					s.SetStatus(streamStatusTimeWait)
+				}
+				if since := s.TerminalSince(); !since.IsZero() && now.Sub(since) >= clientTerminalStreamRetention {
+					removeIDs = append(removeIDs, s.StreamID)
+				}
+			}
+
+			for _, streamID := range removeIDs {
+				c.removeStream(streamID)
+			}
+		}
+	}
 }
 
 // drainQueues removes any stale packets from TX and RX channels.

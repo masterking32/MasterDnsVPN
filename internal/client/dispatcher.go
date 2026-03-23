@@ -13,7 +13,6 @@ import (
 	"time"
 
 	Enums "masterdnsvpn-go/internal/enums"
-	"masterdnsvpn-go/internal/logger"
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 

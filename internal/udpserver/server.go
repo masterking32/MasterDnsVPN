@@ -118,10 +118,6 @@ func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Se
 	if socksConnectTimeout <= 0 {
 		socksConnectTimeout = 8 * time.Second
 	}
-	streamOutboundTTL := cfg.StreamOutboundTTL()
-	if streamOutboundTTL <= 0 {
-		streamOutboundTTL = 120 * time.Second
-	}
 	return &Server{
 		cfg:                  cfg,
 		arqWindowSize:        cfg.ARQWindowSize,
@@ -162,8 +158,6 @@ func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Se
 		externalSOCKS5Auth:       cfg.SOCKS5Auth,
 		externalSOCKS5User:       []byte(cfg.SOCKS5User),
 		externalSOCKS5Pass:       []byte(cfg.SOCKS5Pass),
-		streamOutboundTTL:        streamOutboundTTL,
-		streamOutboundMaxRetry:   cfg.StreamOutboundMaxRetries,
 		mtuProbePayloadPool: sync.Pool{
 			New: func() any {
 				return make([]byte, mtuProbeMaxDownSize)
@@ -283,6 +277,7 @@ func (s *Server) sessionCleanupLoop(ctx context.Context) {
 			return
 		case now := <-ticker.C:
 			expired := s.sessions.Cleanup(now, sessionTimeout, closedRetention)
+			s.sessions.SweepTerminalStreams(now, 45*time.Second)
 			s.invalidCookieTracker.Cleanup(now, invalidCookieWindow)
 			s.purgeDNSQueryFragments(now)
 			s.purgeSOCKS5SynFragments(now)
@@ -554,7 +549,7 @@ func (s *Server) queueImmediateControlAck(record *sessionRecord, packet VpnProto
 
 	stream, exists := record.getStream(packet.StreamID)
 	if (!exists || stream == nil) && isStreamCreationPacketType(packet.PacketType) {
-		stream = record.getOrCreateStream(packet.StreamID, arq.Config{}, nil, s.log)
+		stream = record.getOrCreateStream(packet.StreamID, s.streamARQConfig(packet.PacketType == Enums.PACKET_SOCKS5_SYN), nil, s.log)
 		exists = stream != nil
 	}
 	if !exists || stream == nil {
@@ -780,8 +775,30 @@ func (s *Server) queueSessionPacket(sessionID uint8, packet VpnProto.Packet) boo
 	}
 
 	// Push to corresponding stream's TXQueue. Stream 0 is initialized in findOrCreate.
-	stream := record.getOrCreateStream(packet.StreamID, arq.Config{}, nil, s.log)
+	stream := record.getOrCreateStream(packet.StreamID, s.streamARQConfig(false), nil, s.log)
 	return stream.PushTXPacket(getEffectivePriority(packet.PacketType, 3), packet.PacketType, packet.SequenceNum, packet.FragmentID, packet.TotalFragments, packet.CompressionType, packet.Payload)
+}
+
+func (s *Server) streamARQConfig(isSocks bool) arq.Config {
+	return arq.Config{
+		WindowSize:               s.cfg.ARQWindowSize,
+		RTO:                      0.2,
+		MaxRTO:                   1.5,
+		IsSocks:                  isSocks,
+		IsClient:                 false,
+		EnableControlReliability: true,
+		ControlRTO:               0.8,
+		ControlMaxRTO:            2.5,
+		ControlMaxRetries:        40,
+		InactivityTimeout:        1200.0,
+		DataPacketTTL:            600.0,
+		MaxDataRetries:           400,
+		ControlPacketTTL:         600.0,
+		FinDrainTimeout:          300.0,
+		GracefulDrainTimeout:     600.0,
+		TerminalDrainTimeout:     60.0,
+		TerminalAckWaitTimeout:   30.0,
+	}
 }
 
 func (s *Server) queueMainSessionPacket(sessionID uint8, packet VpnProto.Packet) bool {
@@ -1221,10 +1238,10 @@ func (s *Server) handlePackedControlBlocksRequest(vpnPacket VpnProto.Packet, ses
 		}
 		sawBlock = true
 		block := VpnProto.Packet{
-			SessionID:      vpnPacket.SessionID,
-			SessionCookie:  vpnPacket.SessionCookie,
-			PacketType:     packetType,
-			StreamID:       streamID,
+			SessionID:     vpnPacket.SessionID,
+			SessionCookie: vpnPacket.SessionCookie,
+			PacketType:    packetType,
+			StreamID:      streamID,
 			// Packed blocks always carry explicit stream/sequence fields, and seq=0 is valid.
 			HasStreamID:    true,
 			SequenceNum:    sequenceNum,
@@ -1330,7 +1347,7 @@ func (s *Server) processDeferredStreamSyn(vpnPacket VpnProto.Packet, sessionReco
 			s.log.Debugf("🧦 <blue>STREAM_SYN Processing, Session: <cyan>%d</cyan> | Stream: <cyan>%d</cyan> | Forwarding</blue>", vpnPacket.SessionID, vpnPacket.StreamID)
 		}
 
-		stream := record.getOrCreateStream(vpnPacket.StreamID, arq.Config{}, nil, s.log)
+		stream := record.getOrCreateStream(vpnPacket.StreamID, s.streamARQConfig(false), nil, s.log)
 		upstreamConn, err := s.dialSOCKSStreamTarget(s.cfg.ForwardIP, uint16(s.cfg.ForwardPort), nil)
 		if err != nil {
 			_ = s.queueSessionPacket(vpnPacket.SessionID, VpnProto.Packet{
@@ -1350,7 +1367,7 @@ func (s *Server) processDeferredStreamSyn(vpnPacket VpnProto.Packet, sessionReco
 
 		stream.ARQ.SetLocalConn(upstreamConn)
 	} else {
-		record.getOrCreateStream(vpnPacket.StreamID, arq.Config{}, nil, s.log)
+		record.getOrCreateStream(vpnPacket.StreamID, s.streamARQConfig(false), nil, s.log)
 	}
 
 }
@@ -1402,7 +1419,7 @@ func (s *Server) processDeferredSOCKS5Syn(vpnPacket VpnProto.Packet, sessionReco
 		return
 	}
 
-	stream := record.getOrCreateStream(vpnPacket.StreamID, arq.Config{}, nil, s.log)
+	stream := record.getOrCreateStream(vpnPacket.StreamID, s.streamARQConfig(true), nil, s.log)
 	stream.mu.RLock()
 	prevConnected := stream.Connected
 	prevHost := stream.TargetHost
@@ -1462,6 +1479,7 @@ func (s *Server) processDeferredSOCKS5Syn(vpnPacket VpnProto.Packet, sessionReco
 	// Legacy Attach (removed)
 
 	stream.ARQ.SetLocalConn(upstreamConn)
+	stream.ARQ.MarkSocksConnected()
 
 	if s.log != nil {
 		s.log.Debugf(
@@ -1504,7 +1522,7 @@ func (s *Server) processDeferredStreamData(vpnPacket VpnProto.Packet, sessionRec
 		return
 	}
 
-	stream := record.getOrCreateStream(vpnPacket.StreamID, arq.Config{}, nil, s.log)
+	stream := record.getOrCreateStream(vpnPacket.StreamID, s.streamARQConfig(false), nil, s.log)
 	stream.ARQ.ReceiveData(vpnPacket.SequenceNum, assembledPayload)
 }
 
@@ -1689,7 +1707,6 @@ func (s *Server) handleStreamFinRequest(vpnPacket VpnProto.Packet, sessionRecord
 	if !exists || stream == nil {
 		return s.enqueueMissingStreamReset(record, vpnPacket)
 	}
-
 	stream.ARQ.MarkFinReceived(vpnPacket.SequenceNum)
 	return true
 }
@@ -1708,7 +1725,14 @@ func (s *Server) handleStreamRSTRequest(vpnPacket VpnProto.Packet, sessionRecord
 	stream, ok := record.getStream(vpnPacket.StreamID)
 	if ok && stream != nil {
 		stream.ARQ.MarkRstReceived(vpnPacket.SequenceNum)
-		stream.Abort("peer reset before/while connect")
+		// A peer-originated reset is terminal immediately. Do not route it through the
+		// server's local-abort path, otherwise pending server data can incorrectly defer
+		// a fresh STREAM_RST even though the peer already cancelled the stream.
+		stream.ARQ.Abort("peer reset before/while connect", false)
+		stream.mu.Lock()
+		stream.Status = "CLOSED"
+		stream.CloseTime = now
+		stream.mu.Unlock()
 		record.removeStream(vpnPacket.StreamID, now)
 	} else {
 		record.noteStreamClosed(vpnPacket.StreamID, now)

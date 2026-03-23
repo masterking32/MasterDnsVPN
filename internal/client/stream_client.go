@@ -29,6 +29,9 @@ const (
 	streamStatusPending         = "PENDING"
 	streamStatusSocksConnecting = "SOCKS_CONNECTING"
 	streamStatusActive          = "ACTIVE"
+	streamStatusDraining        = "DRAINING"
+	streamStatusClosing         = "CLOSING"
+	streamStatusTimeWait        = "TIME_WAIT"
 	streamStatusSocksFailed     = "SOCKS_FAILED"
 	streamStatusCancelled       = "CANCELLED"
 	streamStatusClosed          = "CLOSED"
@@ -61,6 +64,7 @@ type Stream_client struct {
 	HandshakeLastProgress  time.Time
 
 	statusMu           sync.RWMutex
+	terminalSince      time.Time
 	pendingWatchCancel chan struct{}
 	pendingWatchDone   chan struct{}
 	pendingWatchOnce   sync.Once
@@ -159,6 +163,8 @@ func (c *Client) new_stream(streamID uint16, conn net.Conn, targetPayload []byte
 		ControlPacketTTL:         600.0,
 		FinDrainTimeout:          300.0,
 		GracefulDrainTimeout:     600.0,
+		TerminalDrainTimeout:     60.0,
+		TerminalAckWaitTimeout:   30.0,
 		CompressionType:          c.uploadCompression,
 	}
 
@@ -290,6 +296,35 @@ func (s *Stream_client) StatusValue() string {
 	status := s.Status
 	s.statusMu.RUnlock()
 	return status
+}
+
+func (s *Stream_client) MarkTerminal(now time.Time) {
+	if s == nil {
+		return
+	}
+	s.statusMu.Lock()
+	if s.terminalSince.IsZero() {
+		s.terminalSince = now
+	}
+	s.statusMu.Unlock()
+}
+
+func (s *Stream_client) ClearTerminal() {
+	if s == nil {
+		return
+	}
+	s.statusMu.Lock()
+	s.terminalSince = time.Time{}
+	s.statusMu.Unlock()
+}
+
+func (s *Stream_client) TerminalSince() time.Time {
+	if s == nil {
+		return time.Time{}
+	}
+	s.statusMu.RLock()
+	defer s.statusMu.RUnlock()
+	return s.terminalSince
 }
 
 func (s *Stream_client) appendPendingLocalData(chunk []byte) {
@@ -449,6 +484,8 @@ func (c *Client) InitVirtualStream0() {
 		ControlPacketTTL:         999999.0,
 		FinDrainTimeout:          300.0,
 		GracefulDrainTimeout:     600.0,
+		TerminalDrainTimeout:     60.0,
+		TerminalAckWaitTimeout:   30.0,
 		CompressionType:          c.uploadCompression,
 	}
 

@@ -38,10 +38,6 @@ type ServerConfig struct {
 	SessionCleanupIntervalSecs        float64  `toml:"SESSION_CLEANUP_INTERVAL_SECONDS"`
 	ClosedSessionRetentionSecs        float64  `toml:"CLOSED_SESSION_RETENTION_SECONDS"`
 	MaxPacketsPerBatch                int      `toml:"MAX_PACKETS_PER_BATCH"`
-	StreamOutboundWindow              int      `toml:"STREAM_OUTBOUND_WINDOW"`
-	StreamOutboundQueueLimit          int      `toml:"STREAM_OUTBOUND_QUEUE_LIMIT"`
-	StreamOutboundMaxRetries          int      `toml:"STREAM_OUTBOUND_MAX_RETRIES"`
-	StreamOutboundTTLSeconds          float64  `toml:"STREAM_OUTBOUND_TTL_SECONDS"`
 	DNSUpstreamServers                []string `toml:"DNS_UPSTREAM_SERVERS"`
 	DNSUpstreamTimeoutSecs            float64  `toml:"DNS_UPSTREAM_TIMEOUT"`
 	SOCKSConnectTimeoutSecs           float64  `toml:"SOCKS_CONNECT_TIMEOUT"`
@@ -76,8 +72,8 @@ func defaultServerConfig() ServerConfig {
 		SocketBufferSize:                  8 * 1024 * 1024,
 		MaxConcurrentRequests:             4096,
 		DNSRequestWorkers:                 workers,
-		DeferredSessionWorkers:            0,
-		DeferredSessionQueueLimit:         256,
+		DeferredSessionWorkers:            2,
+		DeferredSessionQueueLimit:         1000,
 		MaxPacketSize:                     65535,
 		DropLogIntervalSecs:               2.0,
 		InvalidCookieWindowSecs:           2.0,
@@ -86,22 +82,18 @@ func defaultServerConfig() ServerConfig {
 		SessionCleanupIntervalSecs:        30.0,
 		ClosedSessionRetentionSecs:        600.0,
 		MaxPacketsPerBatch:                20,
-		StreamOutboundWindow:              4,
-		StreamOutboundQueueLimit:          256,
-		StreamOutboundMaxRetries:          24,
-		StreamOutboundTTLSeconds:          120.0,
 		DNSUpstreamServers:                []string{"1.1.1.1:53"},
 		DNSUpstreamTimeoutSecs:            4.0,
 		SOCKSConnectTimeoutSecs:           8.0,
 		DNSFragmentAssemblyTimeoutSecs:    300.0,
-		DNSCacheMaxRecords:                2000,
-		DNSCacheTTLSeconds:                3600.0,
+		DNSCacheMaxRecords:                10,
+		DNSCacheTTLSeconds:                60.0,
 		UseExternalSOCKS5:                 false,
 		SOCKS5Auth:                        false,
 		SOCKS5User:                        "admin",
 		SOCKS5Pass:                        "123456",
 		ForwardIP:                         "",
-		ForwardPort:                       0,
+		ForwardPort:                       1080,
 		Domain:                            nil,
 		MinVPNLabelLength:                 3,
 		SupportedUploadCompressionTypes:   []int{0, 3},
@@ -191,27 +183,6 @@ func LoadServerConfig(filename string) (ServerConfig, error) {
 	}
 	if cfg.MaxPacketsPerBatch < 1 {
 		cfg.MaxPacketsPerBatch = 20
-	}
-	if cfg.StreamOutboundWindow < 1 {
-		cfg.StreamOutboundWindow = 64
-	}
-	if cfg.StreamOutboundWindow > 2048 {
-		cfg.StreamOutboundWindow = 2048
-	}
-	if cfg.StreamOutboundQueueLimit < 1 {
-		cfg.StreamOutboundQueueLimit = 256
-	}
-	if cfg.StreamOutboundQueueLimit > 8192 {
-		cfg.StreamOutboundQueueLimit = 8192
-	}
-	if cfg.StreamOutboundMaxRetries < 1 {
-		cfg.StreamOutboundMaxRetries = 24
-	}
-	if cfg.StreamOutboundMaxRetries > 512 {
-		cfg.StreamOutboundMaxRetries = 512
-	}
-	if cfg.StreamOutboundTTLSeconds <= 0 {
-		cfg.StreamOutboundTTLSeconds = 120.0
 	}
 	if len(cfg.DNSUpstreamServers) == 0 {
 		cfg.DNSUpstreamServers = []string{"1.1.1.1:53"}
@@ -309,10 +280,6 @@ func (c ServerConfig) SOCKSConnectTimeout() time.Duration {
 
 func (c ServerConfig) DNSFragmentAssemblyTimeout() time.Duration {
 	return time.Duration(c.DNSFragmentAssemblyTimeoutSecs * float64(time.Second))
-}
-
-func (c ServerConfig) StreamOutboundTTL() time.Duration {
-	return time.Duration(c.StreamOutboundTTLSeconds * float64(time.Second))
 }
 
 func (c ServerConfig) EncryptionKeyPath() string {

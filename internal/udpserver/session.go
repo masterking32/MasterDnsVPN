@@ -415,6 +415,21 @@ func (s *sessionStore) Cleanup(now time.Time, idleTimeout time.Duration, closedR
 	return expired
 }
 
+func (s *sessionStore) SweepTerminalStreams(now time.Time, retention time.Duration) {
+	s.mu.Lock()
+	records := make([]*sessionRecord, 0, len(s.byID))
+	for _, record := range s.byID {
+		if record != nil {
+			records = append(records, record)
+		}
+	}
+	s.mu.Unlock()
+
+	for _, record := range records {
+		record.cleanupTerminalStreams(now, retention)
+	}
+}
+
 func (s *sessionStore) allocateSlotLocked() int {
 	if s.activeCount >= maxServerSessionSlots {
 		return -1
@@ -496,7 +511,7 @@ func (r *sessionRecord) applyMTUFromSessionInit(uploadMTU uint16, downloadMTU ui
 	r.UploadMTU = clampMTU(uploadMTU)
 	r.DownloadMTU = clampMTU(downloadMTU)
 	r.DownloadMTUBytes = int(r.DownloadMTU)
-	r.MaxPackedBlocks = VpnProto.CalculateMaxPackedBlocks(r.DownloadMTUBytes, 80, 0)
+	r.MaxPackedBlocks = VpnProto.CalculateMaxPackedBlocks(r.DownloadMTUBytes, 80, maxPacketsPerBatch)
 }
 
 func (r *sessionRecord) runtimeView() sessionRuntimeView {
@@ -625,6 +640,52 @@ func (r *sessionRecord) removeStream(streamID uint16, now time.Time) {
 	r.StreamsMu.Unlock()
 
 	r.noteStreamClosed(streamID, now)
+}
+
+func (r *sessionRecord) cleanupTerminalStreams(now time.Time, retention time.Duration) {
+	if r == nil {
+		return
+	}
+
+	r.StreamsMu.RLock()
+	snapshot := make(map[uint16]*Stream_server, len(r.Streams))
+	for id, stream := range r.Streams {
+		snapshot[id] = stream
+	}
+	r.StreamsMu.RUnlock()
+
+	var removeIDs []uint16
+	for streamID, stream := range snapshot {
+		if streamID == 0 || stream == nil || stream.ARQ == nil {
+			continue
+		}
+
+		state := stream.ARQ.State()
+		stream.mu.Lock()
+		switch state {
+		case arq.StateDraining:
+			stream.Status = "DRAINING"
+		case arq.StateHalfClosedLocal, arq.StateHalfClosedRemote, arq.StateClosing:
+			stream.Status = "CLOSING"
+		case arq.StateTimeWait:
+			stream.Status = "TIME_WAIT"
+		}
+
+		if stream.ARQ.IsClosed() {
+			if stream.CloseTime.IsZero() {
+				stream.CloseTime = now
+			}
+			stream.Status = "TIME_WAIT"
+			if now.Sub(stream.CloseTime) >= retention {
+				removeIDs = append(removeIDs, streamID)
+			}
+		}
+		stream.mu.Unlock()
+	}
+
+	for _, streamID := range removeIDs {
+		r.removeStream(streamID, now)
+	}
 }
 
 func orphanResetKey(packetType uint8, streamID uint16) uint32 {
