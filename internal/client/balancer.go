@@ -596,3 +596,54 @@ func xorshift64(v uint64) uint64 {
 	v ^= v << 17
 	return v
 }
+
+// ConnectionStatEntry holds per-resolver stats for periodic reporting.
+type ConnectionStatEntry struct {
+	Key         string
+	Valid       bool
+	Sent        uint64
+	Acked       uint64
+	AvgRTTMicro uint64
+}
+
+// BalancerStats holds aggregated snapshot stats.
+type BalancerStats struct {
+	Total   int
+	Valid   int
+	Entries []ConnectionStatEntry
+}
+
+// Stats returns a snapshot of per-connection statistics.
+func (b *Balancer) Stats() BalancerStats {
+	snap := b.snapshot.Load()
+	if snap == nil {
+		return BalancerStats{}
+	}
+
+	entries := make([]ConnectionStatEntry, 0, len(snap.connections))
+	for idx, conn := range snap.connections {
+		if conn == nil {
+			continue
+		}
+		entry := ConnectionStatEntry{
+			Key:   conn.Key,
+			Valid: conn.IsValid,
+		}
+		if idx < len(snap.stats) && snap.stats[idx] != nil {
+			s := snap.stats[idx]
+			entry.Sent = s.sent.Load()
+			entry.Acked = s.acked.Load()
+			cnt := s.rttCount.Load()
+			if cnt > 0 {
+				entry.AvgRTTMicro = s.rttMicrosSum.Load() / cnt
+			}
+		}
+		entries = append(entries, entry)
+	}
+
+	return BalancerStats{
+		Total:   len(snap.connections),
+		Valid:   len(snap.valid),
+		Entries: entries,
+	}
+}

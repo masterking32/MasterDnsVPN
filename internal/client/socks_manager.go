@@ -69,6 +69,9 @@ func (c *Client) supportsSOCKS4() bool {
 func (c *Client) HandleSOCKS5(ctx context.Context, conn net.Conn) {
 	version := make([]byte, 1)
 	if _, err := io.ReadFull(conn, version); err != nil {
+		if c.log != nil {
+			c.log.Debugf("🔌 <yellow>SOCKS handshake read failed: <cyan>%v</cyan></yellow>", err)
+		}
 		_ = conn.Close()
 		return
 	}
@@ -83,6 +86,9 @@ func (c *Client) HandleSOCKS5(ctx context.Context, conn net.Conn) {
 		}
 		c.handleSOCKS4Request(ctx, conn)
 	default:
+		if c.log != nil {
+			c.log.Debugf("🔌 <yellow>SOCKS unknown version: <cyan>0x%02x</cyan></yellow>", version[0])
+		}
 		_ = conn.Close()
 	}
 }
@@ -662,7 +668,7 @@ func (c *Client) HandleSocksConnected(packet VpnProto.Packet) error {
 		arqObj.SetIOReady(true)
 	}
 
-	c.log.Debugf("🔌 <green>Socks successfully connected for stream %d</green>", packet.StreamID)
+	c.log.Debugf("🔌 <green>SOCKS connected <magenta>|</magenta> Stream: <cyan>%d</cyan></green>", packet.StreamID)
 	return nil
 }
 
@@ -706,6 +712,7 @@ func (c *Client) HandleSocksFailure(packet VpnProto.Packet) error {
 		return nil
 	}
 
+	c.log.Debugf("🔌 <yellow>SOCKS failure <magenta>|</magenta> Stream: <cyan>%d</cyan> <magenta>|</magenta> PacketType: <cyan>0x%02x</cyan></yellow>", packet.StreamID, packet.PacketType)
 	arqObj.Close("SOCKS failure received", arq.CloseOptions{Force: true})
 	return nil
 }

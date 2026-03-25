@@ -183,6 +183,13 @@ func (c *Client) new_stream(streamID uint16, conn net.Conn, targetPayload []byte
 		c.ensureStreamPreferredConnection(s)
 	}
 
+	if c.log != nil && streamID != 0 {
+		c.log.Debugf(
+			"🧦 <green>Stream Created <magenta>|</magenta> Stream: <cyan>%d</cyan> <magenta>|</magenta> Session: <cyan>%d</cyan> <magenta>|</magenta> Status: <cyan>%s</cyan></green>",
+			streamID, c.sessionID, s.StatusValue(),
+		)
+	}
+
 	return s
 }
 
@@ -327,6 +334,13 @@ func (s *Stream_client) RemoveQueuedDataNack(sequenceNum uint16) bool {
 }
 
 func (s *Stream_client) cleanupResources() {
+	if s.client != nil && s.client.log != nil && s.StreamID != 0 {
+		s.client.log.Debugf(
+			"🧹 <yellow>Stream Cleanup <magenta>|</magenta> Stream: <cyan>%d</cyan> <magenta>|</magenta> Session: <cyan>%d</cyan></yellow>",
+			s.StreamID, s.client.sessionID,
+		)
+	}
+
 	if s.NetConn != nil {
 		_ = s.NetConn.Close()
 	}
@@ -611,6 +625,10 @@ func (c *Client) CloseAllStreams() {
 	c.active_streams = make(map[uint16]*Stream_client)
 	c.streamsMu.Unlock()
 	c.bumpStreamSetVersion()
+
+	if c.log != nil {
+		c.log.Debugf("🧦 <yellow>Closing all streams <magenta>|</magenta> Count: <cyan>%d</cyan></yellow>", len(streams))
+	}
 
 	for _, s := range streams {
 		if s != nil {

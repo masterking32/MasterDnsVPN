@@ -70,6 +70,12 @@ func (s *Server) handleSessionCloseNotice(vpnPacket VpnProto.Packet, now time.Ti
 
 	lookup, known := s.sessions.Lookup(vpnPacket.SessionID)
 	if !known || lookup.State != sessionLookupActive || lookup.Cookie != vpnPacket.SessionCookie {
+		if s.debugLoggingEnabled() {
+			s.log.Debugf(
+				"\U0001F6AA <yellow>Session close rejected <magenta>|</magenta> Session: <cyan>%d</cyan> <magenta>|</magenta> Known: <cyan>%t</cyan> <magenta>|</magenta> Cookie match: <cyan>%t</cyan></yellow>",
+				vpnPacket.SessionID, known, known && lookup.Cookie == vpnPacket.SessionCookie,
+			)
+		}
 		return
 	}
 

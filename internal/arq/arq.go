@@ -56,6 +56,7 @@ type queuedDataNackRemover interface {
 type Logger interface {
 	Debugf(format string, args ...any)
 	Infof(format string, args ...any)
+	Warnf(format string, args ...any)
 	Errorf(format string, args ...any)
 }
 
@@ -63,6 +64,7 @@ type dummyLogger struct{}
 
 func (d *dummyLogger) Debugf(f string, a ...any) {}
 func (d *dummyLogger) Infof(f string, a ...any)  {}
+func (d *dummyLogger) Warnf(f string, a ...any)  {}
 func (d *dummyLogger) Errorf(f string, a ...any) {}
 
 type arqDataItem struct {
@@ -1899,6 +1901,7 @@ func (a *ARQ) checkRetransmits() {
 			}
 		} else if now.Sub(info.CreatedAt) >= a.dataPacketTTL && info.Retries >= a.maxDataRetries {
 			a.mu.Unlock()
+			a.logger.Debugf("⚠️ <yellow>ARQ max retransmissions <magenta>|</magenta> Stream: <cyan>%d</cyan> <magenta>|</magenta> Session: <cyan>%d</cyan> <magenta>|</magenta> SN: <cyan>%d</cyan></yellow>", a.streamID, a.sessionID, sn)
 			a.Close("Max retransmissions exceeded", CloseOptions{SendRST: true})
 			return
 		}
@@ -2103,7 +2106,9 @@ func (a *ARQ) handleTerminalRetransmitState(now time.Time) bool {
 			return false
 		}
 
+		idleDur := now.Sub(a.lastActivity)
 		a.mu.Unlock()
+		a.logger.Debugf("⏰ <yellow>ARQ inactivity timeout <magenta>|</magenta> Stream: <cyan>%d</cyan> <magenta>|</magenta> Session: <cyan>%d</cyan> <magenta>|</magenta> Idle: <cyan>%s</cyan></yellow>", a.streamID, a.sessionID, idleDur.Truncate(time.Second))
 		a.Close("Stream Inactivity Timeout (Dead)", CloseOptions{SendRST: true})
 		return true
 	}
@@ -2146,6 +2151,7 @@ func (a *ARQ) checkControlRetransmits(now time.Time) {
 				if exceededRetries {
 					reason = "Control packet max retransmissions exceeded"
 				}
+				a.logger.Debugf("⚠️ <yellow>ARQ control expired <magenta>|</magenta> Stream: <cyan>%d</cyan> <magenta>|</magenta> Type: <cyan>0x%02x</cyan> <magenta>|</magenta> Reason: <cyan>%s</cyan></yellow>", a.streamID, info.PacketType, reason)
 				a.mu.Unlock()
 				a.handleTrackedPacketTTLExpiry(info.PacketType, reason)
 				a.mu.Lock()
@@ -2166,6 +2172,7 @@ func (a *ARQ) checkControlRetransmits(now time.Time) {
 			continue
 		}
 
+		a.logger.Debugf("🔄 <yellow>ARQ control retransmit <magenta>|</magenta> Stream: <cyan>%d</cyan> <magenta>|</magenta> Type: <cyan>0x%02x</cyan> <magenta>|</magenta> Retry: <cyan>%d</cyan></yellow>", a.streamID, info.PacketType, info.Retries+1)
 		info.LastSentAt = now
 		info.Dispatched = false
 		info.Retries++

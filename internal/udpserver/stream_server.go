@@ -59,6 +59,14 @@ func NewStreamServer(streamID uint16, sessionID uint8, arqConfig arq.Config, loc
 
 	s.ARQ = arq.NewARQ(streamID, sessionID, s, localConn, mtu, logger, arqConfig)
 	s.ARQ.Start()
+
+	if logger != nil {
+		logger.Debugf(
+			"🧦 <green>Stream Server Created <magenta>|</magenta> Stream: <cyan>%d</cyan> <magenta>|</magenta> Session: <cyan>%d</cyan></green>",
+			streamID, sessionID,
+		)
+	}
+
 	return s
 }
 

@@ -20,6 +20,7 @@ import (
 	"masterdnsvpn-go/internal/client/handlers"
 	DnsParser "masterdnsvpn-go/internal/dnsparser"
 	fragmentStore "masterdnsvpn-go/internal/fragmentstore"
+	"masterdnsvpn-go/internal/logger"
 )
 
 const clientRXDropLogInterval = 2 * time.Second
@@ -296,7 +297,11 @@ func (c *Client) StartAsyncRuntime(parentCtx context.Context) error {
 		}()
 	}
 
-	// 10. Lifecycle cleanup.
+	// 10. Periodic stats logger.
+	c.asyncWG.Add(1)
+	go c.asyncStatsLogger(runtimeCtx)
+
+	// 11. Lifecycle cleanup.
 	c.asyncWG.Add(1)
 	go func() {
 		defer c.asyncWG.Done()
@@ -375,6 +380,72 @@ func (c *Client) asyncStreamCleanupWorker(ctx context.Context) {
 			for _, streamID := range removeIDs {
 				c.removeStream(streamID)
 			}
+		}
+	}
+}
+
+// asyncStatsLogger periodically logs connection and stream statistics.
+func (c *Client) asyncStatsLogger(ctx context.Context) {
+	defer c.asyncWG.Done()
+
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.logPeriodicStats()
+		}
+	}
+}
+
+func (c *Client) logPeriodicStats() {
+	if c.log == nil {
+		return
+	}
+
+	// Stream stats
+	c.streamsMu.RLock()
+	total := len(c.active_streams)
+	active, draining, pending := 0, 0, 0
+	for _, s := range c.active_streams {
+		if s == nil {
+			continue
+		}
+		switch s.StatusValue() {
+		case streamStatusActive:
+			active++
+		case streamStatusDraining, streamStatusClosing, streamStatusTimeWait:
+			draining++
+		case streamStatusPending, streamStatusSocksConnecting:
+			pending++
+		}
+	}
+	c.streamsMu.RUnlock()
+
+	// Balancer stats
+	bs := c.balancer.Stats()
+
+	c.log.Debugf(
+		"📊 <green>Stats <magenta>|</magenta> Streams: <cyan>%d</cyan> active, <cyan>%d</cyan> pending, <cyan>%d</cyan> draining (<cyan>%d</cyan> total) <magenta>|</magenta> Resolvers: <cyan>%d</cyan>/<cyan>%d</cyan> valid</green>",
+		active, pending, draining, total, bs.Valid, bs.Total,
+	)
+
+	if c.log.Enabled(logger.LevelDebug) {
+		for _, e := range bs.Entries {
+			var lossStr string
+			if e.Sent > 0 {
+				lossPct := float64(e.Sent-e.Acked) * 100 / float64(e.Sent)
+				lossStr = fmt.Sprintf("%.1f%%", lossPct)
+			} else {
+				lossStr = "N/A"
+			}
+			c.log.Debugf(
+				"📊 <cyan>Resolver %s <magenta>|</magenta> Valid: <cyan>%t</cyan> <magenta>|</magenta> Sent: <cyan>%d</cyan> <magenta>|</magenta> Acked: <cyan>%d</cyan> <magenta>|</magenta> Loss: <cyan>%s</cyan> <magenta>|</magenta> AvgRTT: <cyan>%dms</cyan></cyan>",
+				e.Key, e.Valid, e.Sent, e.Acked, lossStr, e.AvgRTTMicro/1000,
+			)
 		}
 	}
 }

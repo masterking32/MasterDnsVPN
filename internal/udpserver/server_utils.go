@@ -45,10 +45,16 @@ func buildNoDataResponseLite(packet []byte, parsed DnsParser.LitePacket) []byte 
 }
 
 func (s *Server) buildNoDataResponseLogged(packet []byte, reason string) []byte {
+	if s.debugLoggingEnabled() {
+		s.log.Debugf("⚠️ <yellow>NoData response <magenta>|</magenta> Reason: <cyan>%s</cyan></yellow>", reason)
+	}
 	return buildNoDataResponse(packet)
 }
 
 func (s *Server) buildNoDataResponseLiteLogged(packet []byte, parsed DnsParser.LitePacket, reason string) []byte {
+	if s.debugLoggingEnabled() {
+		s.log.Debugf("⚠️ <yellow>NoData response <magenta>|</magenta> Reason: <cyan>%s</cyan></yellow>", reason)
+	}
 	return buildNoDataResponseLite(packet, parsed)
 }
 

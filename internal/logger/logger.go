@@ -167,6 +167,40 @@ func (l *Logger) Enabled(level int) bool {
 	return l != nil && level >= l.level
 }
 
+// SubLogger wraps a Logger with a pre-rendered context prefix (e.g. "[Sess:3] [Str:42]").
+// It satisfies the arq.Logger interface and can be chained via With().
+type SubLogger struct {
+	parent *Logger
+	prefix string
+}
+
+// With creates a SubLogger with a single [key:value] context field.
+func (l *Logger) With(key, value string) *SubLogger {
+	return &SubLogger{parent: l, prefix: "[" + key + ":" + value + "]"}
+}
+
+// With chains an additional [key:value] context field onto an existing SubLogger.
+func (s *SubLogger) With(key, value string) *SubLogger {
+	return &SubLogger{parent: s.parent, prefix: s.prefix + " [" + key + ":" + value + "]"}
+}
+
+func (s *SubLogger) Debugf(format string, args ...any) {
+	s.parent.logf(levelDebug, s.prefix+" "+format, args...)
+}
+func (s *SubLogger) Infof(format string, args ...any) {
+	s.parent.logf(levelInfo, s.prefix+" "+format, args...)
+}
+func (s *SubLogger) Warnf(format string, args ...any) {
+	s.parent.logf(levelWarn, s.prefix+" "+format, args...)
+}
+func (s *SubLogger) Errorf(format string, args ...any) {
+	s.parent.logf(levelError, s.prefix+" "+format, args...)
+}
+
+func (s *SubLogger) Enabled(level int) bool {
+	return s.parent.Enabled(level)
+}
+
 func stripColorTags(text string) string {
 	start := strings.IndexByte(text, '<')
 	if start == -1 {

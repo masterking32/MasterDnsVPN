@@ -51,6 +51,9 @@ func (c *Client) InitializeSession(maxAttempts int) error {
 		}
 	}
 
+	if c.log != nil {
+		c.log.Debugf("⚠️ <yellow>Session init failed after <cyan>%d</cyan> attempts</yellow>", maxAttempts)
+	}
 	return ErrSessionInitFailed
 }
 
@@ -62,11 +65,17 @@ func (c *Client) initializeSessionOnce() error {
 
 	query, err := c.buildSessionQuery(conn.Domain, Enums.PACKET_SESSION_INIT, initPayload)
 	if err != nil {
+		if c.log != nil {
+			c.log.Debugf("⚠️ <yellow>Session init query build failed: <cyan>%v</cyan></yellow>", err)
+		}
 		return ErrSessionInitFailed
 	}
 
 	packet, err := c.exchangeDNSOverConnection(conn, query, c.mtuTestTimeout)
 	if err != nil {
+		if c.log != nil {
+			c.log.Debugf("🔄 <yellow>Session init DNS exchange failed: <cyan>%v</cyan></yellow>", err)
+		}
 		return ErrSessionInitFailed
 	}
 
@@ -75,7 +84,11 @@ func (c *Client) initializeSessionOnce() error {
 		if len(packet.Payload) < sessionBusyPayloadSize || !bytes.Equal(packet.Payload[:sessionBusyPayloadSize], verifyCode[:]) {
 			return ErrSessionInitFailed
 		}
-		c.setSessionInitBusyUntil(time.Now().Add(c.cfg.SessionInitBusyRetryInterval()))
+		busyRetry := c.cfg.SessionInitBusyRetryInterval()
+		c.setSessionInitBusyUntil(time.Now().Add(busyRetry))
+		if c.log != nil {
+			c.log.Debugf("⚠️ <yellow>Server busy, retry after <cyan>%s</cyan></yellow>", busyRetry)
+		}
 		return ErrSessionInitBusy
 	case Enums.PACKET_SESSION_ACCEPT:
 		if len(packet.Payload) < sessionAcceptPayloadSize || !bytes.Equal(packet.Payload[3:7], verifyCode[:]) {
@@ -91,6 +104,14 @@ func (c *Client) initializeSessionOnce() error {
 		c.clearSessionInitBusyUntil()
 		c.resetSessionInitState()
 		c.clearSessionResetPending()
+		if c.log != nil {
+			c.log.Debugf(
+				"✅ <green>Session Accepted <magenta>|</magenta> ID: <cyan>%d</cyan> <magenta>|</magenta> Cookie: <cyan>%d</cyan> <magenta>|</magenta> Upload: <cyan>%s</cyan> <magenta>|</magenta> Download: <cyan>%s</cyan></green>",
+				c.sessionID, c.sessionCookie,
+				compression.TypeName(c.uploadCompression),
+				compression.TypeName(c.downloadCompression),
+			)
+		}
 		return nil
 	default:
 		return ErrSessionInitFailed
@@ -319,6 +340,9 @@ func (c *Client) sendSessionCloseRound(targets []Connection, deadline time.Time)
 				PacketType:    Enums.PACKET_SESSION_CLOSE,
 			})
 			if err != nil {
+				if c.log != nil {
+					c.log.Debugf("⚠️ <yellow>Session close query build failed: <cyan>%v</cyan></yellow>", err)
+				}
 				return
 			}
 			c.sendOneWayDNSQuery(conn, query, deadline)

@@ -93,3 +93,76 @@ func TestShouldUseColorHonorsNoColor(t *testing.T) {
 		t.Fatal("NO_COLOR should disable colors even when FORCE_COLOR is set")
 	}
 }
+
+func TestSubLoggerPrefix(t *testing.T) {
+	var buf bytes.Buffer
+	l := &Logger{
+		name:          "test",
+		level:         levelDebug,
+		consoleWriter: &buf,
+		color:         false,
+		appNameText:   "[test]",
+	}
+
+	sub := l.With("Sess", "3")
+	sub.Infof("hello %s", "world")
+
+	output := buf.String()
+	if !strings.Contains(output, "[Sess:3] hello world") {
+		t.Fatalf("expected prefix in output, got: %s", output)
+	}
+}
+
+func TestSubLoggerChaining(t *testing.T) {
+	var buf bytes.Buffer
+	l := &Logger{
+		name:          "test",
+		level:         levelDebug,
+		consoleWriter: &buf,
+		color:         false,
+		appNameText:   "[test]",
+	}
+
+	sub := l.With("Sess", "3").With("Str", "42")
+	sub.Debugf("stream opened")
+
+	output := buf.String()
+	if !strings.Contains(output, "[Sess:3] [Str:42] stream opened") {
+		t.Fatalf("expected chained prefix in output, got: %s", output)
+	}
+}
+
+func TestSubLoggerRespectsLevel(t *testing.T) {
+	var buf bytes.Buffer
+	l := &Logger{
+		name:          "test",
+		level:         levelWarn,
+		consoleWriter: &buf,
+		color:         false,
+		appNameText:   "[test]",
+	}
+
+	sub := l.With("Sess", "1")
+	sub.Debugf("should not appear")
+	sub.Infof("should not appear")
+	sub.Warnf("should appear")
+
+	output := buf.String()
+	if strings.Contains(output, "should not appear") {
+		t.Fatal("sub-logger should suppress below parent level")
+	}
+	if !strings.Contains(output, "should appear") {
+		t.Fatal("sub-logger should log at parent level")
+	}
+}
+
+func TestSubLoggerEnabled(t *testing.T) {
+	l := &Logger{level: levelWarn}
+	sub := l.With("X", "1")
+	if sub.Enabled(levelDebug) {
+		t.Fatal("Enabled(debug) should be false at warn level")
+	}
+	if !sub.Enabled(levelWarn) {
+		t.Fatal("Enabled(warn) should be true at warn level")
+	}
+}

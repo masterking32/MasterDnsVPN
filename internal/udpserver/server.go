@@ -219,6 +219,8 @@ func (s *Server) Run(ctx context.Context) error {
 		s.sessionCleanupLoop(runCtx)
 	}()
 
+	go s.serverStatsLogger(runCtx)
+
 	s.deferredDNSSession.Start(runCtx)
 	s.deferredConnectSession.Start(runCtx)
 	s.startDNSWorkers(runCtx, conn, reqCh, &workerWG)
@@ -248,4 +250,43 @@ func (s *Server) Run(ctx context.Context) error {
 	default:
 		return nil
 	}
+}
+
+func (s *Server) serverStatsLogger(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.logServerStats()
+		}
+	}
+}
+
+func (s *Server) logServerStats() {
+	if s.log == nil || !s.log.Enabled(logger.LevelDebug) {
+		return
+	}
+
+	s.sessions.mu.Lock()
+	activeSessions := 0
+	totalStreams := 0
+	for _, record := range s.sessions.byID {
+		if record == nil {
+			continue
+		}
+		activeSessions++
+		record.StreamsMu.RLock()
+		totalStreams += len(record.ActiveStreams)
+		record.StreamsMu.RUnlock()
+	}
+	s.sessions.mu.Unlock()
+
+	s.log.Debugf(
+		"📊 <green>Server Stats <magenta>|</magenta> Sessions: <cyan>%d</cyan> <magenta>|</magenta> Streams: <cyan>%d</cyan></green>",
+		activeSessions, totalStreams,
+	)
 }
