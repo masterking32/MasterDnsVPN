@@ -34,7 +34,6 @@ type ServerConfig struct {
 	StreamQueueInitialCapacity        int      `toml:"STREAM_QUEUE_INITIAL_CAPACITY"`
 	DNSFragmentStoreCapacity          int      `toml:"DNS_FRAGMENT_STORE_CAPACITY"`
 	SOCKS5FragmentStoreCapacity       int      `toml:"SOCKS5_FRAGMENT_STORE_CAPACITY"`
-	StreamDataFragmentStoreCapacity   int      `toml:"STREAM_DATA_FRAGMENT_STORE_CAPACITY"`
 	MaxPacketSize                     int      `toml:"MAX_PACKET_SIZE"`
 	DropLogIntervalSecs               float64  `toml:"DROP_LOG_INTERVAL_SECONDS"`
 	InvalidCookieWindowSecs           float64  `toml:"INVALID_COOKIE_WINDOW_SECONDS"`
@@ -103,7 +102,6 @@ func defaultServerConfig() ServerConfig {
 		StreamQueueInitialCapacity:        128,
 		DNSFragmentStoreCapacity:          256,
 		SOCKS5FragmentStoreCapacity:       512,
-		StreamDataFragmentStoreCapacity:   128,
 		MaxPacketSize:                     65535,
 		DropLogIntervalSecs:               2.0,
 		InvalidCookieWindowSecs:           2.0,
@@ -216,8 +214,6 @@ func LoadServerConfig(filename string) (ServerConfig, error) {
 	cfg.StreamQueueInitialCapacity = clampInt(defaultIntBelow(cfg.StreamQueueInitialCapacity, 1, 128), 8, 65536)
 	cfg.DNSFragmentStoreCapacity = clampInt(defaultIntBelow(cfg.DNSFragmentStoreCapacity, 1, 256), 16, 16384)
 	cfg.SOCKS5FragmentStoreCapacity = clampInt(defaultIntBelow(cfg.SOCKS5FragmentStoreCapacity, 1, 512), 16, 16384)
-	cfg.StreamDataFragmentStoreCapacity = clampInt(defaultIntBelow(cfg.StreamDataFragmentStoreCapacity, 1, 128), 16, 16384)
-
 	if cfg.MaxPacketSize <= 0 {
 		cfg.MaxPacketSize = 65535
 	}

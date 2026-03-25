@@ -327,6 +327,7 @@ func (c *Client) Run(ctx context.Context) error {
 				}
 
 				c.successMTUChecks = true
+				c.ShortPrintBanner()
 			}
 
 			if !c.sessionReady {

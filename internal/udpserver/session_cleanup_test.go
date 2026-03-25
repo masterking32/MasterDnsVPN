@@ -47,10 +47,9 @@ func newTestSessionRecord(sessionID uint8) *sessionRecord {
 
 func newTestServerForCleanup() *Server {
 	return &Server{
-		deferredSession:     nil,
-		dnsFragments:        fragmentStore.New[dnsFragmentKey](8),
-		socks5Fragments:     fragmentStore.New[socks5FragmentKey](8),
-		streamDataFragments: fragmentStore.New[streamDataFragmentKey](8),
+		deferredSession: nil,
+		dnsFragments:    fragmentStore.New[dnsFragmentKey](8),
+		socks5Fragments: fragmentStore.New[socks5FragmentKey](8),
 	}
 }
 

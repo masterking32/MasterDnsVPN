@@ -118,10 +118,6 @@ func (s *Server) consumeInboundStreamAck(vpnPacket VpnProto.Packet, stream *Stre
 		}
 	}
 
-	if handledAck && vpnPacket.PacketType == Enums.PACKET_STREAM_RST_ACK {
-		s.removeStreamDataFragmentsForStream(vpnPacket.SessionID, vpnPacket.StreamID)
-	}
-
 	return handledAck
 }
 
@@ -407,6 +403,5 @@ func (s *Server) handleStreamRSTRequest(vpnPacket VpnProto.Packet) bool {
 	}
 
 	s.removeSOCKS5SynFragmentsForStream(vpnPacket.SessionID, vpnPacket.StreamID)
-	s.removeStreamDataFragmentsForStream(vpnPacket.SessionID, vpnPacket.StreamID)
 	return true
 }

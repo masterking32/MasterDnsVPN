@@ -309,18 +309,23 @@ func (c *Client) Balancer() *Balancer {
 	return c.balancer
 }
 
-func (c *Client) PrintBanner() {
+func (c *Client) ShortPrintBanner() {
 	if c.log == nil {
 		return
 	}
 
 	c.log.Infof("============================================================")
-	c.log.Infof("<magenta>Starting MasterDnsVPN Client...</magenta>")
-	// Build version skipped as per user request
-	c.log.Infof("<cyan>GitHub:</cyan> <blue>https://github.com/masterking32/MasterDnsVPN</blue>")
+	c.log.Infof("<cyan>GitHub:</cyan> <yellow>https://github.com/masterking32/MasterDnsVPN</yellow>")
 	c.log.Infof("<cyan>Telegram:</cyan> <yellow>@MasterDnsVPN</yellow>")
 	c.log.Infof("============================================================")
+}
 
+func (c *Client) PrintBanner() {
+	if c.log == nil {
+		return
+	}
+
+	c.ShortPrintBanner()
 	c.log.Infof("🚀 <green>Client Configuration Loaded</green>")
 
 	c.log.Infof("🚀 <cyan>Client Mode, Protocol:</cyan> <yellow>%s</yellow> <cyan>Encryption:</cyan> <yellow>%d</yellow>", c.cfg.ProtocolType, c.cfg.DataEncryptionMethod)

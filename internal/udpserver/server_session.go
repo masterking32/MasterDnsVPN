@@ -214,7 +214,6 @@ func (s *Server) cleanupClosedSession(sessionID uint8, record *sessionRecord) {
 	}
 	s.deferredSession.RemoveSession(sessionID)
 	s.removeDNSQueryFragmentsForSession(sessionID)
-	s.removeStreamDataFragmentsForSession(sessionID)
 }
 
 func (s *Server) serveQueuedOrPong(questionPacket []byte, requestName string, record *sessionRuntimeView, now time.Time) []byte {

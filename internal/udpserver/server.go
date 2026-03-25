@@ -51,7 +51,6 @@ type Server struct {
 	dnsUpstreamBufferPool    sync.Pool
 	dnsFragments             *fragmentStore.Store[dnsFragmentKey]
 	socks5Fragments          *fragmentStore.Store[socks5FragmentKey]
-	streamDataFragments      *fragmentStore.Store[streamDataFragmentKey]
 	dnsFragmentTimeout       time.Duration
 	resolveDNSQueryFn        func([]byte) ([]byte, error)
 	dialStreamUpstreamFn     func(string, string, time.Duration) (net.Conn, error)
@@ -120,12 +119,11 @@ func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Se
 			time.Duration(cfg.DNSCacheTTLSeconds*float64(time.Second)),
 			dnsFragmentTimeout,
 		),
-		dnsResolveInflight:  newDNSResolveInflightManager(dnsFragmentTimeout),
-		dnsUpstreamServers:  append([]string(nil), cfg.DNSUpstreamServers...),
-		dnsFragments:        fragmentStore.New[dnsFragmentKey](cfg.DNSFragmentStoreCapacity),
-		socks5Fragments:     fragmentStore.New[socks5FragmentKey](cfg.SOCKS5FragmentStoreCapacity),
-		streamDataFragments: fragmentStore.New[streamDataFragmentKey](cfg.StreamDataFragmentStoreCapacity),
-		dnsFragmentTimeout:  dnsFragmentTimeout,
+		dnsResolveInflight: newDNSResolveInflightManager(dnsFragmentTimeout),
+		dnsUpstreamServers: append([]string(nil), cfg.DNSUpstreamServers...),
+		dnsFragments:       fragmentStore.New[dnsFragmentKey](cfg.DNSFragmentStoreCapacity),
+		socks5Fragments:    fragmentStore.New[socks5FragmentKey](cfg.SOCKS5FragmentStoreCapacity),
+		dnsFragmentTimeout: dnsFragmentTimeout,
 		dnsUpstreamBufferPool: sync.Pool{
 			New: func() any {
 				return make([]byte, 65535)
@@ -184,6 +182,11 @@ func (s *Server) Run(ctx context.Context) error {
 		s.cfg.DNSRequestWorkers,
 		s.cfg.MaxConcurrentRequests,
 	)
+
+	s.log.Infof("============================================================")
+	s.log.Infof("<cyan>GitHub:</cyan> <yellow>https://github.com/masterking32/MasterDnsVPN</yellow>")
+	s.log.Infof("<cyan>Telegram:</cyan> <yellow>@MasterDnsVPN</yellow>")
+	s.log.Infof("============================================================")
 
 	reqCh := make(chan request, s.cfg.MaxConcurrentRequests)
 	var workerWG sync.WaitGroup
