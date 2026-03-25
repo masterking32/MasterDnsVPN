@@ -797,7 +797,6 @@ func (a *ARQ) emitTerminalPacketWithTTL(packetType uint8, reason string, ttl tim
 		a.ackWaitDeadline = time.Now().Add(a.terminalAckWait)
 		a.mu.Unlock()
 
-		a.logger.Debugf("⚠️ <yellow>ARQ RST Trigger</yellow> <magenta>|</magenta> <blue>Session</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Stream</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Source</blue>: <cyan>emitTerminalPacket</cyan> <magenta>|</magenta> <blue>Reason</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>TTL</blue>: <cyan>%s</cyan>", a.sessionID, a.streamID, reason, ttl)
 		a.MarkRstSent()
 		ackType := uint8(Enums.PACKET_STREAM_RST_ACK)
 		a.SendControlPacketWithTTL(Enums.PACKET_STREAM_RST, rstSeq, 0, 0, nil, Enums.DefaultPacketPriority(Enums.PACKET_STREAM_RST), a.enableControlReliability, &ackType, ttl)
