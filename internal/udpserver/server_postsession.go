@@ -91,14 +91,6 @@ func isStreamCreationPacketType(packetType uint8) bool {
 	}
 }
 
-func isStreamScopedAckPacket(packetType uint8) bool {
-	if packetType == Enums.PACKET_STREAM_DATA_ACK {
-		return true
-	}
-	_, ok := Enums.ReverseControlAckFor(packetType)
-	return ok
-}
-
 func (s *Server) consumeInboundStreamAck(vpnPacket VpnProto.Packet, stream *Stream_server) bool {
 	if s == nil || stream == nil || stream.ARQ == nil {
 		return false

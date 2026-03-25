@@ -464,16 +464,6 @@ func vpnPacketFromTX(p *serverStreamTXPacket, streamID uint16) VpnProto.Packet {
 	}
 }
 
-func (s *Server) QueueTargetForPacket(streamExists bool, packetType uint8, streamID uint16) (QueueTarget, bool) {
-	if streamID == 0 {
-		return QueueTargetMain, true
-	}
-	if streamExists {
-		return QueueTargetStream, true
-	}
-	return QueueTargetMain, true
-}
-
 func (s *Server) nextPongPayload() [7]byte {
 	var payload [7]byte
 	payload[0] = 'P'

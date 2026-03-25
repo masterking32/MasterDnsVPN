@@ -21,12 +21,19 @@ import (
 	"masterdnsvpn-go/internal/logger"
 	"masterdnsvpn-go/internal/security"
 	UDPServer "masterdnsvpn-go/internal/udpserver"
+	"masterdnsvpn-go/internal/version"
 )
 
 func main() {
 	configPath := flag.String("config", "server_config.toml", "Path to server configuration file")
 	logPath := flag.String("log", "", "Path to log file (optional)")
+	versionFlag := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
+
+	if *versionFlag {
+		fmt.Printf("MasterDnsVPN Server Version: %s\n", version.GetVersion())
+		return
+	}
 
 	resolvedConfigPath := resolveRuntimePath(*configPath)
 

@@ -19,6 +19,7 @@ import (
 	"masterdnsvpn-go/internal/arq"
 	Enums "masterdnsvpn-go/internal/enums"
 	"masterdnsvpn-go/internal/logger"
+	"masterdnsvpn-go/internal/version"
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 
@@ -132,21 +133,6 @@ func (c *Client) enqueueOrphanReset(packetType uint8, streamID uint16, sequenceN
 	case c.txSignal <- struct{}{}:
 	default:
 	}
-}
-
-func (c *Client) dequeueOrphanReset() (*VpnProto.Packet, bool) {
-	if c == nil || c.orphanQueue == nil {
-		return nil, false
-	}
-
-	packet, _, ok := c.orphanQueue.Pop(func(p VpnProto.Packet) uint64 {
-		return orphanResetKey(p.PacketType, p.StreamID)
-	})
-	if !ok {
-		return nil, false
-	}
-
-	return &packet, true
 }
 
 func (c *Client) clearOrphanResets() {
@@ -317,6 +303,7 @@ func (c *Client) ShortPrintBanner() {
 	c.log.Infof("============================================================")
 	c.log.Infof("<cyan>GitHub:</cyan> <yellow>https://github.com/masterking32/MasterDnsVPN</yellow>")
 	c.log.Infof("<cyan>Telegram:</cyan> <yellow>@MasterDnsVPN</yellow>")
+	c.log.Infof("<cyan>Build Version:</cyan> <yellow>%s</yellow>", version.GetVersion())
 	c.log.Infof("============================================================")
 }
 

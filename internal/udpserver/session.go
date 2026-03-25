@@ -32,13 +32,6 @@ const (
 	maxSessionMTU         = 4096
 )
 
-type QueueTarget uint8
-
-const (
-	QueueTargetMain QueueTarget = iota
-	QueueTargetStream
-)
-
 type sessionRecord struct {
 	mu sync.RWMutex
 
@@ -800,19 +793,4 @@ func (r *sessionRecord) enqueueOrphanReset(packetType uint8, streamID uint16, se
 	key := orphanResetKey(packetType, streamID)
 	// Orphans have high priority (0).
 	r.OrphanQueue.Push(0, key, packet)
-}
-
-func (r *sessionRecord) dequeueOrphanReset() (*VpnProto.Packet, bool) {
-	if r == nil || r.OrphanQueue == nil {
-		return nil, false
-	}
-
-	packet, _, ok := r.OrphanQueue.Pop(func(p VpnProto.Packet) uint64 {
-		return orphanResetKey(p.PacketType, p.StreamID)
-	})
-	if !ok {
-		return nil, false
-	}
-
-	return &packet, true
 }

@@ -17,12 +17,19 @@ import (
 	"syscall"
 
 	"masterdnsvpn-go/internal/client"
+	"masterdnsvpn-go/internal/version"
 )
 
 func main() {
 	configPath := flag.String("config", "client_config.toml", "Path to client configuration file")
 	logPath := flag.String("log", "", "Path to log file (optional)")
+	versionFlag := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
+
+	if *versionFlag {
+		fmt.Printf("MasterDnsVPN Client Version: %s\n", version.GetVersion())
+		return
+	}
 
 	resolvedConfigPath := resolveRuntimePath(*configPath)
 
