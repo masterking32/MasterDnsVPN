@@ -206,7 +206,7 @@ func (c *Client) HandleDNSQueryRes(packet VpnProto.Packet) error {
 		SequenceNum: packet.SequenceNum,
 	}
 
-	assembled, ready, _ := c.dnsResponses.Collect(key, packet.Payload, packet.FragmentID, packet.TotalFragments, time.Now(), 10*time.Second)
+	assembled, ready, _ := c.dnsResponses.Collect(key, packet.Payload, packet.FragmentID, packet.TotalFragments, time.Now(), c.cfg.DNSResponseFragmentTimeout())
 	if !ready {
 		return nil
 	}

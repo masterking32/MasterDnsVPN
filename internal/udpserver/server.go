@@ -112,7 +112,7 @@ func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Se
 		log:                  log,
 		codec:                codec,
 		domainMatcher:        domainMatcher.New(cfg.Domain, cfg.MinVPNLabelLength),
-		sessions:             newSessionStore(cfg.SessionOrphanQueueInitialCap, cfg.StreamQueueInitialCapacity),
+		sessions:             newSessionStore(cfg.SessionOrphanQueueInitialCap, cfg.StreamQueueInitialCapacity, cfg.SessionInitReuseTTL(), cfg.RecentlyClosedStreamTTL(), cfg.RecentlyClosedStreamCap),
 		deferredSession:      newDeferredSessionProcessor(cfg.DeferredSessionWorkers, cfg.DeferredSessionQueueLimit, log),
 		invalidCookieTracker: newInvalidCookieTracker(),
 		dnsCache: dnsCache.New(

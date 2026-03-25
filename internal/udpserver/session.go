@@ -25,14 +25,11 @@ import (
 var ErrSessionTableFull = errors.New("session table full")
 
 const (
-	maxServerSessionID          = 255
-	maxServerSessionSlots       = 255
-	sessionInitTTL              = 10 * time.Minute
-	sessionInitDataSize         = 10
-	minSessionMTU               = 10
-	maxSessionMTU               = 4096
-	serverClosedStreamRecordTTL = 600 * time.Second
-	serverClosedStreamRecordCap = 2000
+	maxServerSessionID    = 255
+	maxServerSessionSlots = 255
+	sessionInitDataSize   = 10
+	minSessionMTU         = 10
+	maxSessionMTU         = 4096
 )
 
 type QueueTarget uint8
@@ -70,6 +67,8 @@ type sessionRecord struct {
 	StreamQueueCap                  int
 	StreamsMu                       sync.RWMutex
 	RecentlyClosed                  map[uint16]time.Time
+	RecentlyClosedTTL               time.Duration
+	RecentlyClosedCap               int
 	OrphanQueue                     *mlq.MultiLevelQueue[VpnProto.Packet]
 	LastPackedControlBlock          *VpnProto.Packet
 	LastPackedControlBlockRemaining int
@@ -166,22 +165,47 @@ type sessionStore struct {
 	recentClosed           map[uint8]closedSessionRecord
 	orphanQueueCap         int
 	streamQueueCap         int
+	sessionInitTTL         time.Duration
+	recentlyClosedTTL      time.Duration
+	recentlyClosedCap      int
 }
 
-func newSessionStore(orphanQueueCap int, streamQueueCap int) *sessionStore {
+func newSessionStore(orphanQueueCap int, streamQueueCap int, options ...any) *sessionStore {
 	if orphanQueueCap < 1 {
 		orphanQueueCap = 8
 	}
 	if streamQueueCap < 1 {
 		streamQueueCap = 32
 	}
+
+	sessionInitTTL := 10 * time.Minute
+	recentlyClosedTTL := 600 * time.Second
+	recentlyClosedCap := 2000
+	if len(options) > 0 {
+		if v, ok := options[0].(time.Duration); ok && v > 0 {
+			sessionInitTTL = v
+		}
+	}
+	if len(options) > 1 {
+		if v, ok := options[1].(time.Duration); ok && v > 0 {
+			recentlyClosedTTL = v
+		}
+	}
+	if len(options) > 2 {
+		if v, ok := options[2].(int); ok && v > 0 {
+			recentlyClosedCap = v
+		}
+	}
 	return &sessionStore{
-		bySig:          make(map[[sessionInitDataSize]byte]uint8, 64),
-		recentClosed:   make(map[uint8]closedSessionRecord, 32),
-		cookieIndex:    32,
-		nextID:         1,
-		orphanQueueCap: orphanQueueCap,
-		streamQueueCap: streamQueueCap,
+		bySig:             make(map[[sessionInitDataSize]byte]uint8, 64),
+		recentClosed:      make(map[uint8]closedSessionRecord, 32),
+		cookieIndex:       32,
+		nextID:            1,
+		orphanQueueCap:    orphanQueueCap,
+		streamQueueCap:    streamQueueCap,
+		sessionInitTTL:    sessionInitTTL,
+		recentlyClosedTTL: recentlyClosedTTL,
+		recentlyClosedCap: recentlyClosedCap,
 	}
 }
 
@@ -216,16 +240,18 @@ func (s *sessionStore) findOrCreate(payload []byte, uploadCompressionType uint8,
 	}
 
 	record := &sessionRecord{
-		ID:             uint8(slot),
-		ResponseMode:   payload[0],
-		CreatedAt:      now,
-		ReuseUntil:     now.Add(sessionInitTTL),
-		Signature:      signature,
-		Streams:        make(map[uint16]*Stream_server),
-		ActiveStreams:  make([]uint16, 0, 8),
-		StreamQueueCap: s.streamQueueCap,
-		RecentlyClosed: make(map[uint16]time.Time, 8),
-		OrphanQueue:    mlq.New[VpnProto.Packet](s.orphanQueueCap),
+		ID:                uint8(slot),
+		ResponseMode:      payload[0],
+		CreatedAt:         now,
+		ReuseUntil:        now.Add(s.sessionInitTTL),
+		Signature:         signature,
+		Streams:           make(map[uint16]*Stream_server),
+		ActiveStreams:     make([]uint16, 0, 8),
+		StreamQueueCap:    s.streamQueueCap,
+		RecentlyClosed:    make(map[uint16]time.Time, 8),
+		RecentlyClosedTTL: s.recentlyClosedTTL,
+		RecentlyClosedCap: s.recentlyClosedCap,
+		OrphanQueue:       mlq.New[VpnProto.Packet](s.orphanQueueCap),
 	}
 
 	// Initialize virtual Stream 0 for control packets
@@ -607,7 +633,7 @@ func (r *sessionRecord) noteStreamClosed(streamID uint16, now time.Time) {
 	defer r.StreamsMu.Unlock()
 
 	// Cleanup old records
-	expiredBefore := now.Add(-serverClosedStreamRecordTTL)
+	expiredBefore := now.Add(-r.closedStreamRecordTTL())
 	for id, closedAt := range r.RecentlyClosed {
 		if closedAt.Before(expiredBefore) {
 			delete(r.RecentlyClosed, id)
@@ -617,7 +643,7 @@ func (r *sessionRecord) noteStreamClosed(streamID uint16, now time.Time) {
 	r.RecentlyClosed[streamID] = now
 
 	// Cap the map size
-	if len(r.RecentlyClosed) > serverClosedStreamRecordCap {
+	if len(r.RecentlyClosed) > r.closedStreamRecordCap() {
 		var oldestID uint16
 		var oldestAt time.Time
 		first := true
@@ -641,7 +667,21 @@ func (r *sessionRecord) isRecentlyClosed(streamID uint16, now time.Time) bool {
 		return false
 	}
 
-	return now.Sub(closedAt) <= serverClosedStreamRecordTTL
+	return now.Sub(closedAt) <= r.closedStreamRecordTTL()
+}
+
+func (r *sessionRecord) closedStreamRecordTTL() time.Duration {
+	if r == nil || r.RecentlyClosedTTL <= 0 {
+		return 600 * time.Second
+	}
+	return r.RecentlyClosedTTL
+}
+
+func (r *sessionRecord) closedStreamRecordCap() int {
+	if r == nil || r.RecentlyClosedCap < 1 {
+		return 2000
+	}
+	return r.RecentlyClosedCap
 }
 
 func (r *sessionRecord) removeStream(streamID uint16, now time.Time) {

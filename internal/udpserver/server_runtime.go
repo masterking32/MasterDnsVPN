@@ -70,7 +70,7 @@ func (s *Server) sessionCleanupLoop(ctx context.Context) {
 			return
 		case now := <-ticker.C:
 			expired := s.sessions.Cleanup(now, sessionTimeout, closedRetention)
-			s.sessions.SweepTerminalStreams(now, 45*time.Second)
+			s.sessions.SweepTerminalStreams(now, s.cfg.TerminalStreamRetention())
 			s.invalidCookieTracker.Cleanup(now, invalidCookieWindow)
 			s.purgeDNSQueryFragments(now)
 			s.purgeSOCKS5SynFragments(now)

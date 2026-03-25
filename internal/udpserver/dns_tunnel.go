@@ -121,7 +121,7 @@ func (s *Server) buildDNSQueryResponsePayload(rawQuery []byte, sessionID uint8, 
 				sequenceNum,
 			)
 		}
-		waitTimeout := s.cfg.DNSUpstreamTimeout() * 2
+		waitTimeout := s.cfg.DNSInflightWaitTimeout()
 		if waitTimeout <= 0 {
 			waitTimeout = 8 * time.Second
 		}

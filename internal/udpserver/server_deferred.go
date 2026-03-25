@@ -141,7 +141,7 @@ func (s *Server) processDeferredSOCKS5Syn(vpnPacket VpnProto.Packet) {
 			Enums.DefaultPacketPriority(packetType),
 			true,
 			nil,
-			120*time.Second,
+			s.cfg.StreamFailurePacketTTL(),
 		)
 		return
 	}
@@ -167,7 +167,7 @@ func (s *Server) processDeferredSOCKS5Syn(vpnPacket VpnProto.Packet) {
 				Enums.DefaultPacketPriority(Enums.PACKET_SOCKS5_CONNECTED),
 				true,
 				nil,
-				300*time.Second,
+				s.cfg.StreamResultPacketTTL(),
 			)
 			return
 		}
@@ -181,7 +181,7 @@ func (s *Server) processDeferredSOCKS5Syn(vpnPacket VpnProto.Packet) {
 			Enums.DefaultPacketPriority(Enums.PACKET_SOCKS5_CONNECT_FAIL),
 			true,
 			nil,
-			120*time.Second,
+			s.cfg.StreamFailurePacketTTL(),
 		)
 		return
 	}
@@ -209,7 +209,7 @@ func (s *Server) processDeferredSOCKS5Syn(vpnPacket VpnProto.Packet) {
 			Enums.DefaultPacketPriority(packetType),
 			true,
 			nil,
-			120*time.Second,
+			s.cfg.StreamFailurePacketTTL(),
 		)
 		return
 	}
@@ -243,7 +243,7 @@ func (s *Server) processDeferredSOCKS5Syn(vpnPacket VpnProto.Packet) {
 		Enums.DefaultPacketPriority(Enums.PACKET_SOCKS5_CONNECTED),
 		true,
 		nil,
-		300*time.Second,
+		s.cfg.StreamResultPacketTTL(),
 	)
 }
 

@@ -21,8 +21,6 @@ import (
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 
-const sessionInitBusyRetryInterval = time.Minute
-
 var (
 	ErrSessionInitFailed = errors.New("session init failed")
 	ErrSessionInitBusy   = errors.New("session init busy")
@@ -77,7 +75,7 @@ func (c *Client) initializeSessionOnce() error {
 		if len(packet.Payload) < sessionBusyPayloadSize || !bytes.Equal(packet.Payload[:sessionBusyPayloadSize], verifyCode[:]) {
 			return ErrSessionInitFailed
 		}
-		c.setSessionInitBusyUntil(time.Now().Add(sessionInitBusyRetryInterval))
+		c.setSessionInitBusyUntil(time.Now().Add(c.cfg.SessionInitBusyRetryInterval()))
 		return ErrSessionInitBusy
 	case Enums.PACKET_SESSION_ACCEPT:
 		if len(packet.Payload) < sessionAcceptPayloadSize || !bytes.Equal(packet.Payload[3:7], verifyCode[:]) {

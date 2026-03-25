@@ -31,7 +31,8 @@ func (c *Client) asyncStreamDispatcher(ctx context.Context) {
 	defer c.asyncWG.Done()
 
 	var rrCursor int32 = -1
-	idleTimer := time.NewTimer(20 * time.Millisecond)
+	idlePoll := c.cfg.DispatcherIdlePollInterval()
+	idleTimer := time.NewTimer(idlePoll)
 	defer idleTimer.Stop()
 
 dispatchLoop:
@@ -64,7 +65,7 @@ dispatchLoop:
 				default:
 				}
 			}
-			idleTimer.Reset(20 * time.Millisecond)
+			idleTimer.Reset(idlePoll)
 			continue
 		}
 
@@ -181,7 +182,7 @@ dispatchLoop:
 				default:
 				}
 			}
-			idleTimer.Reset(20 * time.Millisecond)
+			idleTimer.Reset(idlePoll)
 			continue
 		}
 

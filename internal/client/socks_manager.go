@@ -535,7 +535,7 @@ func (c *Client) handleSocksUDPAssociate(ctx context.Context, conn net.Conn, cli
 
 	buf := make([]byte, 4096)
 	for {
-		_ = udpConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		_ = udpConn.SetReadDeadline(time.Now().Add(c.cfg.SOCKSUDPAssociateReadTimeout()))
 		n, peerAddr, err := udpConn.ReadFromUDP(buf)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {

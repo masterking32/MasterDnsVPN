@@ -17,17 +17,6 @@ import (
 	Enums "masterdnsvpn-go/internal/enums"
 )
 
-const (
-	pingAggressiveInterval = 300 * time.Millisecond
-	pingLazyInterval       = 1 * time.Second
-	pingCoolDownInterval   = 3 * time.Second
-	pingColdInterval       = 30 * time.Second
-	pingWarmThreshold      = 5 * time.Second
-	pingCoolThreshold      = 10 * time.Second
-	pingColdThreshold      = 20 * time.Second
-	pingPongFreshWindow    = 2 * time.Second
-)
-
 type PingManager struct {
 	client                *Client
 	lastPingSentAt        atomic.Int64
@@ -118,10 +107,10 @@ func (p *PingManager) nextInterval(nowNano int64) time.Duration {
 	lastNonPongRecv := p.lastNonPongReceivedAt.Load()
 
 	// Use fast int64 comparisons for intervals
-	warmThresholdNano := int64(pingWarmThreshold)
+	warmThresholdNano := int64(p.client.cfg.PingWarmThreshold())
 
 	if nowNano-lastNonPingSent < warmThresholdNano || nowNano-lastNonPongRecv < warmThresholdNano {
-		return pingAggressiveInterval
+		return p.client.cfg.PingAggressiveInterval()
 	}
 
 	idleSent := nowNano - lastNonPingSent
@@ -131,14 +120,15 @@ func (p *PingManager) nextInterval(nowNano int64) time.Duration {
 		minIdle = idleRecv
 	}
 
-	coolThresholdNano := int64(pingCoolThreshold)
+	coolThresholdNano := int64(p.client.cfg.PingCoolThreshold())
+	coldThresholdNano := int64(p.client.cfg.PingColdThreshold())
 	switch {
 	case minIdle < coolThresholdNano:
-		return pingLazyInterval
-	case minIdle < coolThresholdNano*2:
-		return pingCoolDownInterval
+		return p.client.cfg.PingLazyInterval()
+	case minIdle < coldThresholdNano:
+		return p.client.cfg.PingCooldownInterval()
 	default:
-		return pingColdInterval
+		return p.client.cfg.PingColdInterval()
 	}
 }
 
@@ -146,7 +136,7 @@ func (p *PingManager) pingLoop() {
 	defer p.wg.Done()
 
 	p.client.log.Debugf("\U0001F3D3 <cyan>Ping Manager loop started</cyan>")
-	timer := time.NewTimer(pingAggressiveInterval)
+	timer := time.NewTimer(p.client.cfg.PingAggressiveInterval())
 	defer timer.Stop()
 
 	for {

@@ -29,11 +29,7 @@ import (
 )
 
 const (
-	EDnsSafeUDPSize             = 4096
-	sessionInitRetryBase        = 1 * time.Second
-	sessionInitRetryStep        = 1 * time.Second
-	sessionInitRetryLinearAfter = 5
-	sessionInitRetryMax         = 1 * time.Minute
+	EDnsSafeUDPSize = 4096
 )
 
 type Client struct {
@@ -268,18 +264,18 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 	return c
 }
 
-func nextSessionInitRetryDelay(failures int) time.Duration {
+func (c *Client) nextSessionInitRetryDelay(failures int) time.Duration {
 	if failures <= 0 {
 		return 0
 	}
 
-	delay := sessionInitRetryBase
-	if failures > sessionInitRetryLinearAfter {
-		delay += time.Duration(failures-sessionInitRetryLinearAfter) * sessionInitRetryStep
+	delay := c.cfg.SessionInitRetryBase()
+	if failures > c.cfg.SessionInitRetryLinearAfter {
+		delay += time.Duration(failures-c.cfg.SessionInitRetryLinearAfter) * c.cfg.SessionInitRetryStep()
 	}
 
-	if delay > sessionInitRetryMax {
-		return sessionInitRetryMax
+	if delay > c.cfg.SessionInitRetryMax() {
+		return c.cfg.SessionInitRetryMax()
 	}
 
 	return delay
@@ -341,7 +337,7 @@ func (c *Client) Run(ctx context.Context) error {
 
 				if err := c.InitializeSession(retries); err != nil {
 					sessionInitRetryFailures++
-					sessionInitRetryDelay = nextSessionInitRetryDelay(sessionInitRetryFailures)
+					sessionInitRetryDelay = c.nextSessionInitRetryDelay(sessionInitRetryFailures)
 					c.log.Errorf("<red>❌ Session initialization failed: %v</red>", err)
 					c.log.Warnf("<yellow>Session init retry backoff: %s</yellow>", sessionInitRetryDelay)
 					select {
@@ -381,7 +377,7 @@ func (c *Client) Run(ctx context.Context) error {
 				c.resetSessionState(true)
 				c.clearRuntimeResetRequest()
 				sessionInitRetryFailures++
-				sessionInitRetryDelay = nextSessionInitRetryDelay(sessionInitRetryFailures)
+				sessionInitRetryDelay = c.nextSessionInitRetryDelay(sessionInitRetryFailures)
 				c.log.Warnf("<yellow>Session reset requested, retrying in %s</yellow>", sessionInitRetryDelay)
 				select {
 				case <-ctx.Done():

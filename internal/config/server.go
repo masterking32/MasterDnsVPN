@@ -42,12 +42,20 @@ type ServerConfig struct {
 	SessionTimeoutSecs                float64  `toml:"SESSION_TIMEOUT_SECONDS"`
 	SessionCleanupIntervalSecs        float64  `toml:"SESSION_CLEANUP_INTERVAL_SECONDS"`
 	ClosedSessionRetentionSecs        float64  `toml:"CLOSED_SESSION_RETENTION_SECONDS"`
+	SessionInitReuseTTLSeconds        float64  `toml:"SESSION_INIT_REUSE_TTL_SECONDS"`
+	RecentlyClosedStreamTTLSeconds    float64  `toml:"RECENTLY_CLOSED_STREAM_TTL_SECONDS"`
+	RecentlyClosedStreamCap           int      `toml:"RECENTLY_CLOSED_STREAM_CAP"`
+	TerminalStreamRetentionSeconds    float64  `toml:"TERMINAL_STREAM_RETENTION_SECONDS"`
 	MaxPacketsPerBatch                int      `toml:"MAX_PACKETS_PER_BATCH"`
 	PacketBlockControlDuplication     int      `toml:"PACKET_BLOCK_CONTROL_DUPLICATION"`
 	DNSUpstreamServers                []string `toml:"DNS_UPSTREAM_SERVERS"`
 	DNSUpstreamTimeoutSecs            float64  `toml:"DNS_UPSTREAM_TIMEOUT"`
+	DNSInflightWaitTimeoutSecs        float64  `toml:"DNS_INFLIGHT_WAIT_TIMEOUT_SECONDS"`
 	SOCKSConnectTimeoutSecs           float64  `toml:"SOCKS_CONNECT_TIMEOUT"`
 	DNSFragmentAssemblyTimeoutSecs    float64  `toml:"DNS_FRAGMENT_ASSEMBLY_TIMEOUT"`
+	StreamSetupAckTTLSeconds          float64  `toml:"STREAM_SETUP_ACK_TTL_SECONDS"`
+	StreamResultPacketTTLSeconds      float64  `toml:"STREAM_RESULT_PACKET_TTL_SECONDS"`
+	StreamFailurePacketTTLSeconds     float64  `toml:"STREAM_FAILURE_PACKET_TTL_SECONDS"`
 	DNSCacheMaxRecords                int      `toml:"DNS_CACHE_MAX_RECORDS"`
 	DNSCacheTTLSeconds                float64  `toml:"DNS_CACHE_TTL_SECONDS"`
 	UseExternalSOCKS5                 bool     `toml:"USE_EXTERNAL_SOCKS5"`
@@ -103,12 +111,20 @@ func defaultServerConfig() ServerConfig {
 		SessionTimeoutSecs:                300.0,
 		SessionCleanupIntervalSecs:        30.0,
 		ClosedSessionRetentionSecs:        600.0,
+		SessionInitReuseTTLSeconds:        600.0,
+		RecentlyClosedStreamTTLSeconds:    600.0,
+		RecentlyClosedStreamCap:           2000,
+		TerminalStreamRetentionSeconds:    45.0,
 		MaxPacketsPerBatch:                8,
 		PacketBlockControlDuplication:     1,
 		DNSUpstreamServers:                []string{"1.1.1.1:53"},
 		DNSUpstreamTimeoutSecs:            4.0,
+		DNSInflightWaitTimeoutSecs:        8.0,
 		SOCKSConnectTimeoutSecs:           8.0,
 		DNSFragmentAssemblyTimeoutSecs:    300.0,
+		StreamSetupAckTTLSeconds:          400.0,
+		StreamResultPacketTTLSeconds:      300.0,
+		StreamFailurePacketTTLSeconds:     120.0,
 		DNSCacheMaxRecords:                20000,
 		DNSCacheTTLSeconds:                300.0,
 		UseExternalSOCKS5:                 false,
@@ -229,6 +245,10 @@ func LoadServerConfig(filename string) (ServerConfig, error) {
 	if cfg.ClosedSessionRetentionSecs <= 0 {
 		cfg.ClosedSessionRetentionSecs = 600.0
 	}
+	cfg.SessionInitReuseTTLSeconds = clampFloat(defaultFloatAtMostZero(cfg.SessionInitReuseTTLSeconds, 600.0), 1.0, 86400.0)
+	cfg.RecentlyClosedStreamTTLSeconds = clampFloat(defaultFloatAtMostZero(cfg.RecentlyClosedStreamTTLSeconds, 600.0), 1.0, 86400.0)
+	cfg.RecentlyClosedStreamCap = clampInt(defaultIntBelow(cfg.RecentlyClosedStreamCap, 1, 2000), 1, 1000000)
+	cfg.TerminalStreamRetentionSeconds = clampFloat(defaultFloatAtMostZero(cfg.TerminalStreamRetentionSeconds, 45.0), 1.0, 86400.0)
 
 	if cfg.MaxPacketsPerBatch < 1 {
 		cfg.MaxPacketsPerBatch = 20
@@ -249,6 +269,7 @@ func LoadServerConfig(filename string) (ServerConfig, error) {
 	if cfg.DNSUpstreamTimeoutSecs <= 0 {
 		cfg.DNSUpstreamTimeoutSecs = 4.0
 	}
+	cfg.DNSInflightWaitTimeoutSecs = clampFloat(defaultFloatAtMostZero(cfg.DNSInflightWaitTimeoutSecs, 8.0), 0.1, 120.0)
 
 	if cfg.SOCKSConnectTimeoutSecs <= 0 {
 		cfg.SOCKSConnectTimeoutSecs = 8.0
@@ -257,6 +278,9 @@ func LoadServerConfig(filename string) (ServerConfig, error) {
 	if cfg.DNSFragmentAssemblyTimeoutSecs <= 0 {
 		cfg.DNSFragmentAssemblyTimeoutSecs = 300.0
 	}
+	cfg.StreamSetupAckTTLSeconds = clampFloat(defaultFloatAtMostZero(cfg.StreamSetupAckTTLSeconds, 400.0), 1.0, 86400.0)
+	cfg.StreamResultPacketTTLSeconds = clampFloat(defaultFloatAtMostZero(cfg.StreamResultPacketTTLSeconds, 300.0), 1.0, 86400.0)
+	cfg.StreamFailurePacketTTLSeconds = clampFloat(defaultFloatAtMostZero(cfg.StreamFailurePacketTTLSeconds, 120.0), 1.0, 86400.0)
 
 	if cfg.DNSCacheMaxRecords < 1 {
 		cfg.DNSCacheMaxRecords = 2000
@@ -354,12 +378,40 @@ func (c ServerConfig) DNSUpstreamTimeout() time.Duration {
 	return time.Duration(c.DNSUpstreamTimeoutSecs * float64(time.Second))
 }
 
+func (c ServerConfig) DNSInflightWaitTimeout() time.Duration {
+	return time.Duration(c.DNSInflightWaitTimeoutSecs * float64(time.Second))
+}
+
 func (c ServerConfig) SOCKSConnectTimeout() time.Duration {
 	return time.Duration(c.SOCKSConnectTimeoutSecs * float64(time.Second))
 }
 
 func (c ServerConfig) DNSFragmentAssemblyTimeout() time.Duration {
 	return time.Duration(c.DNSFragmentAssemblyTimeoutSecs * float64(time.Second))
+}
+
+func (c ServerConfig) SessionInitReuseTTL() time.Duration {
+	return time.Duration(c.SessionInitReuseTTLSeconds * float64(time.Second))
+}
+
+func (c ServerConfig) RecentlyClosedStreamTTL() time.Duration {
+	return time.Duration(c.RecentlyClosedStreamTTLSeconds * float64(time.Second))
+}
+
+func (c ServerConfig) TerminalStreamRetention() time.Duration {
+	return time.Duration(c.TerminalStreamRetentionSeconds * float64(time.Second))
+}
+
+func (c ServerConfig) StreamSetupAckTTL() time.Duration {
+	return time.Duration(c.StreamSetupAckTTLSeconds * float64(time.Second))
+}
+
+func (c ServerConfig) StreamResultPacketTTL() time.Duration {
+	return time.Duration(c.StreamResultPacketTTLSeconds * float64(time.Second))
+}
+
+func (c ServerConfig) StreamFailurePacketTTL() time.Duration {
+	return time.Duration(c.StreamFailurePacketTTLSeconds * float64(time.Second))
 }
 
 func (c ServerConfig) EncryptionKeyPath() string {

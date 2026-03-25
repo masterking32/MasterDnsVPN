@@ -21,11 +21,6 @@ import (
 	fragmentStore "masterdnsvpn-go/internal/fragmentstore"
 )
 
-const (
-	clientTerminalStreamRetention = 45 * time.Second
-	clientCancelledSetupRetention = 120 * time.Second
-)
-
 type asyncPacket struct {
 	conn       Connection
 	payload    []byte
@@ -82,7 +77,7 @@ func (c *Client) resetRuntimeBindings(resetSession bool) {
 	c.last_stream_id = 0
 	c.streamsMu.Unlock()
 
-	c.dnsResponses = fragmentStore.New[dnsFragmentKey](128)
+	c.dnsResponses = fragmentStore.New[dnsFragmentKey](c.cfg.DNSResponseFragmentStoreCap)
 	if c.localDNSCache != nil {
 		c.localDNSCache.ClearPending()
 	}
@@ -288,7 +283,7 @@ func (c *Client) asyncStreamCleanupWorker(ctx context.Context) {
 
 				if !a.IsClosed() {
 					if s.StatusValue() == streamStatusCancelled {
-						if since := s.TerminalSince(); !since.IsZero() && now.Sub(since) >= clientCancelledSetupRetention {
+						if since := s.TerminalSince(); !since.IsZero() && now.Sub(since) >= c.cfg.ClientCancelledSetupRetention() {
 							removeIDs = append(removeIDs, s.StreamID)
 						}
 					}
@@ -299,7 +294,7 @@ func (c *Client) asyncStreamCleanupWorker(ctx context.Context) {
 				if s.StatusValue() != streamStatusCancelled {
 					s.SetStatus(streamStatusTimeWait)
 				}
-				if since := s.TerminalSince(); !since.IsZero() && now.Sub(since) >= clientTerminalStreamRetention {
+				if since := s.TerminalSince(); !since.IsZero() && now.Sub(since) >= c.cfg.ClientTerminalStreamRetention() {
 					removeIDs = append(removeIDs, s.StreamID)
 				}
 			}

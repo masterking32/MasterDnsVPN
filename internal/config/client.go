@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 
@@ -67,12 +68,29 @@ type ClientConfig struct {
 	TunnelWriterWorkers                   int               `toml:"TUNNEL_WRITER_WORKERS"`
 	TunnelProcessWorkers                  int               `toml:"TUNNEL_PROCESS_WORKERS"`
 	TunnelPacketTimeoutSec                float64           `toml:"TUNNEL_PACKET_TIMEOUT_SECONDS"`
+	DispatcherIdlePollIntervalSeconds     float64           `toml:"DISPATCHER_IDLE_POLL_INTERVAL_SECONDS"`
+	PingAggressiveIntervalSeconds         float64           `toml:"PING_AGGRESSIVE_INTERVAL_SECONDS"`
+	PingLazyIntervalSeconds               float64           `toml:"PING_LAZY_INTERVAL_SECONDS"`
+	PingCooldownIntervalSeconds           float64           `toml:"PING_COOLDOWN_INTERVAL_SECONDS"`
+	PingColdIntervalSeconds               float64           `toml:"PING_COLD_INTERVAL_SECONDS"`
+	PingWarmThresholdSeconds              float64           `toml:"PING_WARM_THRESHOLD_SECONDS"`
+	PingCoolThresholdSeconds              float64           `toml:"PING_COOL_THRESHOLD_SECONDS"`
+	PingColdThresholdSeconds              float64           `toml:"PING_COLD_THRESHOLD_SECONDS"`
 	TXChannelSize                         int               `toml:"TX_CHANNEL_SIZE"`
 	RXChannelSize                         int               `toml:"RX_CHANNEL_SIZE"`
 	ResolverUDPConnectionPoolSize         int               `toml:"RESOLVER_UDP_CONNECTION_POOL_SIZE"`
 	StreamQueueInitialCapacity            int               `toml:"STREAM_QUEUE_INITIAL_CAPACITY"`
 	OrphanQueueInitialCapacity            int               `toml:"ORPHAN_QUEUE_INITIAL_CAPACITY"`
 	DNSResponseFragmentStoreCap           int               `toml:"DNS_RESPONSE_FRAGMENT_STORE_CAPACITY"`
+	DNSResponseFragmentTimeoutSeconds     float64           `toml:"DNS_RESPONSE_FRAGMENT_TIMEOUT_SECONDS"`
+	SOCKSUDPAssociateReadTimeoutSeconds   float64           `toml:"SOCKS_UDP_ASSOCIATE_READ_TIMEOUT_SECONDS"`
+	ClientTerminalStreamRetentionSeconds  float64           `toml:"CLIENT_TERMINAL_STREAM_RETENTION_SECONDS"`
+	ClientCancelledSetupRetentionSeconds  float64           `toml:"CLIENT_CANCELLED_SETUP_RETENTION_SECONDS"`
+	SessionInitRetryBaseSeconds           float64           `toml:"SESSION_INIT_RETRY_BASE_SECONDS"`
+	SessionInitRetryStepSeconds           float64           `toml:"SESSION_INIT_RETRY_STEP_SECONDS"`
+	SessionInitRetryLinearAfter           int               `toml:"SESSION_INIT_RETRY_LINEAR_AFTER"`
+	SessionInitRetryMaxSeconds            float64           `toml:"SESSION_INIT_RETRY_MAX_SECONDS"`
+	SessionInitBusyRetryIntervalSeconds   float64           `toml:"SESSION_INIT_BUSY_RETRY_INTERVAL_SECONDS"`
 	SaveMTUServersToFile                  bool              `toml:"SAVE_MTU_SERVERS_TO_FILE"`
 	MTUServersFileName                    string            `toml:"MTU_SERVERS_FILE_NAME"`
 	MTUServersFileFormat                  string            `toml:"MTU_SERVERS_FILE_FORMAT"`
@@ -144,12 +162,29 @@ func defaultClientConfig() ClientConfig {
 		TunnelWriterWorkers:                   6,
 		TunnelProcessWorkers:                  4,
 		TunnelPacketTimeoutSec:                8.0,
+		DispatcherIdlePollIntervalSeconds:     0.020,
+		PingAggressiveIntervalSeconds:         0.300,
+		PingLazyIntervalSeconds:               1.0,
+		PingCooldownIntervalSeconds:           3.0,
+		PingColdIntervalSeconds:               30.0,
+		PingWarmThresholdSeconds:              5.0,
+		PingCoolThresholdSeconds:              10.0,
+		PingColdThresholdSeconds:              20.0,
 		TXChannelSize:                         4096,
 		RXChannelSize:                         4096,
 		ResolverUDPConnectionPoolSize:         64,
 		StreamQueueInitialCapacity:            128,
 		OrphanQueueInitialCapacity:            32,
 		DNSResponseFragmentStoreCap:           256,
+		DNSResponseFragmentTimeoutSeconds:     10.0,
+		SOCKSUDPAssociateReadTimeoutSeconds:   30.0,
+		ClientTerminalStreamRetentionSeconds:  45.0,
+		ClientCancelledSetupRetentionSeconds:  120.0,
+		SessionInitRetryBaseSeconds:           1.0,
+		SessionInitRetryStepSeconds:           1.0,
+		SessionInitRetryLinearAfter:           5,
+		SessionInitRetryMaxSeconds:            60.0,
+		SessionInitBusyRetryIntervalSeconds:   60.0,
 		SaveMTUServersToFile:                  false,
 		MTUServersFileName:                    "masterdnsvpn_success_test_{time}.log",
 		MTUServersFileFormat:                  "{IP} - UP: {UP_MTU} DOWN: {DOWN-MTU}",
@@ -294,12 +329,29 @@ func LoadClientConfig(filename string) (ClientConfig, error) {
 	cfg.TunnelWriterWorkers = clampInt(defaultIntBelow(cfg.TunnelWriterWorkers, 1, 6), 1, 64)
 	cfg.TunnelProcessWorkers = clampInt(defaultIntBelow(cfg.TunnelProcessWorkers, 1, 4), 1, 64)
 	cfg.TunnelPacketTimeoutSec = clampFloat(defaultFloatAtMostZero(cfg.TunnelPacketTimeoutSec, 8.0), 0.5, 120.0)
+	cfg.DispatcherIdlePollIntervalSeconds = clampFloat(defaultFloatAtMostZero(cfg.DispatcherIdlePollIntervalSeconds, 0.020), 0.001, 1.0)
+	cfg.PingAggressiveIntervalSeconds = clampFloat(defaultFloatAtMostZero(cfg.PingAggressiveIntervalSeconds, 0.300), 0.05, 30.0)
+	cfg.PingLazyIntervalSeconds = clampFloat(defaultFloatAtMostZero(cfg.PingLazyIntervalSeconds, 1.0), cfg.PingAggressiveIntervalSeconds, 60.0)
+	cfg.PingCooldownIntervalSeconds = clampFloat(defaultFloatAtMostZero(cfg.PingCooldownIntervalSeconds, 3.0), cfg.PingLazyIntervalSeconds, 300.0)
+	cfg.PingColdIntervalSeconds = clampFloat(defaultFloatAtMostZero(cfg.PingColdIntervalSeconds, 30.0), cfg.PingCooldownIntervalSeconds, 3600.0)
+	cfg.PingWarmThresholdSeconds = clampFloat(defaultFloatAtMostZero(cfg.PingWarmThresholdSeconds, 5.0), 0.1, 600.0)
+	cfg.PingCoolThresholdSeconds = clampFloat(defaultFloatAtMostZero(cfg.PingCoolThresholdSeconds, 10.0), cfg.PingWarmThresholdSeconds, 1800.0)
+	cfg.PingColdThresholdSeconds = clampFloat(defaultFloatAtMostZero(cfg.PingColdThresholdSeconds, 20.0), cfg.PingCoolThresholdSeconds, 3600.0)
 	cfg.TXChannelSize = clampInt(defaultIntBelow(cfg.TXChannelSize, 1, 4096), 64, 65536)
 	cfg.RXChannelSize = clampInt(defaultIntBelow(cfg.RXChannelSize, 1, 4096), 64, 65536)
 	cfg.ResolverUDPConnectionPoolSize = clampInt(defaultIntBelow(cfg.ResolverUDPConnectionPoolSize, 1, 64), 1, 1024)
 	cfg.StreamQueueInitialCapacity = clampInt(defaultIntBelow(cfg.StreamQueueInitialCapacity, 1, 128), 8, 65536)
 	cfg.OrphanQueueInitialCapacity = clampInt(defaultIntBelow(cfg.OrphanQueueInitialCapacity, 1, 32), 4, 4096)
 	cfg.DNSResponseFragmentStoreCap = clampInt(defaultIntBelow(cfg.DNSResponseFragmentStoreCap, 1, 256), 16, 16384)
+	cfg.DNSResponseFragmentTimeoutSeconds = clampFloat(defaultFloatAtMostZero(cfg.DNSResponseFragmentTimeoutSeconds, 10.0), 1.0, 600.0)
+	cfg.SOCKSUDPAssociateReadTimeoutSeconds = clampFloat(defaultFloatAtMostZero(cfg.SOCKSUDPAssociateReadTimeoutSeconds, 30.0), 1.0, 3600.0)
+	cfg.ClientTerminalStreamRetentionSeconds = clampFloat(defaultFloatAtMostZero(cfg.ClientTerminalStreamRetentionSeconds, 45.0), 1.0, 3600.0)
+	cfg.ClientCancelledSetupRetentionSeconds = clampFloat(defaultFloatAtMostZero(cfg.ClientCancelledSetupRetentionSeconds, 120.0), 1.0, 3600.0)
+	cfg.SessionInitRetryBaseSeconds = clampFloat(defaultFloatAtMostZero(cfg.SessionInitRetryBaseSeconds, 1.0), 0.1, 60.0)
+	cfg.SessionInitRetryStepSeconds = clampFloat(defaultFloatAtMostZero(cfg.SessionInitRetryStepSeconds, 1.0), 0.0, 60.0)
+	cfg.SessionInitRetryLinearAfter = clampInt(defaultIntBelow(cfg.SessionInitRetryLinearAfter, 0, 5), 0, 1000)
+	cfg.SessionInitRetryMaxSeconds = clampFloat(defaultFloatAtMostZero(cfg.SessionInitRetryMaxSeconds, 60.0), cfg.SessionInitRetryBaseSeconds, 3600.0)
+	cfg.SessionInitBusyRetryIntervalSeconds = clampFloat(defaultFloatAtMostZero(cfg.SessionInitBusyRetryIntervalSeconds, 60.0), 1.0, 3600.0)
 	cfg.MTUServersFileName = strings.TrimSpace(cfg.MTUServersFileName)
 	cfg.MTUServersFileFormat = strings.TrimSpace(cfg.MTUServersFileFormat)
 	cfg.MTUUsingSeparatorText = strings.TrimSpace(cfg.MTUUsingSeparatorText)
@@ -378,6 +430,70 @@ func defaultIntBelow(value int, minValue int, fallback int) int {
 		return fallback
 	}
 	return value
+}
+
+func (c ClientConfig) DispatcherIdlePollInterval() time.Duration {
+	return time.Duration(c.DispatcherIdlePollIntervalSeconds * float64(time.Second))
+}
+
+func (c ClientConfig) PingAggressiveInterval() time.Duration {
+	return time.Duration(c.PingAggressiveIntervalSeconds * float64(time.Second))
+}
+
+func (c ClientConfig) PingLazyInterval() time.Duration {
+	return time.Duration(c.PingLazyIntervalSeconds * float64(time.Second))
+}
+
+func (c ClientConfig) PingCooldownInterval() time.Duration {
+	return time.Duration(c.PingCooldownIntervalSeconds * float64(time.Second))
+}
+
+func (c ClientConfig) PingColdInterval() time.Duration {
+	return time.Duration(c.PingColdIntervalSeconds * float64(time.Second))
+}
+
+func (c ClientConfig) PingWarmThreshold() time.Duration {
+	return time.Duration(c.PingWarmThresholdSeconds * float64(time.Second))
+}
+
+func (c ClientConfig) PingCoolThreshold() time.Duration {
+	return time.Duration(c.PingCoolThresholdSeconds * float64(time.Second))
+}
+
+func (c ClientConfig) PingColdThreshold() time.Duration {
+	return time.Duration(c.PingColdThresholdSeconds * float64(time.Second))
+}
+
+func (c ClientConfig) DNSResponseFragmentTimeout() time.Duration {
+	return time.Duration(c.DNSResponseFragmentTimeoutSeconds * float64(time.Second))
+}
+
+func (c ClientConfig) SOCKSUDPAssociateReadTimeout() time.Duration {
+	return time.Duration(c.SOCKSUDPAssociateReadTimeoutSeconds * float64(time.Second))
+}
+
+func (c ClientConfig) ClientTerminalStreamRetention() time.Duration {
+	return time.Duration(c.ClientTerminalStreamRetentionSeconds * float64(time.Second))
+}
+
+func (c ClientConfig) ClientCancelledSetupRetention() time.Duration {
+	return time.Duration(c.ClientCancelledSetupRetentionSeconds * float64(time.Second))
+}
+
+func (c ClientConfig) SessionInitRetryBase() time.Duration {
+	return time.Duration(c.SessionInitRetryBaseSeconds * float64(time.Second))
+}
+
+func (c ClientConfig) SessionInitRetryStep() time.Duration {
+	return time.Duration(c.SessionInitRetryStepSeconds * float64(time.Second))
+}
+
+func (c ClientConfig) SessionInitRetryMax() time.Duration {
+	return time.Duration(c.SessionInitRetryMaxSeconds * float64(time.Second))
+}
+
+func (c ClientConfig) SessionInitBusyRetryInterval() time.Duration {
+	return time.Duration(c.SessionInitBusyRetryIntervalSeconds * float64(time.Second))
 }
 
 func clampInt(value int, minValue int, maxValue int) int {

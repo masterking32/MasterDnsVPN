@@ -167,7 +167,7 @@ func (s *Server) queueImmediateControlAck(record *sessionRecord, packet VpnProto
 			Enums.DefaultPacketPriority(ackType),
 			false,
 			nil,
-			400*time.Second,
+			s.cfg.StreamSetupAckTTL(),
 		)
 	}
 
