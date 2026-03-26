@@ -482,12 +482,28 @@ func (c *Client) runResolverRecheckBatch(ctx context.Context, now time.Time) {
 			continue
 		}
 
-		if c.recheckResolverConnection(ctx, conn) {
-			c.reactivateResolverConnection(candidate.key)
-			continue
+		c.resolverHealthMu.Lock()
+		if m, ok := c.resolverRecheck[candidate.key]; ok {
+			// Temporarily push NextAt to prevent picking this up again while it runs in background
+			m.NextAt = now.Add(60 * time.Second)
+			c.resolverRecheck[candidate.key] = m
 		}
+		c.resolverHealthMu.Unlock()
 
-		c.scheduleResolverRecheckFailure(candidate.key, candidate.runtimePriority, now)
+		go func(cand resolverRecheckCandidate, cn *Connection) {
+			defer func() {
+				if r := recover(); r != nil {
+					c.scheduleResolverRecheckFailure(cand.key, cand.runtimePriority, c.now())
+				}
+			}()
+
+			if c.recheckResolverConnection(ctx, cn) {
+				c.reactivateResolverConnection(cand.key)
+				return
+			}
+
+			c.scheduleResolverRecheckFailure(cand.key, cand.runtimePriority, c.now())
+		}(candidate, conn)
 	}
 }
 
@@ -588,12 +604,33 @@ func (c *Client) recheckResolverConnection(ctx context.Context, conn *Connection
 	}
 	defer transport.conn.Close()
 
-	upOK, err := c.sendUploadMTUProbe(ctx, conn, transport, c.syncedUploadMTU, mtuProbeOptions{Quiet: true})
-	if err != nil || !upOK {
+	upOK := false
+	for attempt := 0; attempt < c.mtuTestRetries; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return false
+		}
+		passed, err := c.sendUploadMTUProbe(ctx, conn, transport, c.syncedUploadMTU, mtuProbeOptions{Quiet: true, IsRetry: attempt > 0})
+		if err == nil && passed {
+			upOK = true
+			break
+		}
+	}
+	if !upOK {
 		return false
 	}
-	downOK, err := c.sendDownloadMTUProbe(ctx, conn, transport, c.syncedDownloadMTU, c.syncedUploadMTU, mtuProbeOptions{Quiet: true})
-	if err != nil || !downOK {
+
+	downOK := false
+	for attempt := 0; attempt < c.mtuTestRetries; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return false
+		}
+		passed, err := c.sendDownloadMTUProbe(ctx, conn, transport, c.syncedDownloadMTU, c.syncedUploadMTU, mtuProbeOptions{Quiet: true, IsRetry: attempt > 0})
+		if err == nil && passed {
+			downOK = true
+			break
+		}
+	}
+	if !downOK {
 		return false
 	}
 
