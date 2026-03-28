@@ -1761,8 +1761,13 @@ func (a *ARQ) handleTerminalRetransmitState(now time.Time) bool {
 		return false
 	}
 
-	// Check for peer-signaled reset termination
-	if (a.state == StateReset || a.rstReceived) && !a.closed {
+	// Check for peer-signaled reset termination.
+	// Only trigger on a.rstReceived (peer sent RST to us). Do NOT use
+	// a.state==StateReset here because StateReset is also set by MarkRstSent()
+	// (when WE send RST). That would cause every locally-initiated RST to be
+	// mis-identified as a peer reset, killing the stream immediately before the
+	// RST_ACK arrives.
+	if a.rstReceived && !a.closed {
 		a.mu.Unlock()
 		a.MarkRstReceived()
 		a.Close("Peer reset signaled", CloseOptions{Force: true})
