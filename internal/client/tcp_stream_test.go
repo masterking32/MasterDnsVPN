@@ -194,3 +194,54 @@ func TestMissingUnknownStreamStillQueuesOrphanReset(t *testing.T) {
 		t.Fatalf("expected orphan reset for unknown stream, got queue size %d", size)
 	}
 }
+
+func TestFakeConnReadUnblocksOnClose(t *testing.T) {
+	conn := newFakeConn()
+	errCh := make(chan error, 1)
+
+	go func() {
+		_, err := conn.Read(make([]byte, 1))
+		errCh <- err
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+
+	if err := conn.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("expected fakeConn.Read to return an error after Close")
+		}
+		if err != net.ErrClosed {
+			t.Fatalf("expected net.ErrClosed after Close, got %v", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected fakeConn.Read to unblock after Close")
+	}
+}
+
+func TestFakeConnReadDeadlineReturnsTimeout(t *testing.T) {
+	conn := newFakeConn()
+
+	if err := conn.SetReadDeadline(time.Now().Add(30 * time.Millisecond)); err != nil {
+		t.Fatalf("SetReadDeadline returned error: %v", err)
+	}
+
+	start := time.Now()
+	_, err := conn.Read(make([]byte, 1))
+	if err == nil {
+		t.Fatal("expected timeout error from fakeConn.Read")
+	}
+
+	netErr, ok := err.(net.Error)
+	if !ok || !netErr.Timeout() {
+		t.Fatalf("expected timeout-compatible error, got %v", err)
+	}
+
+	if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
+		t.Fatalf("fakeConn.Read timeout took too long: %v", elapsed)
+	}
+}

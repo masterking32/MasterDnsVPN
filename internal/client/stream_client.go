@@ -418,11 +418,51 @@ func (s *Stream_client) TerminalSince() time.Time {
 // Virtual Stream 0 Support
 // -----------------------------------------------------------------------------------------
 
-type fakeConn struct{}
+type fakeConnTimeoutError struct{}
+
+func (fakeConnTimeoutError) Error() string   { return "fakeConn read timeout" }
+func (fakeConnTimeoutError) Timeout() bool   { return true }
+func (fakeConnTimeoutError) Temporary() bool { return true }
+
+type fakeConn struct {
+	mu           sync.Mutex
+	readDeadline time.Time
+	closedCh     chan struct{}
+	closeOnce    sync.Once
+}
 
 func (f *fakeConn) Read(b []byte) (n int, err error) {
-	// Block eternally so ARQ's ioLoop doesn't spin or immediately exit
-	select {}
+	for {
+		f.mu.Lock()
+		deadline := f.readDeadline
+		closedCh := f.closedCh
+		f.mu.Unlock()
+
+		if closedCh == nil {
+			return 0, net.ErrClosed
+		}
+
+		if deadline.IsZero() {
+			<-closedCh
+			return 0, net.ErrClosed
+		}
+
+		wait := time.Until(deadline)
+		if wait <= 0 {
+			return 0, fakeConnTimeoutError{}
+		}
+
+		timer := time.NewTimer(wait)
+		select {
+		case <-closedCh:
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return 0, net.ErrClosed
+		case <-timer.C:
+			return 0, fakeConnTimeoutError{}
+		}
+	}
 }
 
 func (f *fakeConn) Write(b []byte) (n int, err error) {
@@ -431,7 +471,33 @@ func (f *fakeConn) Write(b []byte) (n int, err error) {
 }
 
 func (f *fakeConn) Close() error {
+	f.closeOnce.Do(func() {
+		if f.closedCh != nil {
+			close(f.closedCh)
+		}
+	})
 	return nil
+}
+
+func (f *fakeConn) SetReadDeadline(deadline time.Time) error {
+	f.mu.Lock()
+	f.readDeadline = deadline
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakeConn) SetWriteDeadline(time.Time) error {
+	return nil
+}
+
+func (f *fakeConn) SetDeadline(deadline time.Time) error {
+	return f.SetReadDeadline(deadline)
+}
+
+func newFakeConn() *fakeConn {
+	return &fakeConn{
+		closedCh: make(chan struct{}),
+	}
 }
 
 // InitVirtualStream0 initializes Stream #0 instantly upon Session start.
@@ -471,7 +537,7 @@ func (c *Client) InitVirtualStream0() {
 		CompressionType:          c.uploadCompression,
 	}
 
-	conn := &fakeConn{}
+	conn := newFakeConn()
 	a := arq.NewARQ(streamID, c.sessionID, s, conn, mtu, c.log, arqCfg)
 	s.Stream = a
 	c.active_streams[streamID] = s
