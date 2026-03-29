@@ -82,20 +82,6 @@ func (c *Client) selectTargetConnectionsForPacket(packetType uint8, streamID uin
 		}
 	}
 
-	for _, connection := range c.balancer.GetAllValidConnections() {
-		if !connection.IsValid || connection.Key == "" {
-			continue
-		}
-		if _, exists := seenKeys[connection.Key]; exists {
-			continue
-		}
-		selected = append(selected, connection)
-		seenKeys[connection.Key] = struct{}{}
-		if len(selected) >= targetCount {
-			break
-		}
-	}
-
 	if len(selected) == 0 {
 		return nil, ErrNoValidConnections
 	}

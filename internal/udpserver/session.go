@@ -58,6 +58,7 @@ type sessionRecord struct {
 	ActiveStreams                   []uint16 // Sorted list of active stream IDs for Round-Robin
 	activeStreamSetVersion         uint64
 	activeStreamSnapshotIDs        []int32
+	activeStreamSnapshotStreams    []*Stream_server
 	activeStreamSnapshotVersion    uint64
 	RRStreamID                      int32    // Last served stream ID for RR
 	EnqueueSeq                      uint64   // Global sequence for FIFO inside same priority
@@ -831,17 +832,18 @@ func (r *sessionRecord) markActiveStreamsChangedLocked() {
 	r.activeStreamSetVersion++
 }
 
-func (r *sessionRecord) activeStreamIDsSnapshot() []int32 {
+func (r *sessionRecord) activeStreamSnapshot() ([]int32, []*Stream_server) {
 	if r == nil || r.isClosed() {
-		return nil
+		return nil, nil
 	}
 
 	r.StreamsMu.RLock()
 	version := r.activeStreamSetVersion
 	if version == r.activeStreamSnapshotVersion {
-		snapshot := r.activeStreamSnapshotIDs
+		ids := r.activeStreamSnapshotIDs
+		streams := r.activeStreamSnapshotStreams
 		r.StreamsMu.RUnlock()
-		return snapshot
+		return ids, streams
 	}
 	r.StreamsMu.RUnlock()
 
@@ -849,15 +851,18 @@ func (r *sessionRecord) activeStreamIDsSnapshot() []int32 {
 	defer r.StreamsMu.Unlock()
 
 	if r.activeStreamSetVersion != r.activeStreamSnapshotVersion {
-		snapshot := make([]int32, len(r.ActiveStreams))
+		snapshotIDs := make([]int32, len(r.ActiveStreams))
+		snapshotStreams := make([]*Stream_server, len(r.ActiveStreams))
 		for i, id := range r.ActiveStreams {
-			snapshot[i] = int32(id)
+			snapshotIDs[i] = int32(id)
+			snapshotStreams[i] = r.Streams[id]
 		}
-		r.activeStreamSnapshotIDs = snapshot
+		r.activeStreamSnapshotIDs = snapshotIDs
+		r.activeStreamSnapshotStreams = snapshotStreams
 		r.activeStreamSnapshotVersion = r.activeStreamSetVersion
 	}
 
-	return r.activeStreamSnapshotIDs
+	return r.activeStreamSnapshotIDs, r.activeStreamSnapshotStreams
 }
 
 func (r *sessionRecord) closeAllStreams(reason string) {

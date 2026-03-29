@@ -300,9 +300,9 @@ func (c *Client) consumeInboundStreamAck(packetType uint8, packet VpnProto.Packe
 }
 
 func (c *Client) getStream(streamID uint16) (*Stream_client, bool) {
-	c.streamsMu.Lock()
+	c.streamsMu.RLock()
 	s, ok := c.active_streams[streamID]
-	c.streamsMu.Unlock()
+	c.streamsMu.RUnlock()
 	return s, ok
 }
 

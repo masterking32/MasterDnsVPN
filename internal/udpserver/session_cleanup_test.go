@@ -347,7 +347,7 @@ func TestSessionActiveStreamSnapshotUpdatesAfterMutations(t *testing.T) {
 	record.getOrCreateStream(3, arq.Config{}, nil, nil)
 	record.getOrCreateStream(7, arq.Config{}, nil, nil)
 
-	snapshot := record.activeStreamIDsSnapshot()
+	snapshot, streams := record.activeStreamSnapshot()
 	if len(snapshot) != 4 {
 		t.Fatalf("expected snapshot to include stream 0 plus three active streams, got %d entries", len(snapshot))
 	}
@@ -356,11 +356,14 @@ func TestSessionActiveStreamSnapshotUpdatesAfterMutations(t *testing.T) {
 		if snapshot[i] != want {
 			t.Fatalf("unexpected initial snapshot entry %d: got=%d want=%d", i, snapshot[i], want)
 		}
+		if streams[i] == nil {
+			t.Fatalf("expected non-nil stream snapshot at index %d", i)
+		}
 	}
 
 	record.deactivateStream(7)
 
-	snapshot = record.activeStreamIDsSnapshot()
+	snapshot, streams = record.activeStreamSnapshot()
 	wantAfterDeactivate := []int32{0, 3, 9}
 	if len(snapshot) != len(wantAfterDeactivate) {
 		t.Fatalf("expected %d entries after deactivate, got %d", len(wantAfterDeactivate), len(snapshot))
@@ -369,10 +372,13 @@ func TestSessionActiveStreamSnapshotUpdatesAfterMutations(t *testing.T) {
 		if snapshot[i] != want {
 			t.Fatalf("unexpected snapshot entry after deactivate %d: got=%d want=%d", i, snapshot[i], want)
 		}
+		if streams[i] == nil {
+			t.Fatalf("expected non-nil stream snapshot after deactivate at index %d", i)
+		}
 	}
 
 	record.getOrCreateStream(5, arq.Config{}, nil, nil)
-	snapshot = record.activeStreamIDsSnapshot()
+	snapshot, streams = record.activeStreamSnapshot()
 	wantAfterAdd := []int32{0, 3, 5, 9}
 	if len(snapshot) != len(wantAfterAdd) {
 		t.Fatalf("expected %d entries after add, got %d", len(wantAfterAdd), len(snapshot))
@@ -380,6 +386,9 @@ func TestSessionActiveStreamSnapshotUpdatesAfterMutations(t *testing.T) {
 	for i, want := range wantAfterAdd {
 		if snapshot[i] != want {
 			t.Fatalf("unexpected snapshot entry after add %d: got=%d want=%d", i, snapshot[i], want)
+		}
+		if streams[i] == nil {
+			t.Fatalf("expected non-nil stream snapshot after add at index %d", i)
 		}
 	}
 }
