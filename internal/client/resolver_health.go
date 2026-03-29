@@ -390,6 +390,14 @@ func (c *Client) reactivateResolverConnection(serverKey string) bool {
 	delete(c.runtimeDisabled, serverKey)
 	delete(c.resolverHealth, serverKey)
 	c.resolverRecheck[serverKey] = resolverRecheckState{}
+	// Periodically prune runtimeDisabled entries for connections no longer tracked
+	if len(c.runtimeDisabled) > len(c.connections) {
+		for k := range c.runtimeDisabled {
+			if c.connectionPtrByKey(k) == nil {
+				delete(c.runtimeDisabled, k)
+			}
+		}
+	}
 	c.resolverHealthMu.Unlock()
 
 	c.balancer.ResetServerStats(serverKey)
