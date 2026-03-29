@@ -444,9 +444,9 @@ func socksReplyForPacketType(packetType uint8) byte {
 }
 
 func (c *Client) CloseStream(streamID uint16, force bool, ttl time.Duration) {
-	c.streamsMu.Lock()
+	c.streamsMu.RLock()
 	s, ok := c.active_streams[streamID]
-	c.streamsMu.Unlock()
+	c.streamsMu.RUnlock()
 
 	if ok {
 		s.CloseStream(force, ttl)
