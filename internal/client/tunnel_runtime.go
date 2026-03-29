@@ -53,7 +53,11 @@ func (c *Client) exchangeUDPQueryWithConn(conn *net.UDPConn, packet []byte, time
 		}
 
 		if n >= 2 && buffer[0] == expectedID0 && buffer[1] == expectedID1 {
-			return buffer[:n], nil
+			// Copy matched response out so the pooled buffer can be recycled.
+			result := make([]byte, n)
+			copy(result, buffer[:n])
+			c.putRuntimeUDPBuffer(buffer)
+			return result, nil
 		}
 	}
 }
@@ -231,7 +235,6 @@ func (c *Client) exchangeDNSOverConnection(conn Connection, query []byte, timeou
 	c.putUDPConn(conn.ResolverLabel, udpConn)
 
 	packet, err := dnsparser.ExtractVPNResponse(response, c.responseMode == mtuProbeBase64Reply)
-	c.putRuntimeUDPBuffer(response)
 	if err != nil {
 		return VpnProto.Packet{}, err
 	}
