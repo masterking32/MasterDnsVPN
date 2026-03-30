@@ -410,9 +410,9 @@ func (c *Client) HandleStreamPacket(packet VpnProto.Packet) error {
 		return nil
 	}
 
-	c.streamsMu.Lock()
+	c.streamsMu.RLock()
 	s, ok := c.active_streams[packet.StreamID]
-	c.streamsMu.Unlock()
+	c.streamsMu.RUnlock()
 
 	if !ok || s == nil {
 		return nil
