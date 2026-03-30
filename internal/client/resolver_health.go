@@ -23,6 +23,7 @@ type resolverHealthState struct {
 type resolverRecheckState struct {
 	FailCount int
 	NextAt    time.Time
+	InFlight  bool
 }
 
 type resolverDisabledState struct {
@@ -125,7 +126,7 @@ func (c *Client) nextResolverHealthWait(now time.Time) time.Duration {
 
 	for key, meta := range c.resolverRecheck {
 		conn := c.connectionPtrByKey(key)
-		if conn == nil || conn.IsValid || meta.NextAt.IsZero() {
+		if conn == nil || conn.IsValid || meta.NextAt.IsZero() || meta.InFlight {
 			continue
 		}
 		dueIn := time.Until(meta.NextAt)
@@ -436,6 +437,7 @@ func (c *Client) scheduleResolverRecheckFailure(serverKey string, runtimePriorit
 	}
 	delay += deterministicResolverJitter(serverKey, delay)
 	meta.NextAt = now.Add(delay)
+	meta.InFlight = false
 	c.resolverRecheck[serverKey] = meta
 
 	if state, ok := c.runtimeDisabled[serverKey]; ok {
@@ -484,8 +486,7 @@ func (c *Client) runResolverRecheckBatch(ctx context.Context, now time.Time) {
 
 		c.resolverHealthMu.Lock()
 		if m, ok := c.resolverRecheck[candidate.key]; ok {
-			// Temporarily push NextAt to prevent picking this up again while it runs in background
-			m.NextAt = now.Add(60 * time.Second)
+			m.InFlight = true
 			c.resolverRecheck[candidate.key] = m
 		}
 		c.resolverHealthMu.Unlock()
@@ -519,7 +520,7 @@ func (c *Client) collectDueResolverRechecks(now time.Time) []resolverRecheckCand
 	normalCandidates := make([]resolverRecheckCandidate, 0, len(c.connections))
 	for key, meta := range c.resolverRecheck {
 		conn := c.connectionPtrByKey(key)
-		if conn == nil || conn.IsValid {
+		if conn == nil || conn.IsValid || meta.InFlight {
 			continue
 		}
 		if !meta.NextAt.IsZero() && meta.NextAt.After(now) {
