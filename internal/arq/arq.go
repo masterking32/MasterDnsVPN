@@ -1378,6 +1378,20 @@ func (a *ARQ) writeLoop() {
 				break
 			}
 
+			// Coalesce contiguous chunks into a single write to reduce syscalls.
+			if len(toWrite) > 1 {
+				totalSize := 0
+				for _, chunk := range toWrite {
+					totalSize += len(chunk)
+				}
+				merged := make([]byte, 0, totalSize)
+				for _, chunk := range toWrite {
+					merged = append(merged, chunk...)
+				}
+				toWrite = toWrite[:1]
+				toWrite[0] = merged
+			}
+
 			shouldExit := false
 			recheckClose := false
 			func() {
@@ -1883,12 +1897,7 @@ func (a *ARQ) checkRetransmits() {
 	}
 
 	a.mu.Lock()
-	type pendingRetransmit struct {
-		sn              uint16
-		data            []byte
-		compressionType uint8
-	}
-	var jobs []pendingRetransmit
+	var jobs []rtxJob
 
 	for sn, info := range a.sndBuf {
 		if info.TTL > 0 {
@@ -1907,7 +1916,7 @@ func (a *ARQ) checkRetransmits() {
 			continue
 		}
 
-		jobs = append(jobs, pendingRetransmit{
+		jobs = append(jobs, rtxJob{
 			sn:              sn,
 			data:            info.Data,
 			compressionType: info.CompressionType,
@@ -1915,16 +1924,7 @@ func (a *ARQ) checkRetransmits() {
 	}
 	a.mu.Unlock()
 
-	rtxJobs := make([]rtxJob, 0, len(jobs))
-	for _, job := range jobs {
-		rtxJobs = append(rtxJobs, rtxJob{
-			sn:              job.sn,
-			data:            job.data,
-			compressionType: job.compressionType,
-		})
-	}
-
-	priorityKinds := a.retransmitPriorityKinds(rtxJobs)
+	priorityKinds := a.retransmitPriorityKinds(jobs)
 	for i, j := range jobs {
 		priority := Enums.DefaultPacketPriority(Enums.PACKET_STREAM_DATA)
 		packetType := uint8(Enums.PACKET_STREAM_DATA)
