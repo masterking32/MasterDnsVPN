@@ -35,6 +35,8 @@ func main() {
 	configPath := flag.String("config", "server_config.toml", "Path to server configuration file")
 	logPath := flag.String("log", "", "Path to log file (optional)")
 	versionFlag := flag.Bool("version", false, "Print version and exit")
+	genKeyFlag := flag.Bool("genkey", false, "Generate encryption key and exit")
+	nowaitFlag := flag.Bool("nowait", false, "Do not wait for input on exit (useful for scripting)")
 	configFlags, err := config.NewServerConfigFlagBinder(flag.CommandLine)
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "Server flag setup failed: %v\n", err)
@@ -52,7 +54,9 @@ func main() {
 	cfg, err := config.LoadServerConfigWithOverrides(resolvedConfigPath, configFlags.Overrides())
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "Server startup failed: %v\n", err)
-		waitForExitInput()
+		if !*nowaitFlag {
+			waitForExitInput()
+		}
 		os.Exit(1)
 	}
 
@@ -74,14 +78,32 @@ func main() {
 	keyInfo, err := security.EnsureServerEncryptionKey(cfg)
 	if err != nil {
 		log.Errorf("\u274C <red>Encryption Key Setup Failed</red> <magenta>|</magenta> <cyan>%v</cyan>", err)
-		waitForExitInput()
+		if !*nowaitFlag {
+			waitForExitInput()
+		}
 		os.Exit(1)
+	}
+	if *genKeyFlag {
+		if keyInfo.Generated {
+			log.Infof(
+				"\U0001F5DD\uFE0F <green>Encryption Key Generated, Path: <cyan>%s</cyan></green>",
+				keyInfo.Path,
+			)
+		} else {
+			log.Infof(
+				"\U0001F5C2 <yellow>Encryption Key Already Exists, Path: <cyan>%s</cyan></yellow>",
+				keyInfo.Path,
+			)
+		}
+		return
 	}
 
 	codec, err := security.NewCodecFromConfig(cfg, keyInfo.Key)
 	if err != nil {
 		log.Errorf("\u274C <red>Encryption Codec Setup Failed</red> <magenta>|</magenta> <cyan>%v</cyan>", err)
-		waitForExitInput()
+		if !*nowaitFlag {
+			waitForExitInput()
+		}
 		os.Exit(1)
 	}
 
@@ -99,7 +121,9 @@ func main() {
 		)
 	} else {
 		log.Errorf("\u26A0\uFE0F <yellow>No Allowed Domains Configured!</yellow>")
-		waitForExitInput()
+		if !*nowaitFlag {
+			waitForExitInput()
+		}
 		os.Exit(1)
 	}
 
