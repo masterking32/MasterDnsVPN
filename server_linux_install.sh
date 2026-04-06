@@ -545,23 +545,10 @@ fi
 
 log_header "Security Initialization"
 log_info "Starting server once to generate encryption key..."
-./"$EXECUTABLE" > "$TMP_LOG" 2>&1 &
-APP_PID=$!
-READY=false
-for _ in {1..10}; do
-  if grep -q "Active Encryption Key" "$TMP_LOG" 2>/dev/null; then
-    READY=true
-    break
-  fi
-  sleep 1
-done
-kill "$APP_PID" 2>/dev/null || true
-wait "$APP_PID" 2>/dev/null || true
-
-if [[ "$READY" != true ]]; then
+if ! ./"$EXECUTABLE" -genkey -nowait > "$TMP_LOG" 2>&1; then
   log_warn "Initialization log tail:"
   tail -n 20 "$TMP_LOG" || true
-  log_error "Could not verify key generation. Ensure Port 53 is free."
+  log_error "Could not verify key generation."
 fi
 
 echo -e "${GREEN}${BOLD}------------------------------------------------------"
