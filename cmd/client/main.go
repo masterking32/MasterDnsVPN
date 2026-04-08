@@ -127,7 +127,7 @@ func main() {
 	if log != nil {
 		log.Infof("\U0001F680 <green>MasterDnsVPN Client Started</green>")
 		log.Infof("\U0001F4C4 <green>Configuration loaded from: <cyan>%s</cyan></green>", resolvedConfigPath)
-		log.Infof("\U0001F5C2  <green>Connection Catalog: <cyan>%d</cyan> domain-resolver pairs</green>", len(app.Connections()))
+		log.Infof("\U0001F5C2  <green>Connection Catalog: <cyan>%d</cyan> domain-resolver pairs</green>", app.Balancer().TotalCount())
 	}
 
 	// Wait for termination signal
