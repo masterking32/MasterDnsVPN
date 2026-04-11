@@ -20,7 +20,7 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 require_cmd() { command -v "$1" >/dev/null 2>&1 || log_error "Missing command: $1"; }
 backup_file_once() {
   local f="$1"
-  [[ -f "$f" && ! -f "${f}.bak" ]] && cp -a "$f" "${f}.bak"
+  [[ -f "$f" && ! -f "${f}.bak" ]] && cp -a "$f" "${f}.bak" || true
 }
 extract_config_version() {
   local f="$1"
@@ -122,6 +122,15 @@ echo " | |  | | (_| \__ \ ||  __/ |   | |__| | |\  |____) |"
 echo " |_|  |_|\__,_|___/\__\___|_|   |_____/|_| \_|_____/ "
 echo -e "           MasterDnsVPN Server Auto-Installer${NC}"
 echo -e "${CYAN}------------------------------------------------------${NC}"
+
+_WANT_MONITORING=""
+if (echo < /dev/tty) 2>/dev/null; then
+  read -r -p ">>> Do you want to install Grafana monitoring dashboard? (y/N): " _WANT_MONITORING </dev/tty || _WANT_MONITORING=""
+fi
+case "${_WANT_MONITORING:-}" in
+  [yY]|[yY][eE][sS]) _WANT_MONITORING="y" ;;
+  *) _WANT_MONITORING="n" ;;
+esac
 
 TMP_LOG="init_logs.tmp"
 DOWNLOAD_DIR=""
@@ -593,14 +602,49 @@ fi
 
 log_success "MasterDnsVPN service is running."
 
+if [[ "$_WANT_MONITORING" == "y" ]]; then
+  log_header "Installing Grafana Monitoring"
+  if [[ ! -f "$INSTALL_DIR/monitoring/install.sh" ]]; then
+    _MON_BRANCH="feature/grafana-monitoring"
+    _MON_REPO="https://github.com/Isusami/MasterDnsVPN.git"
+    log_info "Downloading monitoring module from repository..."
+    _MON_TMP="$(mktemp -d /tmp/masterdns_mon.XXXXXX 2>/dev/null || mktemp -d)"
+    if git clone --depth 1 --branch "$_MON_BRANCH" --single-branch "$_MON_REPO" "$_MON_TMP" 2>&1 | tail -1; then
+      if [[ -d "$_MON_TMP/monitoring" ]]; then
+        cp -r "$_MON_TMP/monitoring" "$INSTALL_DIR/monitoring"
+        chmod +x "$INSTALL_DIR/monitoring/install.sh" 2>/dev/null || true
+        log_success "Monitoring module downloaded."
+      else
+        log_warn "Monitoring directory not found in repository."
+      fi
+    else
+      log_warn "Could not download monitoring module. You can install it later from the repo."
+    fi
+    rm -rf "$_MON_TMP" 2>/dev/null || true
+  fi
+  if [[ -f "$INSTALL_DIR/monitoring/install.sh" ]]; then
+    _MON_AUTO_YES=1
+    source "$INSTALL_DIR/monitoring/install.sh"
+  fi
+fi
+
 echo -e "\n${CYAN}======================================================${NC}"
 echo -e " ${GREEN}${BOLD}       INSTALLATION COMPLETED SUCCESSFULLY!${NC}"
 echo -e "${CYAN}======================================================${NC}"
-echo -e "${BOLD}Commands:${NC}"
+echo -e "${BOLD}MasterDnsVPN:${NC}"
 echo -e "  ${YELLOW}>${NC} Start:   systemctl start masterdnsvpn"
 echo -e "  ${YELLOW}>${NC} Stop:    systemctl stop masterdnsvpn"
 echo -e "  ${YELLOW}>${NC} Restart: systemctl restart masterdnsvpn"
 echo -e "  ${YELLOW}>${NC} Logs:    journalctl -u masterdnsvpn -f"
+if [[ "${_MON_INSTALLED:-0}" == "1" ]]; then
+echo -e "\n${BOLD}Grafana:${NC}"
+echo -e "  ${YELLOW}>${NC} URL:      http://${_MON_SERVER_IP}:3000"
+echo -e "  ${YELLOW}>${NC} User:     admin"
+echo -e "  ${YELLOW}>${NC} Password: admin"
+echo -e "${BOLD}Monitoring:${NC}"
+echo -e "  ${YELLOW}>${NC} Restart:  docker compose -f $INSTALL_DIR/monitoring/docker-compose.yml restart"
+echo -e "  ${YELLOW}>${NC} Stop:     docker compose -f $INSTALL_DIR/monitoring/docker-compose.yml down"
+fi
 echo -e "\n${BOLD}Files:${NC}"
 echo -e "  ${YELLOW}>${NC} ${INSTALL_DIR}/server_config.toml"
 echo -e "  ${YELLOW}>${NC} ${INSTALL_DIR}/encrypt_key.txt"
