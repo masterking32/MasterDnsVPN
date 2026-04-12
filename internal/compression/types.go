@@ -77,7 +77,36 @@ var (
 			return decoder
 		},
 	}
+	lz4BufferPool = sync.Pool{
+		New: func() any {
+			b := make([]byte, 0, 4096)
+			return &b
+		},
+	}
 )
+
+func getLZ4Buffer(size int) *[]byte {
+	bp := lz4BufferPool.Get().(*[]byte)
+	if cap(*bp) < size {
+		nb := make([]byte, 0, size)
+		bp = &nb
+	}
+	buf := (*bp)[:size]
+	*bp = buf
+	return bp
+}
+
+func putLZ4Buffer(bp *[]byte) {
+	if bp == nil {
+		return
+	}
+	const maxRetainedLZ4Buffer = 128 * 1024
+	if cap(*bp) > maxRetainedLZ4Buffer {
+		return
+	}
+	*bp = (*bp)[:0]
+	lz4BufferPool.Put(bp)
+}
 
 func NormalizeType(value uint8) uint8 {
 	if value <= TypeZLIB {
@@ -270,7 +299,9 @@ func compressLZ4(data []byte) ([]byte, error) {
 	// Calculate max possible compressed size
 	maxSize := lz4.CompressBlockBound(len(data))
 	// We need 4 bytes for the original size header (Python's store_size=True)
-	buf := make([]byte, maxSize+4)
+	bufPtr := getLZ4Buffer(maxSize + 4)
+	buf := (*bufPtr)[:maxSize+4]
+	defer putLZ4Buffer(bufPtr)
 
 	// Store 4-byte little-endian size first (matches Python lz4.block behavior)
 	binary.LittleEndian.PutUint32(buf[0:4], uint32(len(data)))
@@ -283,7 +314,7 @@ func compressLZ4(data []byte) ([]byte, error) {
 		return nil, io.ErrShortBuffer
 	}
 
-	return buf[:n+4], nil
+	return bytes.Clone(buf[:n+4]), nil
 }
 
 func decompressLZ4(data []byte) ([]byte, error) {
@@ -297,7 +328,9 @@ func decompressLZ4(data []byte) ([]byte, error) {
 		return nil, ErrDecompressedTooLarge
 	}
 
-	out := make([]byte, origSize)
+	outPtr := getLZ4Buffer(int(origSize))
+	out := (*outPtr)[:int(origSize)]
+	defer putLZ4Buffer(outPtr)
 	n, err := lz4.UncompressBlock(data[4:], out)
 	if err != nil {
 		return nil, err
@@ -306,5 +339,5 @@ func decompressLZ4(data []byte) ([]byte, error) {
 		return nil, io.ErrUnexpectedEOF
 	}
 
-	return out, nil
+	return bytes.Clone(out[:n]), nil
 }
