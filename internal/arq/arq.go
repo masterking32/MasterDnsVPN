@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -1529,7 +1530,16 @@ func (a *ARQ) retransmitLoop() {
 			return
 		case <-timer.C:
 		}
-		a.checkRetransmits()
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					buf := make([]byte, 4096)
+					n := runtime.Stack(buf, false)
+					a.logger.Errorf("Retransmit panic on stream %d: %v\n%s", a.streamID, r, buf[:n])
+				}
+			}()
+			a.checkRetransmits()
+		}()
 	}
 }
 
