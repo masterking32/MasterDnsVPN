@@ -67,6 +67,7 @@ func (d *DummyLogger) Errorf(f string, a ...any) {}
 
 type arqDataItem struct {
 	Data            []byte
+	dataPoolBuf     *[]byte
 	CreatedAt       time.Time
 	LastSentAt      time.Time
 	Dispatched      bool
@@ -85,6 +86,7 @@ type arqControlItem struct {
 	TotalFragments uint8
 	AckType        uint8
 	Payload        []byte
+	payloadPoolBuf *[]byte
 	Priority       int
 	CreatedAt      time.Time
 	LastSentAt     time.Time
@@ -108,13 +110,48 @@ type rtxJob struct {
 	compressionType uint8
 }
 type rxPayload struct {
-	sn   uint16
-	data []byte
+	sn      uint16
+	data    []byte
+	poolBuf *[]byte
 }
 
 var setupControlPacketTypes = map[uint8]bool{
 	Enums.PACKET_STREAM_SYN: true,
 	Enums.PACKET_SOCKS5_SYN: true,
+}
+
+var arqDataPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 1500)
+		return &b
+	},
+}
+
+func getARQBuffer(size int) *[]byte {
+	bp := arqDataPool.Get().(*[]byte)
+	if cap(*bp) < size {
+		grow := size
+		if grow < 1500 {
+			grow = 1500
+		}
+		nb := make([]byte, 0, grow)
+		bp = &nb
+	}
+	buf := (*bp)[:size]
+	*bp = buf
+	return bp
+}
+
+func putARQBuffer(bp *[]byte) {
+	if bp == nil {
+		return
+	}
+	const maxRetainedARQBuf = 256 * 1024
+	if cap(*bp) > maxRetainedARQBuf {
+		return
+	}
+	*bp = (*bp)[:0]
+	arqDataPool.Put(bp)
 }
 
 type ARQ struct {
@@ -136,6 +173,7 @@ type ARQ struct {
 	rcvNxt        uint16
 	sndBuf        map[uint16]*arqDataItem
 	rcvBuf        map[uint16][]byte
+	rcvBufPool    map[uint16]*[]byte
 	controlSndBuf map[uint32]*arqControlItem // key: ptype << 24 | sn << 8 | fragID
 
 	// Stream lifecycle and flags
@@ -350,6 +388,7 @@ func NewARQ(streamID uint16, sessionID uint8, enqueuer PacketEnqueuer, localConn
 
 		sndBuf:        make(map[uint16]*arqDataItem),
 		rcvBuf:        make(map[uint16][]byte),
+		rcvBufPool:    make(map[uint16]*[]byte),
 		controlSndBuf: make(map[uint32]*arqControlItem),
 
 		state:        StateOpen,
@@ -629,13 +668,41 @@ func (a *ARQ) isClosed() bool {
 	return a.IsClosed()
 }
 
+func (a *ARQ) releaseSndBufLocked() {
+	for sn, info := range a.sndBuf {
+		if info != nil && info.dataPoolBuf != nil {
+			putARQBuffer(info.dataPoolBuf)
+			info.dataPoolBuf = nil
+		}
+		delete(a.sndBuf, sn)
+	}
+}
+
+func (a *ARQ) releaseRcvBufLocked() {
+	for sn, bp := range a.rcvBufPool {
+		putARQBuffer(bp)
+		delete(a.rcvBufPool, sn)
+	}
+	clear(a.rcvBuf)
+}
+
+func (a *ARQ) releaseControlBufLocked() {
+	for key, info := range a.controlSndBuf {
+		if info != nil && info.payloadPoolBuf != nil {
+			putARQBuffer(info.payloadPoolBuf)
+			info.payloadPoolBuf = nil
+		}
+		delete(a.controlSndBuf, key)
+	}
+}
+
 // clearAllQueues is used to wipe state instantly (RST / Abort semantics)
 // Caller must hold a.mu.
 func (a *ARQ) clearAllQueues(clearControl bool) {
-	a.sndBuf = make(map[uint16]*arqDataItem)
-	a.rcvBuf = make(map[uint16][]byte)
+	a.releaseSndBufLocked()
+	a.releaseRcvBufLocked()
 	if clearControl {
-		a.controlSndBuf = make(map[uint32]*arqControlItem)
+		a.releaseControlBufLocked()
 	}
 	a.clearDataNackStateLocked()
 
@@ -662,9 +729,9 @@ func (a *ARQ) clearOutboundStateLocked(clearControl bool) {
 		}
 	}
 
-	a.sndBuf = make(map[uint16]*arqDataItem)
+	a.releaseSndBufLocked()
 	if clearControl {
-		a.controlSndBuf = make(map[uint32]*arqControlItem)
+		a.releaseControlBufLocked()
 	}
 	a.clearDataNackStateLocked()
 	a.signalWindowNotFull()
@@ -802,7 +869,7 @@ func (a *ARQ) MarkCloseWriteSent() {
 	a.closeWriteSent = true
 	a.localWriterBroken = true
 	a.localWriteClosed = true
-	a.rcvBuf = make(map[uint16][]byte)
+	a.releaseRcvBufLocked()
 	if a.closeReadReceived {
 		a.setState(StateClosing)
 	}
@@ -823,7 +890,7 @@ func (a *ARQ) MarkCloseWriteReceived() {
 			remover.RemoveQueuedData(sn)
 		}
 	}
-	a.sndBuf = make(map[uint16]*arqDataItem)
+	a.releaseSndBufLocked()
 	a.signalWindowNotFull()
 	a.mu.Unlock()
 
@@ -888,7 +955,7 @@ func (a *ARQ) markLocalWriterBroken(reason string) {
 	a.mu.Lock()
 	a.localWriterBroken = true
 	a.localWritePending = false
-	a.rcvBuf = make(map[uint16][]byte)
+	a.releaseRcvBufLocked()
 	a.mu.Unlock()
 }
 
@@ -996,7 +1063,12 @@ func (a *ARQ) runFinalAckWatchdog(now time.Time) {
 
 func (a *ARQ) clearTrackedControlPacket(packetType uint8, sequenceNum uint16, fragmentID uint8) {
 	a.mu.Lock()
-	delete(a.controlSndBuf, uint32(packetType)<<24|uint32(sequenceNum)<<8|uint32(fragmentID))
+	key := uint32(packetType)<<24 | uint32(sequenceNum)<<8 | uint32(fragmentID)
+	if info, exists := a.controlSndBuf[key]; exists && info != nil && info.payloadPoolBuf != nil {
+		putARQBuffer(info.payloadPoolBuf)
+		info.payloadPoolBuf = nil
+	}
+	delete(a.controlSndBuf, key)
 	a.mu.Unlock()
 }
 
@@ -1153,7 +1225,9 @@ func (a *ARQ) ioLoop() {
 		n, err := localConn.Read(buf)
 		if n > 0 {
 			transientReadSince = time.Time{}
-			raw := append([]byte(nil), buf[:n]...)
+			rawBuf := getARQBuffer(n)
+			raw := (*rawBuf)[:n]
+			copy(raw, buf[:n])
 
 			now := time.Now()
 			a.mu.Lock()
@@ -1163,6 +1237,7 @@ func (a *ARQ) ioLoop() {
 			currentRTO := a.currentDataBaseRTO()
 			a.sndBuf[sn] = &arqDataItem{
 				Data:            raw,
+				dataPoolBuf:     rawBuf,
 				CreatedAt:       now,
 				LastSentAt:      time.Time{},
 				Dispatched:      false,
@@ -1454,15 +1529,7 @@ func (a *ARQ) retransmitLoop() {
 			return
 		case <-timer.C:
 		}
-
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					a.logger.Debugf("Retransmit check panic on stream %d: %v", a.streamID, r)
-				}
-			}()
-			a.checkRetransmits()
-		}()
+		a.checkRetransmits()
 	}
 }
 
@@ -1495,12 +1562,15 @@ func (a *ARQ) ReceiveData(sn uint16, data []byte) bool {
 	a.pendingInbound++
 	a.mu.Unlock()
 
-	safeData := append([]byte(nil), data...)
+	safeDataBuf := getARQBuffer(len(data))
+	safeData := (*safeDataBuf)[:len(data)]
+	copy(safeData, data)
 
 	select {
-	case a.rxChan <- rxPayload{sn: sn, data: safeData}:
+	case a.rxChan <- rxPayload{sn: sn, data: safeData, poolBuf: safeDataBuf}:
 		return true
 	default:
+		putARQBuffer(safeDataBuf)
 		a.mu.Lock()
 		if a.pendingInbound > 0 {
 			a.pendingInbound--
@@ -1519,7 +1589,10 @@ func (a *ARQ) rxLoop() {
 			drained := 0
 			for {
 				select {
-				case <-a.rxChan:
+				case payload := <-a.rxChan:
+					if payload.poolBuf != nil {
+						putARQBuffer(payload.poolBuf)
+					}
 					drained++
 				default:
 					if drained > 0 {
@@ -1534,14 +1607,20 @@ func (a *ARQ) rxLoop() {
 				}
 			}
 		case payload := <-a.rxChan:
-			a.processReceivedData(payload.sn, payload.data)
+			a.processReceivedData(payload.sn, payload.data, payload.poolBuf)
 		}
 	}
 }
 
 // processReceivedData handles inbound data on the original per-packet path so
 // ACK/NACK/flush timing stays conservative under heavy loss and reordering.
-func (a *ARQ) processReceivedData(sn uint16, data []byte) {
+func (a *ARQ) processReceivedData(sn uint16, data []byte, poolBuf *[]byte) {
+	defer func() {
+		if poolBuf != nil {
+			putARQBuffer(poolBuf)
+		}
+	}()
+
 	now := time.Now()
 
 	a.mu.Lock()
@@ -1589,6 +1668,10 @@ func (a *ARQ) processReceivedData(sn uint16, data []byte) {
 
 	if !exists {
 		a.rcvBuf[sn] = data
+		if poolBuf != nil {
+			a.rcvBufPool[sn] = poolBuf
+			poolBuf = nil
+		}
 	}
 	a.mu.Unlock()
 
@@ -1607,7 +1690,7 @@ func (a *ARQ) processReceivedData(sn uint16, data []byte) {
 
 func (a *ARQ) processReceivedDataBatch(batch []rxPayload) {
 	for _, payload := range batch {
-		a.processReceivedData(payload.sn, payload.data)
+		a.processReceivedData(payload.sn, payload.data, payload.poolBuf)
 	}
 }
 
@@ -1618,6 +1701,7 @@ func (a *ARQ) writeLoop() {
 
 	var mergeBuf []byte              // reusable merge buffer across iterations
 	toWrite := make([][]byte, 0, 16) // reusable slice for contiguous chunks
+	toRelease := make([]*[]byte, 0, 16)
 
 	for {
 		// Check rcvBuf before blocking — signals may have been coalesced
@@ -1655,12 +1739,17 @@ func (a *ARQ) writeLoop() {
 			}
 
 			toWrite = toWrite[:0]
+			toRelease = toRelease[:0]
 			for {
 				data, exists := a.rcvBuf[a.rcvNxt]
 				if !exists {
 					break
 				}
 				toWrite = append(toWrite, data)
+				if bp, ok := a.rcvBufPool[a.rcvNxt]; ok {
+					toRelease = append(toRelease, bp)
+					delete(a.rcvBufPool, a.rcvNxt)
+				}
 				delete(a.rcvBuf, a.rcvNxt)
 				a.rcvNxt++
 			}
@@ -1713,6 +1802,10 @@ func (a *ARQ) writeLoop() {
 			recheckClose := false
 			func() {
 				defer func() {
+					for _, bp := range toRelease {
+						putARQBuffer(bp)
+					}
+					toRelease = toRelease[:0]
 					a.mu.Lock()
 					a.localWritePending = false
 					a.mu.Unlock()
@@ -1831,6 +1924,10 @@ func (a *ARQ) ReceiveAck(packetType uint8, sn uint16) bool {
 		if info.SampleEligible && info.Dispatched && !info.LastSentAt.IsZero() {
 			sample = now.Sub(info.LastSentAt)
 			sampleEligible = true
+		}
+		if info.dataPoolBuf != nil {
+			putARQBuffer(info.dataPoolBuf)
+			info.dataPoolBuf = nil
 		}
 		delete(a.sndBuf, sn)
 		if a.deferredClose || a.state == StateDraining {
@@ -2106,10 +2203,10 @@ func (a *ARQ) runGapRecoveryWatchdog(now time.Time) {
 // ---------------------------------------------------------------------
 
 func (a *ARQ) SendControlPacketWithTTL(packetType uint8, sequenceNum uint16, fragmentID uint8, totalFragments uint8, payload []byte, priority int, trackForAck bool, customAckType *uint8, ttl time.Duration) bool {
-	copyData := append([]byte(nil), payload...)
 	priority = Enums.NormalizePacketPriority(packetType, priority)
 
 	if !a.enableControlReliability || !trackForAck {
+		copyData := append([]byte(nil), payload...)
 		return a.enqueuer.PushTXPacket(priority, packetType, sequenceNum, fragmentID, totalFragments, 0, ttl, copyData)
 	}
 
@@ -2124,12 +2221,23 @@ func (a *ARQ) SendControlPacketWithTTL(packetType uint8, sequenceNum uint16, fra
 		expectedAck = val
 	}
 
+	var (
+		copyData   []byte
+		payloadBuf *[]byte
+	)
+	if len(payload) > 0 {
+		payloadBuf = getARQBuffer(len(payload))
+		copyData = (*payloadBuf)[:len(payload)]
+		copy(copyData, payload)
+	}
+
 	key := uint32(packetType)<<24 | uint32(sequenceNum)<<8 | uint32(fragmentID)
 	now := time.Now()
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if _, exists := a.controlSndBuf[key]; exists {
+		putARQBuffer(payloadBuf)
 		return true
 	}
 
@@ -2157,6 +2265,7 @@ func (a *ARQ) SendControlPacketWithTTL(packetType uint8, sequenceNum uint16, fra
 		TotalFragments: totalFragments,
 		AckType:        expectedAck,
 		Payload:        copyData,
+		payloadPoolBuf: payloadBuf,
 		Priority:       priority,
 		CreatedAt:      now,
 		LastSentAt:     lastSentAt,
@@ -2281,12 +2390,20 @@ func (a *ARQ) ReceiveControlAck(ackPacketType uint8, sequenceNum uint16, fragmen
 			sampleEligible = true
 		}
 		if isCloseStreamPacket {
-			for trackedKey, info := range a.controlSndBuf {
-				if info.PacketType == originPtype {
+			for trackedKey, trackedInfo := range a.controlSndBuf {
+				if trackedInfo.PacketType == originPtype {
+					if trackedInfo.payloadPoolBuf != nil {
+						putARQBuffer(trackedInfo.payloadPoolBuf)
+						trackedInfo.payloadPoolBuf = nil
+					}
 					delete(a.controlSndBuf, trackedKey)
 				}
 			}
 		} else {
+			if info != nil && info.payloadPoolBuf != nil {
+				putARQBuffer(info.payloadPoolBuf)
+				info.payloadPoolBuf = nil
+			}
 			delete(a.controlSndBuf, key)
 		}
 	}
@@ -2609,6 +2726,10 @@ func (a *ARQ) checkControlRetransmits(now time.Time) {
 	for key, info := range a.controlSndBuf {
 		if info.TTL > 0 {
 			if now.Sub(info.CreatedAt) >= info.TTL {
+				if info.payloadPoolBuf != nil {
+					putARQBuffer(info.payloadPoolBuf)
+					info.payloadPoolBuf = nil
+				}
 				delete(a.controlSndBuf, key)
 				a.mu.Unlock()
 				a.handleTrackedPacketTTLExpiry(info.PacketType, "Packet TTL expired")
@@ -2630,6 +2751,10 @@ func (a *ARQ) checkControlRetransmits(now time.Time) {
 			expiredByTTL := now.Sub(info.CreatedAt) >= packetTTL
 			exceededRetries := info.Retries >= maxRetries
 			if expiredByTTL || exceededRetries {
+				if info.payloadPoolBuf != nil {
+					putARQBuffer(info.payloadPoolBuf)
+					info.payloadPoolBuf = nil
+				}
 				delete(a.controlSndBuf, key)
 				reason := "Control packet expired"
 				if exceededRetries {
