@@ -492,3 +492,30 @@ func TestFakeConnReadDeadlineReturnsTimeout(t *testing.T) {
 		t.Fatalf("fakeConn.Read timeout took too long: %v", elapsed)
 	}
 }
+
+func TestRecentlyClosedHeapStaleEntryGrowth(t *testing.T) {
+	c := buildTCPTestClient()
+	now := time.Now()
+
+	for cycle := 0; cycle < 10; cycle++ {
+		for id := uint16(1); id <= 50; id++ {
+			c.rememberClosedStream(id, "RST acknowledged", now)
+		}
+		now = now.Add(100 * time.Millisecond)
+	}
+
+	c.recentlyClosedMu.Lock()
+	heapSize := len(c.recentlyClosedHeap)
+	mapSize := len(c.recentlyClosedStreams)
+	c.recentlyClosedMu.Unlock()
+
+	t.Logf("After 10 cycles of 50 stream IDs: heap=%d map=%d ratio=%.2f", heapSize, mapSize, float64(heapSize)/float64(mapSize))
+
+	maxAllowed := mapSize + mapSize/2
+	if maxAllowed < mapSize+4 {
+		maxAllowed = mapSize + 4
+	}
+	if heapSize > maxAllowed {
+		t.Errorf("heap (%d) exceeded 1.5x the map size (%d, threshold %d), compaction should prevent this", heapSize, mapSize, maxAllowed)
+	}
+}
