@@ -17,12 +17,14 @@ var (
 	ErrInvalidName     = errors.New("invalid dns name")
 	ErrInvalidQuestion = errors.New("invalid dns question section")
 	ErrInvalidAnswer   = errors.New("invalid dns resource record section")
+	ErrSectionCountTooLarge = errors.New("dns section count too large")
 	ErrNotDNSRequest   = errors.New("packet does not look like a supported dns request")
 )
 
 const (
 	dnsHeaderSize = 12
 	maxNameJumps  = 10
+	maxSectionCount = 256
 )
 
 type Header struct {
@@ -180,6 +182,9 @@ func parseQuestions(data []byte, offset int, count int) ([]Question, int, error)
 	if count == 0 {
 		return nil, offset, nil
 	}
+	if count > maxSectionCount {
+		return nil, offset, ErrSectionCountTooLarge
+	}
 
 	questions := make([]Question, count)
 	for i := range count {
@@ -207,6 +212,9 @@ func parseQuestions(data []byte, offset int, count int) ([]Question, int, error)
 func parseResourceRecords(data []byte, offset int, count int) ([]ResourceRecord, int, error) {
 	if count == 0 {
 		return nil, offset, nil
+	}
+	if count > maxSectionCount {
+		return nil, offset, ErrSectionCountTooLarge
 	}
 
 	records := make([]ResourceRecord, count)

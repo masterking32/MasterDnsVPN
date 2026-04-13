@@ -93,3 +93,66 @@ func buildMultiQuestionDNSQuery(id uint16, questions []liteQuestionSpec, withOPT
 	copy(packet[offset:], opt)
 	return packet
 }
+
+func buildHeaderOnlyPacket(qdCount, anCount, nsCount, arCount uint16) []byte {
+	pkt := make([]byte, dnsHeaderSize)
+	pkt[0], pkt[1] = 0x12, 0x34
+	pkt[2], pkt[3] = 0x01, 0x00
+	pkt[4] = byte(qdCount >> 8)
+	pkt[5] = byte(qdCount)
+	pkt[6] = byte(anCount >> 8)
+	pkt[7] = byte(anCount)
+	pkt[8] = byte(nsCount >> 8)
+	pkt[9] = byte(nsCount)
+	pkt[10] = byte(arCount >> 8)
+	pkt[11] = byte(arCount)
+	return pkt
+}
+
+func TestParsePacketLiteRejectsOversizedQDCount(t *testing.T) {
+	pkt := buildHeaderOnlyPacket(maxSectionCount+1, 0, 0, 0)
+	_, err := ParsePacketLite(pkt)
+	if err == nil {
+		t.Fatal("expected error for oversized QDCount, got nil")
+	}
+}
+
+func TestParsePacketRejectsOversizedQDCount(t *testing.T) {
+	pkt := buildHeaderOnlyPacket(maxSectionCount+1, 0, 0, 0)
+	_, err := ParsePacket(pkt)
+	if err == nil {
+		t.Fatal("expected error for oversized QDCount, got nil")
+	}
+}
+
+func TestParsePacketRejectsOversizedANCount(t *testing.T) {
+	pkt := buildHeaderOnlyPacket(0, maxSectionCount+1, 0, 0)
+	_, err := ParsePacket(pkt)
+	if err == nil {
+		t.Fatal("expected error for oversized ANCount, got nil")
+	}
+}
+
+func TestParsePacketRejectsOversizedNSCount(t *testing.T) {
+	pkt := buildHeaderOnlyPacket(0, 0, maxSectionCount+1, 0)
+	_, err := ParsePacket(pkt)
+	if err == nil {
+		t.Fatal("expected error for oversized NSCount, got nil")
+	}
+}
+
+func TestParsePacketRejectsOversizedARCount(t *testing.T) {
+	pkt := buildHeaderOnlyPacket(0, 0, 0, maxSectionCount+1)
+	_, err := ParsePacket(pkt)
+	if err == nil {
+		t.Fatal("expected error for oversized ARCount, got nil")
+	}
+}
+
+func TestParsePacketAllowsMaxSectionCount(t *testing.T) {
+	pkt := buildHeaderOnlyPacket(maxSectionCount, 0, 0, 0)
+	_, err := ParsePacket(pkt)
+	if err != nil && err == ErrSectionCountTooLarge {
+		t.Fatalf("maxSectionCount should be accepted, got: %v", err)
+	}
+}
