@@ -172,6 +172,123 @@ sudo firewall-cmd --reload
 
 ---
 
+### Section 1.3: 📦 MasterDnsVPN Docker Image
+
+---
+
+#### Section 1.3.1: ⚠️ Overview
+
+This Docker image runs the MasterDnsVPN server in a containerized environment and supports multi-architecture builds.
+
+It automatically:
+
+* Boots a default configuration if none exists
+* Injects your domain on first startup
+* Stores persistent data in `/data`
+
+---
+
+#### Section 1.3.2: 🖥 Supported Architectures
+
+* linux/amd64
+* linux/arm/v5
+* linux/arm/v7
+* linux/arm64/v8
+* linux/mips64le
+
+---
+
+#### Section 1.3.3: 🚀 Quick Start
+
+Run the container with Docker:
+
+```bash
+docker run -d \
+  --name masterdnsvpn \
+  --restart unless-stopped \
+  -e DOMAIN=v.example.com \
+  -v $(pwd)/data:/data \
+  -p 53:53/tcp \
+  -p 53:53/udp \
+  ghcr.io/masterking32/masterdnsvpn:latest
+```
+
+---
+
+#### Section 1.3.4: 🧪 Example with docker-compose
+
+```yaml
+services:
+  masterdnsvpn:
+    image: ghcr.io/masterking32/masterdnsvpn:latest
+    restart: unless-stopped
+    environment:
+      - DOMAIN=v.example.com
+    volumes:
+      - ./data:/data
+    ports:
+      - "53:53/tcp"
+      - "53:53/udp"
+```
+
+---
+
+#### Section 1.3.5: ⚙️ Required Environment Variables
+
+| Variable | Description                             |
+| -------- | --------------------------------------- |
+| DOMAIN   | Your DNS domain (required on first run) |
+
+> ⚠️ If `DOMAIN` is not set on first boot, the container will stop with an error.
+
+---
+
+#### Section 1.3.6: 📁 Persistent Data
+
+Stored in `/data`:
+
+* `server_config.toml`
+* `encrypt_key.txt`
+
+You can mount it as volume:
+
+```bash
+-v ./data:/data
+```
+
+---
+
+#### Section 1.3.7: 🔧 MikroTik / RouterOS Usage
+
+For MikroTik containers:
+
+* Use latest v7 MikroTik RouterOS
+* Destination NAT port UDP/TCP 53 to your container
+* Full MikroTik container setup: https://help.mikrotik.com/docs/spaces/ROS/pages/84901929/Container
+
+Example:
+
+```bash
+/container mounts
+add dst=/data list=MasterDnsVPN src=/containers/mounts/MasterDnsVPN
+
+/container envs
+add key=DOMAIN list=MasterDnsVPN value=v.example.com
+
+/container add check-certificate=no dns=1.1.1.1 envlists=MasterDnsVPN hostname=MasterDnsVPN interface=MasterDnsVPN layer-dir="" mountlists=MasterDnsVPN name=MasterDnsVPN remote-image=ghcr.io/masterking32/masterdnsvpn:latest root-dir=/containers/data/MasterDnsVPN start-on-boot=yes
+```
+
+---
+
+#### Section 1.3.8: 📌 Notes
+
+* DNS port `53` is required (UDP/TCP)
+* Do NOT run another DNS service on the same host
+* Designed for production use but still lightweight
+* No systemd or host modifications required
+
+---
+
 ## Section 2: 🚀 Installation and Launch (Client and Server)
 
 You can install and run this project in two ways:

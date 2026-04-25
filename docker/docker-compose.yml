@@ -1,0 +1,11 @@
+services:
+  masterdnsvpn:
+    image: ghcr.io/masterking32/masterdnsvpn::latest
+    restart: unless-stopped
+    environment:
+      - DOMAIN=v.example.com
+    volumes:
+      - ./data:/data
+    ports:
+      - "53:53/tcp"
+      - "53:53/udp"
