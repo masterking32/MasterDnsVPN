@@ -171,123 +171,6 @@ sudo firewall-cmd --reload
 
 ---
 
-### بخش ۱.۳: 📦 ایمیج Docker مربوط به MasterDnsVPN
-
----
-
-#### بخش ۱.۳.۱: ⚠️ نمای کلی
-
-این ایمیج Docker سرور MasterDnsVPN را در یک محیط کانتینری اجرا می‌کند و از ساخت‌های چندمعماری پشتیبانی می‌کند.
-
-این ایمیج به‌صورت خودکار:
-
-* اگر هیچ پیکربندی‌ای وجود نداشته باشد، یک پیکربندی پیش‌فرض راه‌اندازی می‌کند
-* در اولین اجرا دامنهٔ شما را تزریق می‌کند
-* داده‌های پایدار را در مسیر `/data` ذخیره می‌کند
-
----
-
-#### بخش ۱.۳.۲: 🖥 معماری‌های پشتیبانی‌شده
-
-* linux/amd64
-* linux/arm/v5
-* linux/arm/v7
-* linux/arm64/v8
-* linux/mips64le
-
----
-
-#### بخش ۱.۳.۳: 🚀 شروع سریع
-
-کانتینر را با Docker اجرا کنید:
-
-```bash
-docker run -d \
-  --name masterdnsvpn \
-  --restart unless-stopped \
-  -e DOMAIN=v.example.com \
-  -v $(pwd)/data:/data \
-  -p 53:53/tcp \
-  -p 53:53/udp \
-  ghcr.io/masterking32/masterdnsvpn:latest
-```
-
----
-
-#### بخش ۱.۳.۴: 🧪 نمونه با docker-compose
-
-```yaml
-services:
-  masterdnsvpn:
-    image: ghcr.io/masterking32/masterdnsvpn:latest
-    restart: unless-stopped
-    environment:
-      - DOMAIN=v.example.com
-    volumes:
-      - ./data:/data
-    ports:
-      - "53:53/tcp"
-      - "53:53/udp"
-```
-
----
-
-#### بخش ۱.۳.۵: ⚙️ متغیرهای محیطی موردنیاز
-
-| متغیر  | توضیح                                     |
-| ------ | ----------------------------------------- |
-| DOMAIN | دامنهٔ DNS شما (در اولین اجرا الزامی است) |
-
-> ⚠️ اگر `DOMAIN` در اولین بوت تنظیم نشده باشد، کانتینر با خطا متوقف می‌شود.
-
----
-
-#### بخش ۱.۳.۶: 📁 داده‌های پایدار
-
-در مسیر `/data` ذخیره می‌شوند:
-
-* `server_config.toml`
-* `encrypt_key.txt`
-
-می‌توانید آن را به‌صورت volume mount کنید:
-
-```bash
--v ./data:/data
-```
-
----
-
-#### بخش ۱.۳.۷: 🔧 استفاده در MikroTik / RouterOS
-
-برای کانتینرهای MikroTik:
-
-* از آخرین نسخهٔ v7 MikroTik RouterOS استفاده کنید
-* با Destination NAT پورت UDP/TCP 53 را به کانتینر خود هدایت کنید
-* راهنمای کامل راه‌اندازی کانتینر MikroTik: [https://help.mikrotik.com/docs/spaces/ROS/pages/84901929/Container](https://help.mikrotik.com/docs/spaces/ROS/pages/84901929/Container)
-
-نمونه:
-
-```bash
-/container mounts
-add dst=/data list=MasterDnsVPN src=/containers/mounts/MasterDnsVPN
-
-/container envs
-add key=DOMAIN list=MasterDnsVPN value=v.example.com
-
-/container add check-certificate=no dns=1.1.1.1 envlists=MasterDnsVPN hostname=MasterDnsVPN interface=MasterDnsVPN layer-dir="" mountlists=MasterDnsVPN name=MasterDnsVPN remote-image=ghcr.io/masterking32/masterdnsvpn:latest root-dir=/containers/data/MasterDnsVPN start-on-boot=yes
-```
-
----
-
-#### بخش ۱.۳.۸: 📌 نکات
-
-* پورت DNS یعنی `53` لازم است (UDP/TCP)
-* هیچ سرویس DNS دیگری را روی همان میزبان اجرا نکنید
-* برای استفادهٔ production طراحی شده، اما همچنان سبک است
-* نیازی به systemd یا تغییرات در سیستم میزبان ندارد
-
-
----
 
 ## بخش ۲: 🚀 نصب و راه‌اندازی (کلاینت و سرور) 
 
@@ -355,6 +238,123 @@ add key=DOMAIN list=MasterDnsVPN value=v.example.com
 | مک‌اواس (macOS) 🍎 | `AMD64` | مک‌های اینتل | [دانلود سرور مک اینتل ⬇️](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_MacOS_AMD64.zip) |
 | ترموکس / اندروید 📱 | `ARM64` | محیط‌های جدید اندروید / Termux | [دانلود سرور ترموکس ARM64 ⬇️](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Termux_ARM64.zip) |
 | ترموکس / اندروید 📱 | `ARMv7` | محیط‌های قدیمی‌تر اندروید / Termux ۳۲ بیتی | [دانلود سرور ترموکس ARMv7 ⬇️](https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Termux_ARMV7.zip) |
+
+---
+
+### بخش ۲.۲: 📦 ایمیج Docker مربوط به MasterDnsVPN
+
+---
+
+#### بخش ۲.۲.۱: ⚠️ نمای کلی
+
+این ایمیج Docker سرور MasterDnsVPN را در یک محیط کانتینری اجرا می‌کند و از ساخت‌های چندمعماری پشتیبانی می‌کند.
+
+این ایمیج به‌صورت خودکار:
+
+* اگر هیچ پیکربندی‌ای وجود نداشته باشد، یک پیکربندی پیش‌فرض راه‌اندازی می‌کند
+* در اولین اجرا دامنهٔ شما را تزریق می‌کند
+* داده‌های پایدار را در مسیر `/data` ذخیره می‌کند
+
+---
+
+#### بخش ۲.۲.۲: 🖥 معماری‌های پشتیبانی‌شده
+
+* linux/amd64
+* linux/arm/v5
+* linux/arm/v7
+* linux/arm64/v8
+* linux/mips64le
+
+---
+
+#### بخش ۲.۲.۳: 🚀 شروع سریع
+
+کانتینر را با Docker اجرا کنید:
+
+```bash
+docker run -d \
+  --name masterdnsvpn \
+  --restart unless-stopped \
+  -e DOMAIN=v.example.com \
+  -v $(pwd)/data:/data \
+  -p 53:53/tcp \
+  -p 53:53/udp \
+  ghcr.io/masterking32/masterdnsvpn:latest
+```
+
+---
+
+#### بخش ۲.۲.۴: 🧪 نمونه با docker-compose
+
+```yaml
+services:
+  masterdnsvpn:
+    image: ghcr.io/masterking32/masterdnsvpn:latest
+    restart: unless-stopped
+    environment:
+      - DOMAIN=v.example.com
+    volumes:
+      - ./data:/data
+    ports:
+      - "53:53/tcp"
+      - "53:53/udp"
+```
+
+---
+
+#### بخش ۲.۲.۵: ⚙️ متغیرهای محیطی موردنیاز
+
+| متغیر  | توضیح                                     |
+| ------ | ----------------------------------------- |
+| DOMAIN | دامنهٔ DNS شما (در اولین اجرا الزامی است) |
+
+> ⚠️ اگر `DOMAIN` در اولین بوت تنظیم نشده باشد، کانتینر با خطا متوقف می‌شود.
+
+---
+
+#### بخش ۲.۲.۶: 📁 داده‌های پایدار
+
+در مسیر `/data` ذخیره می‌شوند:
+
+* `server_config.toml`
+* `encrypt_key.txt`
+
+می‌توانید آن را به‌صورت volume mount کنید:
+
+```bash
+-v ./data:/data
+```
+
+---
+
+#### بخش ۲.۲.۷: 🔧 استفاده در MikroTik / RouterOS
+
+برای کانتینرهای MikroTik:
+
+* از آخرین نسخهٔ v7 MikroTik RouterOS استفاده کنید
+* با Destination NAT پورت UDP/TCP 53 را به کانتینر خود هدایت کنید
+* راهنمای کامل راه‌اندازی کانتینر MikroTik: [https://help.mikrotik.com/docs/spaces/ROS/pages/84901929/Container](https://help.mikrotik.com/docs/spaces/ROS/pages/84901929/Container)
+
+نمونه:
+
+```bash
+/container mounts
+add dst=/data list=MasterDnsVPN src=/containers/mounts/MasterDnsVPN
+
+/container envs
+add key=DOMAIN list=MasterDnsVPN value=v.example.com
+
+/container add check-certificate=no dns=1.1.1.1 envlists=MasterDnsVPN hostname=MasterDnsVPN interface=MasterDnsVPN layer-dir="" mountlists=MasterDnsVPN name=MasterDnsVPN remote-image=ghcr.io/masterking32/masterdnsvpn:latest root-dir=/containers/data/MasterDnsVPN start-on-boot=yes
+```
+
+---
+
+#### بخش ۲.۲.۸: 📌 نکات
+
+* پورت DNS یعنی `53` لازم است (UDP/TCP)
+* هیچ سرویس DNS دیگری را روی همان میزبان اجرا نکنید
+* برای استفادهٔ production طراحی شده، اما همچنان سبک است
+* نیازی به systemd یا تغییرات در سیستم میزبان ندارد
 
 ---
 
