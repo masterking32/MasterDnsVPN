@@ -62,7 +62,6 @@ type ClientConfig struct {
 	MinDownloadMTU                        int               `toml:"MIN_DOWNLOAD_MTU"`
 	MaxUploadMTU                          int               `toml:"MAX_UPLOAD_MTU"`
 	MaxDownloadMTU                        int               `toml:"MAX_DOWNLOAD_MTU"`
-	AutoRemoveLowMTUServers               bool              `toml:"AUTO_REMOVE_LOW_MTU_SERVERS"`
 	MTUTestRetries                        int               `toml:"MTU_TEST_RETRIES"`
 	MTUTestTimeout                        float64           `toml:"MTU_TEST_TIMEOUT"`
 	MTUTestParallelism                    int               `toml:"MTU_TEST_PARALLELISM"`
@@ -164,7 +163,6 @@ func defaultClientConfig() ClientConfig {
 		MinDownloadMTU:                        100,
 		MaxUploadMTU:                          150,
 		MaxDownloadMTU:                        500,
-		AutoRemoveLowMTUServers:               true,
 		MTUTestRetries:                        2,
 		MTUTestTimeout:                        2.0,
 		MTUTestParallelism:                    16,

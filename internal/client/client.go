@@ -426,13 +426,22 @@ func (c *Client) Run(ctx context.Context) error {
 					return err
 				}
 
-				c.InitVirtualStream0()
+				// Guard: ensure workers are stopped if anything panics after this point.
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							c.log.Errorf("<red>❌ Panic after StartAsyncRuntime: %v — stopping workers</red>", r)
+							c.StopAsyncRuntime()
+						}
+					}()
+					c.InitVirtualStream0()
 
-				if c.pingManager != nil {
-					c.pingManager.Start(ctx)
-				}
+					if c.pingManager != nil {
+						c.pingManager.Start(ctx)
+					}
 
-				c.ensureLocalDNSCachePersistence(ctx)
+					c.ensureLocalDNSCachePersistence(ctx)
+				}()
 			}
 
 			select {

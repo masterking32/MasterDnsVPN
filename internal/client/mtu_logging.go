@@ -323,6 +323,12 @@ func (c *Client) appendMTULogLine(template string, conn *Connection, cause strin
 	c.mtuOutputMu.Lock()
 	defer c.mtuOutputMu.Unlock()
 
+	// Re-check path under lock in case a concurrent session reset cleared it.
+	if c.mtuSuccessOutputPath == "" {
+		return
+	}
+	outputPath = c.mtuSuccessOutputPath
+
 	file, err := os.OpenFile(outputPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		c.warnMTUAppendError(err)

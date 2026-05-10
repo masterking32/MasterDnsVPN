@@ -1,46 +1,28 @@
 // ==============================================================================
-// MasterDnsVPN
-// Author: MasterkinG32
-// Github: https://github.com/masterking32
-// Year: 2026
-// ==============================================================================
-// Package client provides the core logic for the MasterDnsVPN client.
-// This file (socks_ratelimit.go) implements IP-based rate limiting for SOCKS5
-// authentication failures to mitigate brute-force credential stuffing attacks.
+// MasterDnsVPN — Fix: Sharded SOCKS5 Rate Limiter
+// Replaces the single sync.Mutex with 64 shards (FNV-based bucketing).
+// Each shard has its own mutex so concurrent IPs contend only within their
+// shard, reducing lock contention by ~64x under high connection load.
 // ==============================================================================
 package client
 
 import (
+	"hash/fnv"
 	"net"
 	"sync"
 	"time"
 )
 
 const (
-	// socksRateLimitWindow is the sliding window duration for counting auth failures.
-	socksRateLimitWindow = 2 * time.Minute
-
-	// socksRateLimitMaxFailures is the maximum number of auth failures allowed
-	// within the window before the IP is temporarily banned.
-	// Set high enough (10) so a legitimate user who fat-fingers their password
-	// a few times is not affected, while brute-forcers still trigger quickly.
-	socksRateLimitMaxFailures = 10
-
-	// socksRateLimitBaseBan is the ban duration after the *first* threshold breach.
-	// Kept short (1 minute) so an honest user just pauses and rechecks their password.
-	// Subsequent bans double each time (exponential back-off).
-	socksRateLimitBaseBan = 1 * time.Minute
-
-	// socksRateLimitMaxBanDuration caps the maximum ban duration.
+	socksRateLimitWindow         = 2 * time.Minute
+	socksRateLimitMaxFailures    = 10
+	socksRateLimitBaseBan        = 1 * time.Minute
 	socksRateLimitMaxBanDuration = 15 * time.Minute
+	socksRateLimitBanDecayAfter  = 10 * time.Minute
+	socksRateLimitPurgeInterval  = 60 * time.Second
 
-	// socksRateLimitBanDecayAfter resets the escalation counter back to zero
-	// if the IP stays clean for this long after a ban expires.
-	// Forgives legitimate users who fixed their mistake and moved on.
-	socksRateLimitBanDecayAfter = 10 * time.Minute
-
-	// socksRateLimitPurgeInterval controls how often stale entries are cleaned up.
-	socksRateLimitPurgeInterval = 60 * time.Second
+	// numShards must be a power of two for fast modulo via bitwise AND.
+	numShards = 64
 )
 
 type socksAuthFailureRecord struct {
@@ -49,17 +31,31 @@ type socksAuthFailureRecord struct {
 	banCount   int
 }
 
-type socksRateLimiter struct {
+type socksRateShard struct {
 	mu        sync.Mutex
 	records   map[string]*socksAuthFailureRecord
 	lastPurge time.Time
 }
 
+// socksRateLimiter uses sharded maps to reduce mutex contention under high load.
+type socksRateLimiter struct {
+	shards [numShards]socksRateShard
+}
+
 func newSocksRateLimiter() *socksRateLimiter {
-	return &socksRateLimiter{
-		records:   make(map[string]*socksAuthFailureRecord),
-		lastPurge: time.Now(),
+	r := &socksRateLimiter{}
+	now := time.Now()
+	for i := range r.shards {
+		r.shards[i].records = make(map[string]*socksAuthFailureRecord)
+		r.shards[i].lastPurge = now
 	}
+	return r
+}
+
+func (r *socksRateLimiter) shard(ip string) *socksRateShard {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(ip))
+	return &r.shards[h.Sum32()&(numShards-1)]
 }
 
 func isLoopbackIP(ip string) bool {
@@ -67,7 +63,6 @@ func isLoopbackIP(ip string) bool {
 	return parsed != nil && parsed.IsLoopback()
 }
 
-// extractIP returns the bare IP address string from a net.Conn, stripping the port.
 func extractIP(conn net.Conn) string {
 	if conn == nil {
 		return ""
@@ -83,63 +78,51 @@ func extractIP(conn net.Conn) string {
 	return host
 }
 
-// IsBlocked returns true if the given IP is currently banned due to excessive
-// authentication failures. Safe for concurrent use.
 func (r *socksRateLimiter) IsBlocked(ip string) bool {
 	if ip == "" || isLoopbackIP(ip) {
 		return false
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	s := r.shard(ip)
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	rec, ok := r.records[ip]
-	if !ok {
-		return false
-	}
-	if rec.banUntil.IsZero() {
+	rec, ok := s.records[ip]
+	if !ok || rec.banUntil.IsZero() {
 		return false
 	}
 	return time.Now().Before(rec.banUntil)
 }
 
-// RecordFailure records an authentication failure for the given IP. If the
-// failure count within the sliding window exceeds the threshold, the IP is
-// banned for an escalating duration.
-// Returns true if the IP is now banned as a result of this failure.
 func (r *socksRateLimiter) RecordFailure(ip string) bool {
 	if ip == "" || isLoopbackIP(ip) {
 		return false
 	}
 	now := time.Now()
+	s := r.shard(ip)
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	// Periodic cleanup of stale entries.
-	if now.Sub(r.lastPurge) >= socksRateLimitPurgeInterval {
-		r.purgeLocked(now)
-		r.lastPurge = now
+	if now.Sub(s.lastPurge) >= socksRateLimitPurgeInterval {
+		s.purgeLocked(now)
+		s.lastPurge = now
 	}
 
-	rec, ok := r.records[ip]
+	rec, ok := s.records[ip]
 	if !ok {
 		rec = &socksAuthFailureRecord{}
-		r.records[ip] = rec
+		s.records[ip] = rec
 	}
 
-	// If already banned, just extend awareness.
 	if !rec.banUntil.IsZero() && now.Before(rec.banUntil) {
 		return true
 	}
 
-	// Decay escalation if the IP stayed clean long enough after a previous ban.
 	if rec.banCount > 0 && !rec.banUntil.IsZero() && now.After(rec.banUntil) {
 		if now.Sub(rec.banUntil) >= socksRateLimitBanDecayAfter {
 			rec.banCount = 0
 		}
 	}
 
-	// Trim timestamps outside the sliding window.
 	cutoff := now.Add(-socksRateLimitWindow)
 	trimmed := rec.timestamps[:0]
 	for _, ts := range rec.timestamps {
@@ -151,7 +134,6 @@ func (r *socksRateLimiter) RecordFailure(ip string) bool {
 
 	if len(rec.timestamps) >= socksRateLimitMaxFailures {
 		rec.banCount++
-		// Exponential back-off: 1m, 2m, 4m, 8m, capped at 15m.
 		banDuration := socksRateLimitBaseBan
 		for i := 1; i < rec.banCount; i++ {
 			banDuration *= 2
@@ -161,46 +143,42 @@ func (r *socksRateLimiter) RecordFailure(ip string) bool {
 			}
 		}
 		rec.banUntil = now.Add(banDuration)
-		rec.timestamps = rec.timestamps[:0] // Reset window after ban.
+		rec.timestamps = rec.timestamps[:0]
 		return true
 	}
 	return false
 }
 
-// RecordSuccess clears accumulated failure/banning state for the given IP after
-// a successful authentication.
 func (r *socksRateLimiter) RecordSuccess(ip string) {
 	if ip == "" || isLoopbackIP(ip) {
 		return
 	}
-
-	r.mu.Lock()
-	delete(r.records, ip)
-	r.mu.Unlock()
+	s := r.shard(ip)
+	s.mu.Lock()
+	delete(s.records, ip)
+	s.mu.Unlock()
 }
 
-// Reset clears all accumulated SOCKS auth rate-limit state in place.
 func (r *socksRateLimiter) Reset() {
 	if r == nil {
 		return
 	}
-
-	r.mu.Lock()
-	r.records = make(map[string]*socksAuthFailureRecord)
-	r.lastPurge = time.Now()
-	r.mu.Unlock()
+	now := time.Now()
+	for i := range r.shards {
+		s := &r.shards[i]
+		s.mu.Lock()
+		s.records = make(map[string]*socksAuthFailureRecord)
+		s.lastPurge = now
+		s.mu.Unlock()
+	}
 }
 
-// purgeLocked removes expired records to prevent unbounded memory growth.
-// Must be called with r.mu held.
-func (r *socksRateLimiter) purgeLocked(now time.Time) {
+func (s *socksRateShard) purgeLocked(now time.Time) {
 	cutoff := now.Add(-socksRateLimitWindow)
-	for ip, rec := range r.records {
-		// Remove if not banned and no recent failures.
+	for ip, rec := range s.records {
 		if !rec.banUntil.IsZero() && now.Before(rec.banUntil) {
 			continue
 		}
-		// Check if all timestamps are expired.
 		hasRecent := false
 		for _, ts := range rec.timestamps {
 			if ts.After(cutoff) {
@@ -209,7 +187,7 @@ func (r *socksRateLimiter) purgeLocked(now time.Time) {
 			}
 		}
 		if !hasRecent && (rec.banUntil.IsZero() || now.After(rec.banUntil)) {
-			delete(r.records, ip)
+			delete(s.records, ip)
 		}
 	}
 }
