@@ -8,8 +8,6 @@ This system is designed around compatibility with many resolver behaviors and ha
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/masterking32/MasterDnsVPN) [![oosmetrics](https://api.oosmetrics.com/api/v1/badge/achievement/5c7b2ce0-0af6-4648-8ded-fd1e847096cd.svg)](https://oosmetrics.com/repo/masterking32/MasterDnsVPN)
 
-<a href="https://trendshift.io/repositories/23688" target="_blank"><img src="https://trendshift.io/api/badge/repositories/23688" alt="masterking32%2FMasterDnsVPN | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
-
 ### 📊 MasterDnsVPN Compared with Similar Projects
 
 | Feature | SlipStream | DNSTT | MasterDnsVPN |

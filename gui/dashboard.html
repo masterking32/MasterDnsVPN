@@ -1,0 +1,797 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MasterDnsVPN — داشبورد</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Vazirmatn:wght@300;400;600;700;900&display=swap');
+
+:root {
+  --bg: #060a0f;
+  --s1: #0d1117;
+  --s2: #161b22;
+  --s3: #21262d;
+  --border: #30363d;
+  --acc: #00d4aa;
+  --acc2: #7c5cfc;
+  --acc3: #ff6b35;
+  --ok: #3fb950;
+  --warn: #e3b341;
+  --err: #f85149;
+  --txt: #e6edf3;
+  --txt2: #8b949e;
+  --txt3: #484f58;
+  --mono: 'IBM Plex Mono', monospace;
+  --sans: 'Vazirmatn', sans-serif;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+
+body {
+  background: var(--bg);
+  color: var(--txt);
+  font-family: var(--sans);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* === TITLE BAR === */
+.titlebar {
+  height: 40px;
+  background: var(--s1);
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center;
+  padding: 0 1rem;
+  gap: .8rem;
+  flex-shrink: 0;
+  -webkit-app-region: drag;
+  user-select: none;
+}
+.titlebar-dots { display: flex; gap: .4rem; }
+.titlebar-dot {
+  width: 12px; height: 12px; border-radius: 50%;
+  cursor: pointer; -webkit-app-region: no-drag;
+  transition: filter .15s;
+}
+.titlebar-dot:hover { filter: brightness(1.3); }
+.td-close  { background: #ff5f57; }
+.td-min    { background: #febc2e; }
+.td-max    { background: #28c840; }
+.titlebar-title { flex: 1; text-align: center; font-size: .78rem; color: var(--txt3); font-family: var(--mono); }
+.titlebar-ver   { font-size: .72rem; color: var(--txt3); font-family: var(--mono); }
+
+/* === LAYOUT === */
+.shell {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* === SIDEBAR === */
+.sidebar {
+  width: 200px;
+  background: var(--s1);
+  border-left: 1px solid var(--border);
+  display: flex; flex-direction: column;
+  flex-shrink: 0;
+  padding: .8rem 0;
+}
+.sidebar-logo {
+  padding: .8rem 1.2rem 1.2rem;
+  display: flex; align-items: center; gap: .7rem;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: .6rem;
+}
+.sidebar-logo-icon {
+  width: 36px; height: 36px;
+  background: linear-gradient(135deg, var(--acc), var(--acc2));
+  border-radius: 10px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1.1rem; flex-shrink: 0;
+}
+.sidebar-logo-text { font-size: .78rem; font-weight: 700; color: var(--txt); line-height: 1.3; }
+.sidebar-logo-text small { font-weight: 400; color: var(--txt3); font-size: .68rem; }
+
+.nav-item {
+  display: flex; align-items: center; gap: .7rem;
+  padding: .6rem 1.2rem;
+  font-size: .82rem; color: var(--txt2);
+  cursor: pointer;
+  border-right: 2px solid transparent;
+  transition: all .15s;
+}
+.nav-item:hover { color: var(--txt); background: rgba(255,255,255,.03); }
+.nav-item.active { color: var(--acc); background: rgba(0,212,170,.07); border-right-color: var(--acc); }
+.nav-icon { font-size: 1rem; width: 18px; text-align: center; }
+
+.sidebar-footer {
+  margin-top: auto;
+  padding: .8rem 1.2rem;
+  border-top: 1px solid var(--border);
+}
+.conn-indicator {
+  display: flex; align-items: center; gap: .5rem;
+  font-size: .72rem; font-family: var(--mono);
+}
+.conn-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--ok);
+  animation: blink 2s infinite;
+}
+.conn-dot.disconnected { background: var(--err); animation: none; }
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+/* === MAIN CONTENT === */
+.main {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1.5rem;
+  display: flex; flex-direction: column; gap: 1.2rem;
+}
+
+/* === PANELS === */
+.panel { display: none; flex-direction: column; gap: 1.2rem; }
+.panel.active { display: flex; }
+
+/* === STAT GRID === */
+.stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: .8rem; }
+.stat-card {
+  background: var(--s1);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem 1.2rem;
+  position: relative; overflow: hidden;
+  transition: border-color .2s;
+}
+.stat-card:hover { border-color: var(--acc); }
+.stat-card::after {
+  content: '';
+  position: absolute; top: 0; left: 0; right: 0;
+  height: 2px;
+}
+.stat-card.c-acc::after  { background: var(--acc); }
+.stat-card.c-acc2::after { background: var(--acc2); }
+.stat-card.c-ok::after   { background: var(--ok); }
+.stat-card.c-warn::after { background: var(--warn); }
+.stat-label { font-size: .68rem; text-transform: uppercase; letter-spacing: .08em; color: var(--txt3); }
+.stat-val   { font-size: 1.6rem; font-weight: 900; margin: .4rem 0 .1rem; font-family: var(--mono); }
+.stat-card.c-acc .stat-val  { color: var(--acc); }
+.stat-card.c-acc2 .stat-val { color: var(--acc2); }
+.stat-card.c-ok .stat-val   { color: var(--ok); }
+.stat-card.c-warn .stat-val { color: var(--warn); }
+.stat-sub { font-size: .72rem; color: var(--txt3); }
+
+/* === CARD === */
+.card {
+  background: var(--s1);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.card-header {
+  padding: .75rem 1.2rem;
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: .6rem;
+  font-size: .85rem; font-weight: 700;
+}
+.card-header .badge {
+  margin-right: auto;
+  padding: .15rem .5rem;
+  border-radius: 4px;
+  font-size: .68rem;
+  font-family: var(--mono);
+}
+.badge-ok   { background: rgba(63,185,80,.12); color: var(--ok); border: 1px solid rgba(63,185,80,.3); }
+.badge-warn { background: rgba(227,179,65,.12); color: var(--warn); border: 1px solid rgba(227,179,65,.3); }
+.badge-err  { background: rgba(248,81,73,.12); color: var(--err); border: 1px solid rgba(248,81,73,.3); }
+.badge-acc  { background: rgba(0,212,170,.1); color: var(--acc); border: 1px solid rgba(0,212,170,.3); }
+
+/* === CHART === */
+.chart-wrap {
+  padding: 1rem 1.2rem;
+  height: 120px;
+  position: relative;
+}
+.chart-wrap svg { width: 100%; height: 100%; overflow: visible; }
+.chart-label {
+  position: absolute; top: 1rem; right: 1.2rem;
+  font-size: .68rem; color: var(--txt3); font-family: var(--mono);
+}
+
+/* === RESOLVER TABLE === */
+.resolver-row {
+  display: grid; grid-template-columns: 1fr 80px 70px 60px 30px;
+  gap: .5rem; align-items: center;
+  padding: .7rem 1.2rem;
+  border-bottom: 1px solid rgba(48,54,61,.5);
+  font-size: .8rem;
+  transition: background .1s;
+}
+.resolver-row:hover { background: rgba(255,255,255,.02); }
+.resolver-row:last-child { border-bottom: none; }
+.resolver-row.header { font-size: .68rem; text-transform: uppercase; letter-spacing: .08em; color: var(--txt3); padding: .5rem 1.2rem; }
+.resolver-name { color: var(--txt2); font-family: var(--mono); font-size: .75rem; }
+.resolver-ms { color: var(--acc); font-family: var(--mono); }
+.resolver-ms.slow { color: var(--warn); }
+.led { width: 8px; height: 8px; border-radius: 50%; }
+.led.on  { background: var(--ok); box-shadow: 0 0 4px var(--ok); }
+.led.off { background: var(--txt3); }
+
+/* === CONTROLS === */
+.controls { display: flex; gap: .8rem; align-items: center; }
+.btn {
+  padding: .55rem 1.1rem;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--s2);
+  color: var(--txt2);
+  font-family: var(--sans);
+  font-size: .82rem;
+  cursor: pointer;
+  transition: all .2s;
+}
+.btn:hover { background: var(--s3); color: var(--txt); }
+.btn.primary { background: var(--acc); color: #000; border-color: var(--acc); font-weight: 700; }
+.btn.primary:hover { filter: brightness(1.1); }
+.btn.danger { background: rgba(248,81,73,.1); color: var(--err); border-color: rgba(248,81,73,.3); }
+.btn.danger:hover { background: rgba(248,81,73,.2); }
+
+/* === LOG === */
+.log-area {
+  background: var(--s2);
+  border: none;
+  padding: .8rem 1.2rem;
+  height: 240px;
+  overflow-y: auto;
+  font-family: var(--mono);
+  font-size: .72rem;
+  line-height: 1.8;
+}
+.log-line { margin-bottom: .1rem; }
+.log-line .ts  { color: var(--txt3); }
+.log-line .lvl-info  { color: var(--ok); }
+.log-line .lvl-warn  { color: var(--warn); }
+.log-line .lvl-error { color: var(--err); }
+.log-line .msg { color: var(--txt2); }
+
+/* === CONFIG FORM === */
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; padding: 1.2rem; }
+.form-group { display: flex; flex-direction: column; gap: .4rem; }
+.form-group.full { grid-column: span 2; }
+.form-label { font-size: .75rem; color: var(--txt2); }
+.form-input {
+  background: var(--s2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: .5rem .8rem;
+  color: var(--txt);
+  font-family: var(--mono);
+  font-size: .8rem;
+  outline: none;
+  transition: border-color .15s;
+  direction: ltr;
+  text-align: left;
+}
+.form-input:focus { border-color: var(--acc); }
+.form-select { appearance: none; cursor: pointer; }
+.form-hint { font-size: .68rem; color: var(--txt3); margin-top: .15rem; }
+
+/* === ENCRYPTION BADGE === */
+.enc-methods { display: flex; flex-wrap: wrap; gap: .5rem; padding: 1.2rem; }
+.enc-method {
+  padding: .5rem 1rem;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  font-size: .78rem; font-family: var(--mono);
+  cursor: pointer;
+  transition: all .2s;
+  color: var(--txt2);
+}
+.enc-method:hover { border-color: var(--acc); color: var(--txt); }
+.enc-method.active { background: rgba(0,212,170,.1); border-color: var(--acc); color: var(--acc); }
+.enc-method.insecure.active { background: rgba(248,81,73,.1); border-color: var(--err); color: var(--err); }
+
+/* === SCROLLBAR === */
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<!-- TITLE BAR -->
+<div class="titlebar">
+  <div class="titlebar-dots">
+    <div class="titlebar-dot td-close"></div>
+    <div class="titlebar-dot td-min"></div>
+    <div class="titlebar-dot td-max"></div>
+  </div>
+  <div class="titlebar-title">MasterDnsVPN Client</div>
+  <div class="titlebar-ver">v2.0.0-fix</div>
+</div>
+
+<div class="shell">
+  <!-- SIDEBAR -->
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      <div class="sidebar-logo-icon">🔒</div>
+      <div class="sidebar-logo-text">
+        MasterDns<br>
+        <small>VPN Client</small>
+      </div>
+    </div>
+
+    <div class="nav-item active" onclick="switchPanel('dashboard')">
+      <span class="nav-icon">📊</span> داشبورد
+    </div>
+    <div class="nav-item" onclick="switchPanel('resolvers')">
+      <span class="nav-icon">🌐</span> Resolverها
+    </div>
+    <div class="nav-item" onclick="switchPanel('encryption')">
+      <span class="nav-icon">🔐</span> رمزنگاری
+    </div>
+    <div class="nav-item" onclick="switchPanel('config')">
+      <span class="nav-icon">⚙️</span> تنظیمات
+    </div>
+    <div class="nav-item" onclick="switchPanel('logs')">
+      <span class="nav-icon">📋</span> لاگ‌ها
+    </div>
+    <div class="nav-item" onclick="switchPanel('metrics')">
+      <span class="nav-icon">📈</span> متریک‌ها
+    </div>
+
+    <div class="sidebar-footer">
+      <div class="conn-indicator" id="connIndicator">
+        <div class="conn-dot" id="connDot"></div>
+        <span id="connLabel">متصل</span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <main class="main">
+
+    <!-- ── DASHBOARD ── -->
+    <div class="panel active" id="panel-dashboard">
+      <div class="stat-grid">
+        <div class="stat-card c-acc">
+          <div class="stat-label">throughput ↑</div>
+          <div class="stat-val" id="stat-up">4.2</div>
+          <div class="stat-sub">MB/s آپلود</div>
+        </div>
+        <div class="stat-card c-acc2">
+          <div class="stat-label">throughput ↓</div>
+          <div class="stat-val" id="stat-dn">11.8</div>
+          <div class="stat-sub">MB/s دانلود</div>
+        </div>
+        <div class="stat-card c-ok">
+          <div class="stat-label">میانگین latency</div>
+          <div class="stat-val" id="stat-lat">142</div>
+          <div class="stat-sub">میلی‌ثانیه</div>
+        </div>
+        <div class="stat-card c-warn">
+          <div class="stat-label">نرخ از دست رفته</div>
+          <div class="stat-val" id="stat-drop">0.2%</div>
+          <div class="stat-sub">بسته‌های drop شده</div>
+        </div>
+      </div>
+
+      <div class="controls">
+        <button class="btn primary" onclick="toggleConnection()">⏹ قطع اتصال</button>
+        <button class="btn" onclick="resetSession()">🔄 ریست Session</button>
+        <button class="btn" onclick="reloadConfig()">⚡ Reload Config</button>
+        <span style="margin-right:auto; font-size:.78rem; color:var(--txt3); font-family:var(--mono)" id="uptime-display">آپتایم: 00:00:00</span>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          📈 Throughput زنده
+          <span class="badge badge-acc" id="chart-badge">Live</span>
+        </div>
+        <div class="chart-wrap">
+          <svg id="chart-svg" viewBox="0 0 600 100" preserveAspectRatio="none">
+            <defs>
+              <linearGradient id="gUp" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="#00d4aa" stop-opacity=".4"/>
+                <stop offset="100%" stop-color="#00d4aa" stop-opacity="0"/>
+              </linearGradient>
+              <linearGradient id="gDn" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="#7c5cfc" stop-opacity=".3"/>
+                <stop offset="100%" stop-color="#7c5cfc" stop-opacity="0"/>
+              </linearGradient>
+            </defs>
+            <path id="path-up-fill" fill="url(#gUp)"/>
+            <path id="path-dn-fill" fill="url(#gDn)"/>
+            <path id="path-up" fill="none" stroke="#00d4aa" stroke-width="1.5"/>
+            <path id="path-dn" fill="none" stroke="#7c5cfc" stroke-width="1.5"/>
+          </svg>
+          <div class="chart-label">
+            <span style="color:var(--acc)">━</span> آپلود &nbsp;
+            <span style="color:var(--acc2)">━</span> دانلود
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── RESOLVERS ── -->
+    <div class="panel" id="panel-resolvers">
+      <div class="card">
+        <div class="card-header">
+          🌐 لیست Resolverها
+          <span class="badge badge-ok" id="resolver-count-badge">8 فعال</span>
+        </div>
+        <div class="resolver-row header">
+          <span>آدرس</span><span>Latency</span><span>MTU ↑</span><span>MTU ↓</span><span>وضعیت</span>
+        </div>
+        <div id="resolver-list">
+          <!-- dynamically rendered -->
+        </div>
+      </div>
+      <div style="display:flex; gap:.8rem">
+        <button class="btn primary" onclick="addResolver()">+ افزودن Resolver</button>
+        <button class="btn" onclick="testAllResolvers()">🧪 تست همه</button>
+        <button class="btn danger" onclick="clearDisabled()">🗑 حذف غیرفعال</button>
+      </div>
+    </div>
+
+    <!-- ── ENCRYPTION ── -->
+    <div class="panel" id="panel-encryption">
+      <div class="card">
+        <div class="card-header">🔐 روش رمزنگاری</div>
+        <div class="enc-methods" id="enc-methods">
+          <div class="enc-method insecure" data-m="0" onclick="selectMethod(this)">NONE<br><small style="color:var(--err)">⚠ ناامن</small></div>
+          <div class="enc-method insecure" data-m="1" onclick="selectMethod(this)">XOR<br><small style="color:var(--err)">⚠ ناامن</small></div>
+          <div class="enc-method" data-m="2" onclick="selectMethod(this)">XChaCha20<br>Poly1305</div>
+          <div class="enc-method" data-m="3" onclick="selectMethod(this)">AES-128<br>GCM</div>
+          <div class="enc-method" data-m="4" onclick="selectMethod(this)">AES-192<br>GCM</div>
+          <div class="enc-method active" data-m="5" onclick="selectMethod(this)">AES-256<br>GCM ✓</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header">🗝 کلید رمزنگاری</div>
+        <div class="form-grid">
+          <div class="form-group full">
+            <label class="form-label">کلید فعلی (hex)</label>
+            <input class="form-input" type="password" id="enc-key" value="••••••••••••••••••••••••••••••••" placeholder="کلید hex">
+            <div class="form-hint">فایل کلید با مجوز 0600 ذخیره می‌شود · بررسی permissions والد فعال است</div>
+          </div>
+          <div class="form-group">
+            <button class="btn primary" onclick="generateKey()">🎲 تولید کلید جدید</button>
+          </div>
+          <div class="form-group">
+            <button class="btn" onclick="showKey()">👁 نمایش / پنهان</button>
+          </div>
+        </div>
+      </div>
+      <div class="card" id="enc-warning" style="border-color:rgba(248,81,73,.4); display:none">
+        <div class="card-header" style="color:var(--err)">⚠ هشدار امنیتی</div>
+        <div style="padding:1rem 1.2rem; font-size:.85rem; color:var(--warn); line-height:1.8">
+          روش انتخاب‌شده امنیت کافی ندارد. ترافیک VPN در برابر شنود محافظت نمی‌شود.
+          برای محیط production از AES-256-GCM یا XChaCha20-Poly1305 استفاده کنید.
+        </div>
+      </div>
+    </div>
+
+    <!-- ── CONFIG ── -->
+    <div class="panel" id="panel-config">
+      <div class="card">
+        <div class="card-header">⚙️ تنظیمات اتصال</div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label">استراتژی Balancing</label>
+            <select class="form-input form-select">
+              <option>Round Robin (پیش‌فرض)</option>
+              <option>Least Loss</option>
+              <option>Lowest Latency</option>
+              <option>Hybrid Score</option>
+              <option>Random</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">تعداد کارگر RX/TX</label>
+            <input class="form-input" type="number" value="4" min="1" max="32">
+          </div>
+          <div class="form-group">
+            <label class="form-label">تکرار تست MTU</label>
+            <input class="form-input" type="number" value="3" min="1" max="10">
+          </div>
+          <div class="form-group">
+            <label class="form-label">زمان‌بندی MTU (ثانیه)</label>
+            <input class="form-input" type="number" value="5.0" step="0.5">
+          </div>
+          <div class="form-group full">
+            <label class="form-label">آدرس Metrics HTTP</label>
+            <input class="form-input" type="text" value="127.0.0.1:9090" placeholder="host:port">
+            <div class="form-hint">Prometheus: http://127.0.0.1:9090/metrics · وضعیت: /api/status</div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">سطح لاگ</label>
+            <select class="form-input form-select">
+              <option>INFO</option>
+              <option>DEBUG</option>
+              <option>WARN</option>
+              <option>ERROR</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Async Logger</label>
+            <select class="form-input form-select">
+              <option>فعال (پیشنهادشده)</option>
+              <option>غیرفعال (sync)</option>
+            </select>
+            <div class="form-hint">بافر ۴۰۹۶ ورودی — mutex از hot path حذف می‌شود</div>
+          </div>
+        </div>
+        <div style="padding:0 1.2rem 1.2rem; display:flex; gap:.8rem">
+          <button class="btn primary">💾 ذخیره تنظیمات</button>
+          <button class="btn" onclick="reloadConfig()">🔄 SIGHUP Reload</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── LOGS ── -->
+    <div class="panel" id="panel-logs">
+      <div class="card">
+        <div class="card-header">
+          📋 لاگ‌های زنده
+          <label style="display:flex;align-items:center;gap:.4rem;font-size:.75rem;font-weight:400;cursor:pointer;margin-right:auto">
+            <input type="checkbox" id="autoscroll" checked> auto-scroll
+          </label>
+          <button class="btn" style="padding:.3rem .7rem;font-size:.72rem" onclick="clearLogs()">پاک کن</button>
+        </div>
+        <div class="log-area" id="log-area"></div>
+      </div>
+    </div>
+
+    <!-- ── METRICS ── -->
+    <div class="panel" id="panel-metrics">
+      <div class="card">
+        <div class="card-header">📈 متریک‌های سیستم</div>
+        <div style="padding:1.2rem; display:grid; grid-template-columns:1fr 1fr; gap:1rem">
+          <div>
+            <div style="font-size:.72rem;color:var(--txt3);margin-bottom:.5rem;text-transform:uppercase;letter-spacing:.08em">شاخص‌های شبکه</div>
+            <div id="metrics-net" style="font-family:var(--mono);font-size:.78rem;line-height:2;color:var(--txt2)">در حال بارگذاری...</div>
+          </div>
+          <div>
+            <div style="font-size:.72rem;color:var(--txt3);margin-bottom:.5rem;text-transform:uppercase;letter-spacing:.08em">شاخص‌های Session</div>
+            <div id="metrics-sess" style="font-family:var(--mono);font-size:.78rem;line-height:2;color:var(--txt2)">در حال بارگذاری...</div>
+          </div>
+        </div>
+        <div style="padding:0 1.2rem 1rem">
+          <div style="font-size:.72rem;color:var(--txt3);margin-bottom:.5rem">Prometheus endpoint</div>
+          <div style="font-family:var(--mono);font-size:.75rem;color:var(--acc)">http://127.0.0.1:9090/metrics</div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+let connected = true;
+let upBytes = [], dnBytes = [];
+const maxPoints = 60;
+let startTs = Date.now();
+let sessionActive = true;
+
+const resolvers = [
+  { addr: '1.1.1.1:53',       label: 'Cloudflare',  ms: 98,  upMTU: 188, dnMTU: 4096, up: true  },
+  { addr: '8.8.8.8:53',       label: 'Google',       ms: 134, upMTU: 180, dnMTU: 4096, up: true  },
+  { addr: '9.9.9.9:53',       label: 'Quad9',        ms: 155, upMTU: 182, dnMTU: 4096, up: true  },
+  { addr: '208.67.222.222:53', label: 'OpenDNS',     ms: 210, upMTU: 176, dnMTU: 4096, up: false },
+  { addr: '94.140.14.14:53',  label: 'AdGuard',      ms: 188, upMTU: 184, dnMTU: 4096, up: true  },
+  { addr: '185.228.168.9:53', label: 'CleanBrowsing', ms: 220, upMTU: 172, dnMTU: 4096, up: false },
+];
+
+const fakeLogLines = [
+  { lvl: 'info',  msg: '🚀 MasterDnsVPN Client Started' },
+  { lvl: 'info',  msg: '📄 Configuration loaded from: client_config.toml' },
+  { lvl: 'info',  msg: '🗂  Connection Catalog: 6 domain-resolver pairs' },
+  { lvl: 'info',  msg: '✅ MTU test passed: UP=188 DOWN=4096' },
+  { lvl: 'info',  msg: '✅ Session Initialized Successfully (ID: 42)' },
+  { lvl: 'info',  msg: '🔒 Encryption: AES-256-GCM (HKDF-SHA256 key derivation)' },
+  { lvl: 'info',  msg: '📊 Metrics server listening on 127.0.0.1:9090' },
+  { lvl: 'warn',  msg: '⚠ Resolver 208.67.222.222 timeout — removing from active set' },
+  { lvl: 'info',  msg: '📶 Stream #12 opened → example.com:443' },
+  { lvl: 'info',  msg: '📶 Stream #13 opened → api.service.io:443' },
+];
+
+// ── Navigation ─────────────────────────────────────────────────────────────
+function switchPanel(name) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.getElementById('panel-' + name).classList.add('active');
+  event.currentTarget.classList.add('active');
+
+  if (name === 'resolvers') renderResolvers();
+  if (name === 'metrics') renderMetrics();
+  if (name === 'logs') renderLogs();
+}
+
+// ── Resolvers ──────────────────────────────────────────────────────────────
+function renderResolvers() {
+  const list = document.getElementById('resolver-list');
+  const activeCount = resolvers.filter(r => r.up).length;
+  document.getElementById('resolver-count-badge').textContent = activeCount + ' فعال';
+  list.innerHTML = resolvers.map(r => `
+    <div class="resolver-row">
+      <span class="resolver-name">${r.addr}<small style="color:var(--txt3)"> · ${r.label}</small></span>
+      <span class="resolver-ms ${r.ms > 180 ? 'slow' : ''}">${r.up ? r.ms + 'ms' : '—'}</span>
+      <span style="color:var(--txt2);font-family:var(--mono);font-size:.75rem">${r.upMTU}</span>
+      <span style="color:var(--txt2);font-family:var(--mono);font-size:.75rem">${r.dnMTU}</span>
+      <div class="led ${r.up ? 'on' : 'off'}"></div>
+    </div>
+  `).join('');
+}
+
+// ── Encryption ─────────────────────────────────────────────────────────────
+function selectMethod(el) {
+  document.querySelectorAll('.enc-method').forEach(e => e.classList.remove('active'));
+  el.classList.add('active');
+  const m = parseInt(el.dataset.m);
+  const warn = document.getElementById('enc-warning');
+  warn.style.display = (m <= 1) ? 'block' : 'none';
+}
+
+function generateKey() {
+  const arr = new Uint8Array(32);
+  crypto.getRandomValues(arr);
+  document.getElementById('enc-key').value = Array.from(arr).map(b => b.toString(16).padStart(2,'0')).join('');
+  showKey();
+}
+
+let keyVisible = false;
+function showKey() {
+  keyVisible = !keyVisible;
+  document.getElementById('enc-key').type = keyVisible ? 'text' : 'password';
+}
+
+// ── Chart ──────────────────────────────────────────────────────────────────
+function addDataPoint(up, dn) {
+  upBytes.push(up);
+  dnBytes.push(dn);
+  if (upBytes.length > maxPoints) { upBytes.shift(); dnBytes.shift(); }
+  renderChart();
+}
+
+function renderChart() {
+  const w = 600, h = 100;
+  const maxUp = Math.max(...upBytes, 1);
+  const maxDn = Math.max(...dnBytes, 1);
+  const maxAll = Math.max(maxUp, maxDn);
+
+  function toPath(arr, fill) {
+    if (arr.length < 2) return '';
+    const pts = arr.map((v, i) => {
+      const x = (i / (maxPoints - 1)) * w;
+      const y = h - (v / maxAll) * (h - 10);
+      return `${x},${y}`;
+    });
+    const line = 'M' + pts.join(' L');
+    if (fill) return line + ` L${w},${h} L0,${h} Z`;
+    return line;
+  }
+
+  document.getElementById('path-up').setAttribute('d', toPath(upBytes, false));
+  document.getElementById('path-dn').setAttribute('d', toPath(dnBytes, false));
+  document.getElementById('path-up-fill').setAttribute('d', toPath(upBytes, true));
+  document.getElementById('path-dn-fill').setAttribute('d', toPath(dnBytes, true));
+}
+
+// ── Stats update ───────────────────────────────────────────────────────────
+function updateStats() {
+  if (!sessionActive) return;
+  const up = (Math.random() * 8 + 1).toFixed(1);
+  const dn = (Math.random() * 18 + 4).toFixed(1);
+  const lat = Math.floor(Math.random() * 80 + 90);
+  const drop = (Math.random() * 0.5).toFixed(1);
+
+  document.getElementById('stat-up').textContent = up;
+  document.getElementById('stat-dn').textContent = dn;
+  document.getElementById('stat-lat').textContent = lat;
+  document.getElementById('stat-drop').textContent = drop + '%';
+  addDataPoint(parseFloat(up), parseFloat(dn));
+
+  // Uptime
+  const sec = Math.floor((Date.now() - startTs) / 1000);
+  const h = String(Math.floor(sec / 3600)).padStart(2, '0');
+  const m = String(Math.floor((sec % 3600) / 60)).padStart(2, '0');
+  const s = String(sec % 60).padStart(2, '0');
+  document.getElementById('uptime-display').textContent = `آپتایم: ${h}:${m}:${s}`;
+}
+
+// ── Logs ───────────────────────────────────────────────────────────────────
+let logBuffer = [];
+
+function renderLogs() {
+  const area = document.getElementById('log-area');
+  area.innerHTML = logBuffer.map(l => `
+    <div class="log-line">
+      <span class="ts">${l.ts}</span>
+      <span class="lvl-${l.lvl}"> [${l.lvl.toUpperCase()}] </span>
+      <span class="msg">${l.msg}</span>
+    </div>
+  `).join('');
+  if (document.getElementById('autoscroll').checked) {
+    area.scrollTop = area.scrollHeight;
+  }
+}
+
+function addLog(lvl, msg) {
+  const ts = new Date().toLocaleTimeString('fa-IR');
+  logBuffer.push({ ts, lvl, msg });
+  if (logBuffer.length > 300) logBuffer.shift();
+  if (document.getElementById('panel-logs').classList.contains('active')) renderLogs();
+}
+
+function clearLogs() { logBuffer = []; renderLogs(); }
+
+// ── Metrics ────────────────────────────────────────────────────────────────
+function renderMetrics() {
+  const sec = Math.floor((Date.now() - startTs) / 1000);
+  document.getElementById('metrics-net').innerHTML = `
+    bytes_up_total: <span style="color:var(--acc)">${(Math.random()*1e9).toFixed(0)}</span><br>
+    bytes_down_total: <span style="color:var(--acc2)">${(Math.random()*3e9).toFixed(0)}</span><br>
+    packets_dropped: <span style="color:var(--warn)">${Math.floor(Math.random()*500)}</span><br>
+    avg_latency_ms: <span style="color:var(--ok)">${Math.floor(Math.random()*80+90)}</span><br>
+    active_resolvers: <span style="color:var(--ok)">4</span>
+  `;
+  document.getElementById('metrics-sess').innerHTML = `
+    uptime_sec: <span style="color:var(--acc)">${sec}</span><br>
+    active_streams: <span style="color:var(--ok)">${Math.floor(Math.random()*8+2)}</span><br>
+    session_resets: <span style="color:var(--warn)">${Math.floor(Math.random()*3)}</span><br>
+    session_id: <span style="color:var(--txt2)">42</span><br>
+    enc_method: <span style="color:var(--acc)">AES-256-GCM</span>
+  `;
+}
+
+// ── Controls ───────────────────────────────────────────────────────────────
+function toggleConnection() {
+  connected = !connected;
+  sessionActive = connected;
+  const dot = document.getElementById('connDot');
+  const lbl = document.getElementById('connLabel');
+  const btn = event.currentTarget;
+  if (connected) {
+    dot.classList.remove('disconnected');
+    lbl.textContent = 'متصل';
+    btn.textContent = '⏹ قطع اتصال';
+    btn.classList.add('primary');
+    addLog('info', '🔗 اتصال برقرار شد');
+  } else {
+    dot.classList.add('disconnected');
+    lbl.textContent = 'قطع';
+    btn.textContent = '▶ اتصال';
+    btn.classList.remove('primary');
+    addLog('warn', '🔌 اتصال قطع شد');
+  }
+}
+
+function resetSession() { addLog('warn', '🔄 Session reset درخواست شد — در حال راه‌اندازی مجدد...'); }
+function reloadConfig()  { addLog('info', '⚡ SIGHUP ارسال شد — کانفیگ در حال reload است...'); }
+function addResolver()   { addLog('info', '+ Resolver جدید اضافه شد'); renderResolvers(); }
+function testAllResolvers() { addLog('info', '🧪 تست همه Resolverها شروع شد...'); }
+function clearDisabled() { addLog('info', '🗑 Resolverهای غیرفعال حذف شدند'); }
+
+// ── Init ───────────────────────────────────────────────────────────────────
+fakeLogLines.forEach(l => addLog(l.lvl, l.msg));
+renderResolvers();
+
+// Prefill chart
+for (let i = 0; i < maxPoints; i++) {
+  upBytes.push(Math.random() * 6 + 1);
+  dnBytes.push(Math.random() * 14 + 4);
+}
+renderChart();
+
+setInterval(updateStats, 1000);
+setInterval(() => {
+  if (Math.random() < .15) addLog('info', '📶 Stream #' + Math.floor(Math.random()*100+10) + ' باز شد');
+}, 3000);
+</script>
+</body>
+</html>
