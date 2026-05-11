@@ -1,0 +1,185 @@
+// ==============================================================================
+// MasterDnsVPN
+// Author: MasterkinG32
+// Github: https://github.com/masterking32
+// Year: 2026
+// ==============================================================================
+
+package config
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"reflect"
+	"sort"
+	"strings"
+	"testing"
+)
+
+const profileTestResolversLine = "8.8.8.8\n"
+
+// updateProfileGoldenEnv lets developers regenerate snapshots when a preset
+// definition or a default value changes. Set the env var to "1" to overwrite
+// every golden file driven by this test suite.
+const updateProfileGoldenEnv = "MASTERDNSVPN_UPDATE_PROFILE_GOLDEN"
+
+func writeProfileTestConfig(t *testing.T, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "client_config.toml")
+	resolversPath := filepath.Join(dir, "client_resolvers.txt")
+	if err := os.WriteFile(configPath, []byte(body), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(resolversPath, []byte(profileTestResolversLine), 0o644); err != nil {
+		t.Fatalf("write resolvers: %v", err)
+	}
+	return configPath
+}
+
+// stripVolatile clears fields that depend on the test temp directory so two
+// configs loaded from different directories can be compared semantically.
+func stripVolatile(cfg *ClientConfig) {
+	cfg.ConfigPath = ""
+	cfg.ConfigDir = ""
+	cfg.ResolversFilePath = ""
+	cfg.Resolvers = nil
+	cfg.ResolverMap = nil
+}
+
+// snapshotConfig serializes the resolved ClientConfig to deterministic JSON
+// after stripping out fields that depend on the test temp directory or on
+// runtime-derived data unrelated to profile semantics.
+func snapshotConfig(t *testing.T, cfg ClientConfig) []byte {
+	t.Helper()
+	stripVolatile(&cfg)
+
+	out, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal snapshot: %v", err)
+	}
+	return append(out, '\n')
+}
+
+func assertGoldenSnapshot(t *testing.T, goldenPath string, got []byte) {
+	t.Helper()
+	if os.Getenv(updateProfileGoldenEnv) == "1" {
+		if err := os.MkdirAll(filepath.Dir(goldenPath), 0o755); err != nil {
+			t.Fatalf("mkdir golden: %v", err)
+		}
+		if err := os.WriteFile(goldenPath, got, 0o644); err != nil {
+			t.Fatalf("update golden: %v", err)
+		}
+		return
+	}
+
+	want, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("read golden %s: %v (run with %s=1 to regenerate)", goldenPath, err, updateProfileGoldenEnv)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("snapshot mismatch for %s\n--- got ---\n%s\n--- want ---\n%s", goldenPath, got, want)
+	}
+}
+
+func loadConfigForProfile(t *testing.T, body string) ClientConfig {
+	t.Helper()
+	configPath := writeProfileTestConfig(t, body)
+	cfg, err := LoadClientConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadClientConfig: %v", err)
+	}
+	return cfg
+}
+
+func TestProfileStableMatchesOmittedProfile(t *testing.T) {
+	const baseTOML = `
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["v.domain.com"]
+DATA_ENCRYPTION_METHOD = 1
+ENCRYPTION_KEY = "secret"
+`
+	omitted := loadConfigForProfile(t, baseTOML)
+	stable := loadConfigForProfile(t, baseTOML+"PROFILE = \"stable\"\n")
+
+	stripVolatile(&omitted)
+	stripVolatile(&stable)
+	stable.Profile = omitted.Profile
+
+	if !reflect.DeepEqual(omitted, stable) {
+		omittedSnap := snapshotConfig(t, omitted)
+		stableSnap := snapshotConfig(t, stable)
+		t.Fatalf("PROFILE=stable should match omitted PROFILE\n--- omitted ---\n%s\n--- stable ---\n%s", omittedSnap, stableSnap)
+	}
+}
+
+func TestProfileStableSnapshot(t *testing.T) {
+	cfg := loadConfigForProfile(t, `
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["v.domain.com"]
+DATA_ENCRYPTION_METHOD = 1
+ENCRYPTION_KEY = "secret"
+PROFILE = "stable"
+`)
+	got := snapshotConfig(t, cfg)
+	assertGoldenSnapshot(t, filepath.Join("testdata", "profile_stable.golden.json"), got)
+}
+
+func TestProfileUnknownReturnsError(t *testing.T) {
+	configPath := writeProfileTestConfig(t, `
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["v.domain.com"]
+DATA_ENCRYPTION_METHOD = 1
+ENCRYPTION_KEY = "secret"
+PROFILE = "no-such-profile"
+`)
+	if _, err := LoadClientConfig(configPath); err == nil {
+		t.Fatal("expected error for unknown PROFILE")
+	} else if !strings.Contains(err.Error(), "PROFILE") {
+		t.Fatalf("error should mention PROFILE, got: %v", err)
+	}
+}
+
+func TestProfilePrecedenceExplicitKeyWinsOverPreset(t *testing.T) {
+	cfg := loadConfigForProfile(t, `
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["v.domain.com"]
+DATA_ENCRYPTION_METHOD = 1
+ENCRYPTION_KEY = "secret"
+PROFILE = "stable"
+PACKET_DUPLICATION_COUNT = 5
+`)
+	if cfg.PacketDuplicationCount != 5 {
+		t.Fatalf("explicit PACKET_DUPLICATION_COUNT should win: got=%d want=5", cfg.PacketDuplicationCount)
+	}
+}
+
+func TestApplyProfileUnknownFieldNamesAreCaught(t *testing.T) {
+	cfgType := reflect.TypeOf(ClientConfig{})
+	overrideType := reflect.TypeOf(profileOverrides{})
+	for i := 0; i < overrideType.NumField(); i++ {
+		name := overrideType.Field(i).Name
+		if _, ok := cfgType.FieldByName(name); !ok {
+			t.Errorf("profileOverrides field %q has no matching ClientConfig field", name)
+		}
+	}
+}
+
+// TestProfileRegistryIsSorted is a tiny safety-net: ensures preset names are
+// lowercase ASCII and don't collide with the reserved no-op tokens.
+func TestProfileRegistryNamesAreNormalized(t *testing.T) {
+	names := make([]string, 0, len(profilePresets))
+	for name := range profilePresets {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if name != strings.ToLower(strings.TrimSpace(name)) {
+			t.Errorf("preset name %q must be lowercased and trimmed", name)
+		}
+		if name == "" || name == "custom" {
+			t.Errorf("preset name %q collides with a reserved no-op token", name)
+		}
+	}
+}

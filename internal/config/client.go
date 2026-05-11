@@ -29,6 +29,7 @@ type ClientConfig struct {
 	ResolversFilePath                     string            `toml:"-"`
 	explicitRX_TX_Workers                 bool              `toml:"-"`
 	explicitTunnelProcessWorkers          bool              `toml:"-"`
+	Profile                               string            `toml:"PROFILE"`
 	ProtocolType                          string            `toml:"PROTOCOL_TYPE"`
 	Domains                               []string          `toml:"DOMAINS"`
 	ListenIP                              string            `toml:"LISTEN_IP"`
@@ -236,28 +237,55 @@ func loadClientConfigFile(filename string) (ClientConfig, error) {
 	cfg.ConfigDir = filepath.Dir(path)
 	cfg.ResolversFilePath = ""
 
+	var defined map[string]bool
 	switch format {
 	case configSourceJSON:
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			return cfg, err
 		}
-		defined, err := decodeConfigJSONInto(&cfg, raw)
+		defined, err = decodeConfigJSONInto(&cfg, raw)
 		if err != nil {
 			return cfg, fmt.Errorf("parse JSON failed for %s: %w", path, err)
 		}
-		cfg.explicitRX_TX_Workers = defined["RX_TX_Workers"]
-		cfg.explicitTunnelProcessWorkers = defined["TunnelProcessWorkers"]
 	default:
 		meta, err := toml.DecodeFile(path, &cfg)
 		if err != nil {
 			return cfg, fmt.Errorf("parse TOML failed for %s: %w", path, err)
 		}
-		cfg.explicitRX_TX_Workers = meta.IsDefined("RX_TX_WORKERS")
-		cfg.explicitTunnelProcessWorkers = meta.IsDefined("TUNNEL_PROCESS_WORKERS")
+		defined = buildTOMLDefinedMap(meta, reflect.TypeOf(cfg))
+	}
+
+	cfg.explicitRX_TX_Workers = defined["RX_TX_Workers"]
+	cfg.explicitTunnelProcessWorkers = defined["TunnelProcessWorkers"]
+
+	if err := applyProfile(&cfg, defined); err != nil {
+		return cfg, err
 	}
 
 	return cfg, nil
+}
+
+// buildTOMLDefinedMap captures which top-level TOML keys were explicitly set,
+// keyed by the matching Go field name, so downstream consumers (profile preset
+// precedence, explicit-flag tracking) can reason about user intent without
+// needing the original TOML metadata struct.
+func buildTOMLDefinedMap(meta toml.MetaData, cfgType reflect.Type) map[string]bool {
+	defined := make(map[string]bool, cfgType.NumField())
+	for i := 0; i < cfgType.NumField(); i++ {
+		field := cfgType.Field(i)
+		tag := field.Tag.Get("toml")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		if comma := strings.Index(tag, ","); comma >= 0 {
+			tag = tag[:comma]
+		}
+		if meta.IsDefined(tag) {
+			defined[field.Name] = true
+		}
+	}
+	return defined
 }
 
 func LoadClientConfigFromJSONBase64(encoded string) (ClientConfig, error) {
@@ -283,6 +311,9 @@ func loadClientConfigFromJSONBase64(encoded string) (ClientConfig, error) {
 	cfg.ResolversFilePath = ""
 	cfg.explicitRX_TX_Workers = defined["RX_TX_Workers"]
 	cfg.explicitTunnelProcessWorkers = defined["TunnelProcessWorkers"]
+	if err := applyProfile(&cfg, defined); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
 }
 
