@@ -155,6 +155,74 @@ PACKET_DUPLICATION_COUNT = 5
 	}
 }
 
+func TestProfileMobileSnapshot(t *testing.T) {
+	cfg := loadConfigForProfile(t, `
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["v.domain.com"]
+DATA_ENCRYPTION_METHOD = 1
+ENCRYPTION_KEY = "secret"
+PROFILE = "mobile"
+`)
+	got := snapshotConfig(t, cfg)
+	assertGoldenSnapshot(t, filepath.Join("testdata", "profile_mobile.golden.json"), got)
+}
+
+func TestProfileMobileAppliesExpectedFields(t *testing.T) {
+	cfg := loadConfigForProfile(t, `
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["v.domain.com"]
+DATA_ENCRYPTION_METHOD = 1
+ENCRYPTION_KEY = "secret"
+PROFILE = "mobile"
+`)
+
+	if cfg.PingCooldownIntervalSeconds != 4.0 {
+		t.Errorf("PingCooldownIntervalSeconds: got=%v want=4.0", cfg.PingCooldownIntervalSeconds)
+	}
+	if cfg.PingColdIntervalSeconds != 30.0 {
+		t.Errorf("PingColdIntervalSeconds: got=%v want=30.0", cfg.PingColdIntervalSeconds)
+	}
+	if cfg.PingWarmThresholdSeconds != 16.0 {
+		t.Errorf("PingWarmThresholdSeconds: got=%v want=16.0", cfg.PingWarmThresholdSeconds)
+	}
+	if cfg.PingCoolThresholdSeconds != 40.0 {
+		t.Errorf("PingCoolThresholdSeconds: got=%v want=40.0", cfg.PingCoolThresholdSeconds)
+	}
+	if cfg.PingColdThresholdSeconds != 60.0 {
+		t.Errorf("PingColdThresholdSeconds: got=%v want=60.0", cfg.PingColdThresholdSeconds)
+	}
+	if cfg.PacketDuplicationCount != 1 {
+		t.Errorf("PacketDuplicationCount: got=%d want=1", cfg.PacketDuplicationCount)
+	}
+	if cfg.ARQDataNackInitialDelaySeconds != 0.6 {
+		t.Errorf("ARQDataNackInitialDelaySeconds: got=%v want=0.6", cfg.ARQDataNackInitialDelaySeconds)
+	}
+	if cfg.LocalDNSCacheMaxRecords != 5000 {
+		t.Errorf("LocalDNSCacheMaxRecords: got=%d want=5000", cfg.LocalDNSCacheMaxRecords)
+	}
+}
+
+func TestProfileMobileExplicitKeyOverridesPreset(t *testing.T) {
+	cfg := loadConfigForProfile(t, `
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["v.domain.com"]
+DATA_ENCRYPTION_METHOD = 1
+ENCRYPTION_KEY = "secret"
+PROFILE = "mobile"
+PACKET_DUPLICATION_COUNT = 4
+PING_COOLDOWN_INTERVAL_SECONDS = 1.5
+`)
+	if cfg.PacketDuplicationCount != 4 {
+		t.Errorf("explicit PACKET_DUPLICATION_COUNT should win: got=%d want=4", cfg.PacketDuplicationCount)
+	}
+	if cfg.PingCooldownIntervalSeconds != 1.5 {
+		t.Errorf("explicit PING_COOLDOWN_INTERVAL_SECONDS should win: got=%v want=1.5", cfg.PingCooldownIntervalSeconds)
+	}
+	if cfg.PingColdIntervalSeconds != 30.0 {
+		t.Errorf("untouched mobile knob should still apply: got=%v want=30.0", cfg.PingColdIntervalSeconds)
+	}
+}
+
 func TestApplyProfileUnknownFieldNamesAreCaught(t *testing.T) {
 	cfgType := reflect.TypeOf(ClientConfig{})
 	overrideType := reflect.TypeOf(profileOverrides{})

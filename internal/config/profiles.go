@@ -46,6 +46,28 @@ type profileOverrides struct {
 // "" and "custom" are also accepted as no-ops in applyProfile.
 var profilePresets = map[string]profileOverrides{
 	"stable": {},
+
+	// mobile: tuned for high-latency, battery-constrained, often-flaky links.
+	// Doubles the keepalive cadence ladder (cooldown/cold and the matching
+	// warm/cool/cold thresholds) so radios get more time to sleep, drops
+	// packet duplication to the floor to save bandwidth, raises the data NACK
+	// initial delay so a single jittery RTT doesn't trigger a flood of resend
+	// requests, and shrinks the local DNS cache to keep memory pressure down.
+	//
+	// B-series will later govern duplication via MIN_DUP/MAX_DUP. Until B2/B3
+	// land, this preset sets PacketDuplicationCount=1 directly; once B-series
+	// lands the preset must be extended to set MIN_DUP/MAX_DUP coherently so
+	// adaptive duplication and the fixed dup count don't fight each other.
+	"mobile": {
+		PingCooldownIntervalSeconds:    floatPtr(4.0),
+		PingColdIntervalSeconds:        floatPtr(30.0),
+		PingWarmThresholdSeconds:       floatPtr(16.0),
+		PingCoolThresholdSeconds:       floatPtr(40.0),
+		PingColdThresholdSeconds:       floatPtr(60.0),
+		PacketDuplicationCount:         intPtr(1),
+		ARQDataNackInitialDelaySeconds: floatPtr(0.6),
+		LocalDNSCacheMaxRecords:        intPtr(5000),
+	},
 }
 
 func applyProfile(cfg *ClientConfig, defined map[string]bool) error {
