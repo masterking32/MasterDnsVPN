@@ -68,6 +68,25 @@ var profilePresets = map[string]profileOverrides{
 		ARQDataNackInitialDelaySeconds: floatPtr(0.6),
 		LocalDNSCacheMaxRecords:        intPtr(5000),
 	},
+
+	// censored: tuned for hostile/lossy paths where survivability beats every
+	// other concern. High duplication, more aggressive ping cadence so a
+	// failing resolver is detected sooner, a wider MTU search window so the
+	// MTU prober can find any path that works, more retry-friendly ARQ
+	// parameters, and BASE_ENCODE_DATA on by default for resolvers that
+	// prefer label-safe payloads.
+	"censored": {
+		PacketDuplicationCount:        intPtr(4),
+		PingAggressiveIntervalSeconds: floatPtr(0.050),
+		PingLazyIntervalSeconds:       floatPtr(0.500),
+		MinUploadMTU:                  intPtr(28),
+		MinDownloadMTU:                intPtr(60),
+		MaxUploadMTU:                  intPtr(200),
+		MaxDownloadMTU:                intPtr(900),
+		ARQInitialRTOSeconds:          floatPtr(2.0),
+		ARQMaxDataRetries:             intPtr(2400),
+		BaseEncodeData:                boolPtr(true),
+	},
 }
 
 func applyProfile(cfg *ClientConfig, defined map[string]bool) error {

@@ -223,6 +223,80 @@ PING_COOLDOWN_INTERVAL_SECONDS = 1.5
 	}
 }
 
+func TestProfileCensoredSnapshot(t *testing.T) {
+	cfg := loadConfigForProfile(t, `
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["v.domain.com"]
+DATA_ENCRYPTION_METHOD = 1
+ENCRYPTION_KEY = "secret"
+PROFILE = "censored"
+`)
+	got := snapshotConfig(t, cfg)
+	assertGoldenSnapshot(t, filepath.Join("testdata", "profile_censored.golden.json"), got)
+}
+
+func TestProfileCensoredAppliesExpectedFields(t *testing.T) {
+	cfg := loadConfigForProfile(t, `
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["v.domain.com"]
+DATA_ENCRYPTION_METHOD = 1
+ENCRYPTION_KEY = "secret"
+PROFILE = "censored"
+`)
+
+	if cfg.PacketDuplicationCount != 4 {
+		t.Errorf("PacketDuplicationCount: got=%d want=4", cfg.PacketDuplicationCount)
+	}
+	if cfg.PingAggressiveIntervalSeconds != 0.050 {
+		t.Errorf("PingAggressiveIntervalSeconds: got=%v want=0.050", cfg.PingAggressiveIntervalSeconds)
+	}
+	if cfg.PingLazyIntervalSeconds != 0.500 {
+		t.Errorf("PingLazyIntervalSeconds: got=%v want=0.500", cfg.PingLazyIntervalSeconds)
+	}
+	if cfg.MinUploadMTU != 28 {
+		t.Errorf("MinUploadMTU: got=%d want=28", cfg.MinUploadMTU)
+	}
+	if cfg.MinDownloadMTU != 60 {
+		t.Errorf("MinDownloadMTU: got=%d want=60", cfg.MinDownloadMTU)
+	}
+	if cfg.MaxUploadMTU != 200 {
+		t.Errorf("MaxUploadMTU: got=%d want=200", cfg.MaxUploadMTU)
+	}
+	if cfg.MaxDownloadMTU != 900 {
+		t.Errorf("MaxDownloadMTU: got=%d want=900", cfg.MaxDownloadMTU)
+	}
+	if cfg.ARQInitialRTOSeconds != 2.0 {
+		t.Errorf("ARQInitialRTOSeconds: got=%v want=2.0", cfg.ARQInitialRTOSeconds)
+	}
+	if cfg.ARQMaxDataRetries != 2400 {
+		t.Errorf("ARQMaxDataRetries: got=%d want=2400", cfg.ARQMaxDataRetries)
+	}
+	if !cfg.BaseEncodeData {
+		t.Errorf("BaseEncodeData: got=false want=true")
+	}
+}
+
+func TestProfileCensoredExplicitKeyOverridesPreset(t *testing.T) {
+	cfg := loadConfigForProfile(t, `
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["v.domain.com"]
+DATA_ENCRYPTION_METHOD = 1
+ENCRYPTION_KEY = "secret"
+PROFILE = "censored"
+PACKET_DUPLICATION_COUNT = 2
+BASE_ENCODE_DATA = false
+`)
+	if cfg.PacketDuplicationCount != 2 {
+		t.Errorf("explicit PACKET_DUPLICATION_COUNT should win: got=%d want=2", cfg.PacketDuplicationCount)
+	}
+	if cfg.BaseEncodeData {
+		t.Errorf("explicit BASE_ENCODE_DATA=false should win over preset true")
+	}
+	if cfg.MinUploadMTU != 28 {
+		t.Errorf("untouched censored knob should still apply: got=%d want=28", cfg.MinUploadMTU)
+	}
+}
+
 func TestApplyProfileUnknownFieldNamesAreCaught(t *testing.T) {
 	cfgType := reflect.TypeOf(ClientConfig{})
 	overrideType := reflect.TypeOf(profileOverrides{})
