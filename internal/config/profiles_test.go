@@ -297,6 +297,68 @@ BASE_ENCODE_DATA = false
 	}
 }
 
+func TestProfileThroughputSnapshot(t *testing.T) {
+	cfg := loadConfigForProfile(t, `
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["v.domain.com"]
+DATA_ENCRYPTION_METHOD = 1
+ENCRYPTION_KEY = "secret"
+PROFILE = "throughput"
+`)
+	got := snapshotConfig(t, cfg)
+	assertGoldenSnapshot(t, filepath.Join("testdata", "profile_throughput.golden.json"), got)
+}
+
+func TestProfileThroughputAppliesExpectedFields(t *testing.T) {
+	cfg := loadConfigForProfile(t, `
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["v.domain.com"]
+DATA_ENCRYPTION_METHOD = 1
+ENCRYPTION_KEY = "secret"
+PROFILE = "throughput"
+`)
+
+	if cfg.PacketDuplicationCount != 1 {
+		t.Errorf("PacketDuplicationCount: got=%d want=1", cfg.PacketDuplicationCount)
+	}
+	if cfg.ResolverBalancingStrategy != 4 {
+		t.Errorf("ResolverBalancingStrategy: got=%d want=4", cfg.ResolverBalancingStrategy)
+	}
+	if cfg.UploadCompressionType != 1 {
+		t.Errorf("UploadCompressionType: got=%d want=1", cfg.UploadCompressionType)
+	}
+	if cfg.DownloadCompressionType != 1 {
+		t.Errorf("DownloadCompressionType: got=%d want=1", cfg.DownloadCompressionType)
+	}
+	if cfg.MinUploadMTU != 120 || cfg.MaxUploadMTU != 150 {
+		t.Errorf("upload MTU range: got=%d..%d want=120..150", cfg.MinUploadMTU, cfg.MaxUploadMTU)
+	}
+	if cfg.MinDownloadMTU != 400 || cfg.MaxDownloadMTU != 500 {
+		t.Errorf("download MTU range: got=%d..%d want=400..500", cfg.MinDownloadMTU, cfg.MaxDownloadMTU)
+	}
+}
+
+func TestProfileThroughputExplicitKeyOverridesPreset(t *testing.T) {
+	cfg := loadConfigForProfile(t, `
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["v.domain.com"]
+DATA_ENCRYPTION_METHOD = 1
+ENCRYPTION_KEY = "secret"
+PROFILE = "throughput"
+PACKET_DUPLICATION_COUNT = 3
+RESOLVER_BALANCING_STRATEGY = 2
+`)
+	if cfg.PacketDuplicationCount != 3 {
+		t.Errorf("explicit PACKET_DUPLICATION_COUNT should win: got=%d want=3", cfg.PacketDuplicationCount)
+	}
+	if cfg.ResolverBalancingStrategy != 2 {
+		t.Errorf("explicit RESOLVER_BALANCING_STRATEGY should win: got=%d want=2", cfg.ResolverBalancingStrategy)
+	}
+	if cfg.UploadCompressionType != 1 {
+		t.Errorf("untouched throughput knob should still apply: got=%d want=1", cfg.UploadCompressionType)
+	}
+}
+
 func TestApplyProfileUnknownFieldNamesAreCaught(t *testing.T) {
 	cfgType := reflect.TypeOf(ClientConfig{})
 	overrideType := reflect.TypeOf(profileOverrides{})

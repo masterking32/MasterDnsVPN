@@ -87,6 +87,26 @@ var profilePresets = map[string]profileOverrides{
 		ARQMaxDataRetries:             intPtr(2400),
 		BaseEncodeData:                boolPtr(true),
 	},
+
+	// throughput: optimized for raw bandwidth on healthy paths. Drops
+	// duplication to 1, picks the BalancingLowestLatency (4) selector so
+	// traffic prefers the fastest resolver, turns on ZSTD compression in
+	// both directions, and narrows the MTU search range so the prober can
+	// converge fast on a stable working size instead of widening probes.
+	//
+	// This preset deliberately trades duplication-for-survivability for raw
+	// bandwidth. It is therefore an explicit operator choice and must never
+	// be a silent default — operators opt in via PROFILE = "throughput".
+	"throughput": {
+		PacketDuplicationCount:    intPtr(1),
+		ResolverBalancingStrategy: intPtr(4),
+		UploadCompressionType:     intPtr(1),
+		DownloadCompressionType:   intPtr(1),
+		MinUploadMTU:              intPtr(120),
+		MaxUploadMTU:              intPtr(150),
+		MinDownloadMTU:            intPtr(400),
+		MaxDownloadMTU:            intPtr(500),
+	},
 }
 
 func applyProfile(cfg *ClientConfig, defined map[string]bool) error {
