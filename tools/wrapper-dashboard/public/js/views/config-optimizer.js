@@ -1,6 +1,15 @@
 import { $, escapeHtml } from "../dom.js";
 
 export function renderRecommendations(state) {
+  const pending = state.recommendations.items.filter((item) => item.current !== item.recommended && !item.requiresServerChange).length;
+  const coordinated = state.recommendations.items.filter((item) => item.requiresServerChange).length;
+  $("optimizerSummary").innerHTML = `
+    <div class="validation-item">
+      <span class="tag ${pending ? "warn" : "ok"}">${pending ? "pending" : "applied"}</span>
+      Balanced direct settings ${pending ? `have ${pending} pending TOML change(s)` : "are already applied"}.
+      ${coordinated ? `${coordinated} security recommendation requires matching server config.` : ""}
+    </div>
+  `;
   $("recommendations").innerHTML = state.recommendations.items.map((item) => {
     const changed = item.current !== item.recommended;
     const tag = item.requiresServerChange ? "warn" : changed ? "running" : "ok";

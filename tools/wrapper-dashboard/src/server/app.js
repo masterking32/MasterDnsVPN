@@ -516,7 +516,9 @@ function buildDynamicRecommendations(config) {
     generatedAt: new Date().toISOString(),
     networkContext: context,
     ignored: Array.from(ignoredRecommendationIds),
-    recommendations: recs.filter((rec) => !ignoredRecommendationIds.has(rec.id))
+    recommendations: recs
+      .map((rec) => enrichRecommendation(rec, config))
+      .filter((rec) => !ignoredRecommendationIds.has(rec.id))
   };
 }
 
@@ -536,12 +538,33 @@ function ruleRecommendation(rules, id, override) {
   };
 }
 
+function enrichRecommendation(rec, config) {
+  const patchPreview = Object.entries(rec.configPatch || {}).map(([key, recommended]) => {
+    const current = config[key];
+    return {
+      key,
+      current,
+      recommended,
+      changes: JSON.stringify(current) !== JSON.stringify(recommended)
+    };
+  });
+  const changeCount = patchPreview.filter((item) => item.changes).length;
+  return {
+    ...rec,
+    patchPreview,
+    hasConfigChange: changeCount > 0,
+    patchState: patchPreview.length === 0 ? "advisory" : changeCount > 0 ? "pending" : "already-applied"
+  };
+}
+
 function previewRecommendationPatch(body) {
   const selectedIds = new Set((body.ids || []).map(String));
   const dynamic = buildDynamicRecommendations(parseToml(readText(CONFIG_FILE))).recommendations;
   const patch = {};
+  const selectedRecommendations = [];
   for (const rec of dynamic) {
     if (selectedIds.size && !selectedIds.has(rec.id)) continue;
+    selectedRecommendations.push(rec);
     if (rec.requiresServerChange) continue;
     for (const [key, value] of Object.entries(rec.configPatch || {})) {
       if (["DOMAINS", "ENCRYPTION_KEY", "DATA_ENCRYPTION_METHOD"].includes(key)) continue;
@@ -553,8 +576,22 @@ function previewRecommendationPatch(body) {
   return {
     changed: original !== updated,
     patch,
+    selected: selectedRecommendations.map((rec) => ({
+      id: rec.id,
+      patchState: rec.patchState,
+      patchPreview: rec.patchPreview
+    })),
+    explanation: previewExplanation(selectedRecommendations, original !== updated),
     diff: simpleDiff(original, updated)
   };
+}
+
+function previewExplanation(recommendations, changed) {
+  if (changed) return "Preview generated. Nothing was saved.";
+  if (!recommendations.length) return "No selected recommendations were found.";
+  if (recommendations.every((rec) => rec.patchState === "advisory")) return "Selected recommendations are advisory and do not include TOML changes.";
+  if (recommendations.every((rec) => rec.patchState !== "pending")) return "Selected TOML recommendations are already applied.";
+  return "Selected dynamic recommendations do not change TOML.";
 }
 
 function buildAIContext(config) {

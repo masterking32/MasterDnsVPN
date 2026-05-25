@@ -70,10 +70,12 @@ button {
   border-radius: 6px;
   font: inherit;
   cursor: pointer;
+  transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease, transform 140ms ease;
 }
 
 button:hover {
   border-color: var(--accent);
+  transform: translateY(-1px);
 }
 
 button.active,
@@ -138,6 +140,19 @@ button.active,
   box-shadow: var(--shadow);
   padding: 16px;
   min-width: 0;
+  animation: panel-in 160ms ease;
+}
+
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .wide {
@@ -270,6 +285,30 @@ button.active,
 
 .rec-actions {
   margin-top: 10px;
+}
+
+.patch-preview {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.patch-preview code {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  white-space: normal;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 8px;
+  background: #eef6f5;
+  color: var(--ok);
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.patch-preview code.pending {
+  background: #fff7ed;
+  color: var(--warn);
 }
 
 .evidence {

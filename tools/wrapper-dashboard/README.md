@@ -53,6 +53,8 @@ committed unless intentionally adding fixtures.
 - Dynamic AI optimizer from parsed logs and rules.
 - Filtered/unfiltered/unknown network-context tagging so mixed logs do not
   accidentally tune the filtered profile from unfiltered resolver recovery.
+- Live patch status for each recommendation, showing whether a TOML change is
+  pending, already applied, or advisory-only.
 - Known-good resolver export.
 - Process start/stop wrapper for the headless client.
 - SSE-driven UI refresh.

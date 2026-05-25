@@ -46,8 +46,9 @@ export function renderAIOptimizer(state, actions) {
         <div class="rec-meta">
           <span>confidence: ${escapeHtml(item.confidence || "medium")}</span>
           <span>${item.requiresRestart ? "restart required" : "live observation"}</span>
-          <span>${patchKeys.length ? `patch: ${escapeHtml(patchKeys.join(", "))}` : "advisory"}</span>
+          <span>${patchLabel(item, patchKeys)}</span>
         </div>
+        ${renderPatchPreview(item.patchPreview || [])}
         <div class="rec-actions">
           <button type="button" data-preview="${escapeHtml(item.id)}">Preview</button>
           <button type="button" data-why="${escapeHtml(evidenceId)}">Why?</button>
@@ -85,4 +86,23 @@ function severityTag(severity) {
   if (severity === "error") return "error";
   if (severity === "warn") return "warn";
   return "ok";
+}
+
+function patchLabel(item, patchKeys) {
+  if (!patchKeys.length || item.patchState === "advisory") return "advisory only";
+  if (item.patchState === "already-applied") return `already applied: ${escapeHtml(patchKeys.join(", "))}`;
+  return `will change: ${escapeHtml(patchKeys.join(", "))}`;
+}
+
+function renderPatchPreview(items) {
+  if (!items.length) return "";
+  return `
+    <div class="patch-preview">
+      ${items.map((item) => `
+        <code class="${item.changes ? "pending" : "applied"}">
+          ${escapeHtml(item.key)}: ${escapeHtml(JSON.stringify(item.current))} -> ${escapeHtml(JSON.stringify(item.recommended))}
+        </code>
+      `).join("")}
+    </div>
+  `;
 }

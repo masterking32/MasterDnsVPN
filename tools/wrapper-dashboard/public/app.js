@@ -29,6 +29,9 @@ window.addEventListener("DOMContentLoaded", () => {
   });
   refresh();
   loadEditor();
+  setInterval(() => {
+    if (!document.hidden) refresh();
+  }, 5000);
 });
 
 function bindControls() {
@@ -143,8 +146,8 @@ async function previewDynamicPatch(ids = null) {
   const data = await postJson("/api/recommendations/preview-patch", { ids: selectedIds });
   $("dynamicDiff").textContent = data.diff.length
     ? data.diff.map((row) => `${row.type === "add" ? "+" : "-"}${row.line}: ${row.text}`).join("\n")
-    : "Selected dynamic recommendations do not change TOML.";
-  setAIStatus(data.changed ? "Preview generated. Nothing was saved." : "No TOML change for this selection.", data.changed ? "ok" : "");
+    : data.explanation || "Selected dynamic recommendations do not change TOML.";
+  setAIStatus(data.explanation || (data.changed ? "Preview generated. Nothing was saved." : "No TOML change for this selection."), data.changed ? "ok" : "");
 }
 
 async function copyAIContext() {
