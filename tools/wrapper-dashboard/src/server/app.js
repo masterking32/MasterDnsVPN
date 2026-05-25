@@ -139,6 +139,10 @@ async function handleApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/recommendations/dynamic") {
     return sendJson(res, 200, buildDynamicRecommendations(parseToml(readText(CONFIG_FILE))));
   }
+  if (req.method === "POST" && url.pathname === "/api/network-context") {
+    const body = await readRequestJson(req);
+    return sendJson(res, 200, setNetworkContext(body.context));
+  }
   if (req.method === "GET" && url.pathname === "/api/ai-context") {
     return sendJson(res, 200, buildAIContext(parseToml(readText(CONFIG_FILE))));
   }
@@ -155,7 +159,8 @@ async function handleApi(req, res, url) {
     return sendJson(res, 200, { ignored: Array.from(ignoredRecommendationIds) });
   }
   if (req.method === "POST" && url.pathname === "/api/resolvers/export-good") {
-    return sendJson(res, 200, exportGoodResolvers());
+    const body = await readRequestJson(req);
+    return sendJson(res, 200, exportGoodResolvers(body.context));
   }
   if (req.method === "GET" && url.pathname === "/api/preview-balanced") {
     return sendJson(res, 200, previewBalanced());
@@ -350,9 +355,12 @@ function buildTelemetrySnapshot(config) {
   const validRatio = metrics.mtuTotal ? (metrics.mtuValid || 0) / metrics.mtuTotal : null;
   const now = Date.now();
   const recentStreams = telemetry.streams.timestamps.filter((time) => now - time <= 60_000);
-  const activeResolvers = telemetry.resolvers.activeTotal ?? metrics.mtuValid ?? 0;
+  const context = contextSummary();
+  const evaluationContext = effectiveNetworkContext(context.selected);
+  const activeResolvers = contextActiveResolvers(evaluationContext);
   return {
     generatedAt: new Date().toISOString(),
+    networkContext: context,
     config: {
       resolverStrategy: config.RESOLVER_BALANCING_STRATEGY,
       packetDuplication: config.PACKET_DUPLICATION_COUNT,
@@ -394,7 +402,7 @@ function buildTelemetrySnapshot(config) {
       activeTotal: activeResolvers,
       disabled: Array.from(telemetry.resolvers.disabled.values()).slice(-100),
       reactivated: Array.from(telemetry.resolvers.reactivated.values()).slice(-100),
-      knownGood: knownGoodResolvers().slice(0, 200)
+      knownGood: knownGoodResolvers(evaluationContext).slice(0, 200)
     },
     scores: buildOptimizerScores(validRatio, activeResolvers, recentStreams.length),
     recentImportantEvents: importantEvents(80)
@@ -404,15 +412,17 @@ function buildTelemetrySnapshot(config) {
 function buildDynamicRecommendations(config) {
   const rules = loadOptimizerRules();
   const recs = [];
+  const context = contextSummary();
+  const selectedContext = effectiveNetworkContext(context.selected);
   const validRatio = metrics.mtuTotal ? (metrics.mtuValid || 0) / metrics.mtuTotal : null;
   const rejectReasons = Object.fromEntries(telemetry.mtu.rejectsByReason);
   const uploadRejects = rejectReasons.UPLOAD_MTU || 0;
   const downloadRejects = rejectReasons.DOWNLOAD_MTU || 0;
   const recentStreamRate = telemetry.streams.timestamps.filter((time) => Date.now() - time <= 60_000).length;
-  const activeTotal = telemetry.resolvers.activeTotal ?? metrics.mtuValid ?? 0;
+  const activeTotal = contextActiveResolvers(selectedContext);
   const stateDrift = detectStateDrift();
 
-  if (validRatio !== null && validRatio < 0.01 && telemetry.session.initialized) {
+  if (selectedContext !== "unfiltered" && validRatio !== null && validRatio < 0.01 && telemetry.session.initialized) {
     recs.push(ruleRecommendation(rules, "low-valid-ratio-session-ok", {
       configPatch: {
         SAVE_MTU_SERVERS_TO_FILE: true,
@@ -425,7 +435,7 @@ function buildDynamicRecommendations(config) {
     }));
   }
 
-  if (uploadRejects > downloadRejects && config.MIN_UPLOAD_MTU === config.MAX_UPLOAD_MTU && config.MIN_UPLOAD_MTU <= 64) {
+  if (selectedContext !== "unfiltered" && uploadRejects > downloadRejects && config.MIN_UPLOAD_MTU === config.MAX_UPLOAD_MTU && config.MIN_UPLOAD_MTU <= 64) {
     recs.push(ruleRecommendation(rules, "keep-fixed-low-upload-mtu", {
       configPatch: {
         MIN_UPLOAD_MTU: config.MIN_UPLOAD_MTU,
@@ -438,7 +448,7 @@ function buildDynamicRecommendations(config) {
     }));
   }
 
-  if (downloadRejects > 0 && metrics.syncedDownloadMtu && config.MAX_DOWNLOAD_MTU > metrics.syncedDownloadMtu) {
+  if (selectedContext !== "unfiltered" && downloadRejects > 0 && metrics.syncedDownloadMtu && config.MAX_DOWNLOAD_MTU > metrics.syncedDownloadMtu) {
     recs.push(ruleRecommendation(rules, "lower-download-mtu-upper-bound", {
       configPatch: {
         MAX_DOWNLOAD_MTU: metrics.syncedDownloadMtu
@@ -450,7 +460,7 @@ function buildDynamicRecommendations(config) {
     }));
   }
 
-  if (telemetry.compression.uploadDisabledReason && telemetry.compression.effectiveUpload === "OFF") {
+  if (selectedContext !== "unfiltered" && telemetry.compression.uploadDisabledReason && telemetry.compression.effectiveUpload === "OFF") {
     recs.push(ruleRecommendation(rules, "disable-upload-compression-low-mtu", {
       configPatch: {
         UPLOAD_COMPRESSION_TYPE: 0,
@@ -463,12 +473,12 @@ function buildDynamicRecommendations(config) {
     }));
   }
 
-  if (telemetry.resolvers.reactivated.size > 0) {
+  if (telemetry.resolvers.reactivated.size > 0 && selectedContext !== "filtered") {
     recs.push(ruleRecommendation(rules, "wait-and-export-reactivated-resolvers", {
       configPatch: {},
       evidence: [
         `${telemetry.resolvers.reactivated.size} resolvers reactivated after startup.`,
-        `Active resolver total reached ${activeTotal}.`
+        `Active resolver total reached ${telemetry.context.reactivationBurst.maxActive || activeTotal}.`
       ]
     }));
   }
@@ -504,6 +514,7 @@ function buildDynamicRecommendations(config) {
 
   return {
     generatedAt: new Date().toISOString(),
+    networkContext: context,
     ignored: Array.from(ignoredRecommendationIds),
     recommendations: recs.filter((rec) => !ignoredRecommendationIds.has(rec.id))
   };
@@ -577,6 +588,7 @@ function buildAIContext(config) {
   return {
     generatedAt: new Date().toISOString(),
     version: BINARY ? basename(BINARY) : null,
+    networkContext: contextSummary(),
     config: redactedConfig,
     telemetry: buildTelemetrySnapshot(config),
     recommendations: buildDynamicRecommendations(config).recommendations,
@@ -690,20 +702,38 @@ function parseLogLine(item) {
   const line = item.line;
   let type = null;
   let details = {};
-  if (/session.*init|initialized|SESSION_ACCEPT/i.test(line)) {
+  if (/Async Runtime Initialized:/i.test(line)) {
+    type = "runtime";
+    const match = line.match(/Async Runtime Initialized:\s+(\d+)\s+RX\/TX Workers,\s+(\d+)\s+Processors/i);
+    if (match) {
+      telemetry.runtime.rxTxWorkers = Number(match[1]);
+      telemetry.runtime.processWorkers = Number(match[2]);
+      details = { rxTxWorkers: telemetry.runtime.rxTxWorkers, processWorkers: telemetry.runtime.processWorkers };
+    }
+  } else if (/session.*init|initialized|SESSION_ACCEPT/i.test(line)) {
     type = "session";
     const attempt = line.match(/Session init attempt with\s+(\S+)\s+and resolver\s+(\S+)/i);
     const success = line.match(/Session Initialized Successfully \(ID:\s*(\d+)\)/i);
     if (attempt) {
+      telemetry.session.attempts += 1;
       telemetry.session.initDomain = attempt[1];
       telemetry.session.initResolver = attempt[2];
-      details = { domain: attempt[1], resolver: attempt[2], phase: "attempt" };
+      details = { domain: attempt[1], resolver: attempt[2], phase: "attempt", attempts: telemetry.session.attempts };
     }
     if (success) {
       runStatus = "connected";
       telemetry.session.initialized = true;
       telemetry.session.id = Number(success[1]);
       details = { id: telemetry.session.id, phase: "success" };
+    }
+    if (/Session initialization failed/i.test(line)) {
+      telemetry.session.failures += 1;
+      details = { phase: "failure", failures: telemetry.session.failures };
+    }
+    const retry = line.match(/Session init retry backoff:\s+(\S+)/i);
+    if (retry) {
+      telemetry.session.retries += 1;
+      details = { phase: "retry", retries: telemetry.session.retries, backoff: retry[1] };
     }
   } else if (/MTU discovery.*start|Starting MTU/i.test(line)) {
     type = "mtu-start";
@@ -744,14 +774,6 @@ function parseLogLine(item) {
       telemetry.compression.effectiveDownload = match[2];
       details = { effectiveUpload: match[1], effectiveDownload: match[2] };
     }
-  } else if (/Async Runtime Initialized:/i.test(line)) {
-    type = "runtime";
-    const match = line.match(/Async Runtime Initialized:\s+(\d+)\s+RX\/TX Workers,\s+(\d+)\s+Processors/i);
-    if (match) {
-      telemetry.runtime.rxTxWorkers = Number(match[1]);
-      telemetry.runtime.processWorkers = Number(match[2]);
-      details = { rxTxWorkers: telemetry.runtime.rxTxWorkers, processWorkers: telemetry.runtime.processWorkers };
-    }
   } else if (/New SOCKS5 TCP CONNECT/i.test(line)) {
     type = "stream";
     const match = line.match(/CONNECT to\s+(.+?):(\d+),\s+Stream ID:\s+(\d+)/i);
@@ -770,6 +792,9 @@ function parseLogLine(item) {
       const entry = { resolver: match[2], reason: match[1], remaining: Number(match[3]), time: item.time };
       telemetry.resolvers.disabled.set(entry.resolver, entry);
       telemetry.resolvers.activeTotal = entry.remaining;
+      telemetry.context.lowestActiveAfterDisable = telemetry.context.lowestActiveAfterDisable === null
+        ? entry.remaining
+        : Math.min(telemetry.context.lowestActiveAfterDisable, entry.remaining);
       details = entry;
     }
   } else if (/DNS Resolver Reactivated/i.test(line)) {
@@ -779,6 +804,7 @@ function parseLogLine(item) {
       const entry = { resolver: match[1], activeTotal: Number(match[2]), time: item.time };
       telemetry.resolvers.reactivated.set(entry.resolver, entry);
       telemetry.resolvers.activeTotal = entry.activeTotal;
+      recordReactivationBurst(entry);
       details = entry;
     }
   } else if (/timeout/i.test(line)) {
@@ -825,6 +851,7 @@ function parseLogLine(item) {
     if (parsedEvents.length > 300) parsedEvents.shift();
     telemetry.events.push(event);
     if (telemetry.events.length > 1000) telemetry.events.shift();
+    updateContextDetection();
     broadcast({ type: "parsed-event", payload: event });
   }
 }
@@ -1068,7 +1095,10 @@ function defaultTelemetry() {
       initialized: false,
       id: null,
       initDomain: null,
-      initResolver: null
+      initResolver: null,
+      attempts: 0,
+      failures: 0,
+      retries: 0
     },
     runtime: {
       rxTxWorkers: null,
@@ -1083,6 +1113,19 @@ function defaultTelemetry() {
       activeTotal: null,
       disabled: new Map(),
       reactivated: new Map()
+    },
+    context: {
+      selected: "unknown",
+      detected: "unknown",
+      mixed: false,
+      notes: [],
+      lowestActiveAfterDisable: null,
+      reactivationBurst: {
+        count: 0,
+        firstAt: null,
+        lastAt: null,
+        maxActive: null
+      }
     }
   };
 }
@@ -1203,6 +1246,7 @@ function persistRunSummary(code, signal) {
     signal: signal || null,
     runtimeSeconds: startedAt ? Math.floor((Date.now() - startedAt) / 1000) : null,
     metrics: { ...metrics },
+    networkContext: contextSummary(),
     telemetry: {
       mtu: buildTelemetrySnapshot(config).mtu,
       compression: telemetry.compression,
@@ -1251,19 +1295,93 @@ function upsertByKey(list, item, key) {
   else list.push(item);
 }
 
-function knownGoodResolvers() {
+function setNetworkContext(context) {
+  const normalized = normalizeNetworkContext(context);
+  telemetry.context.selected = normalized;
+  return contextSummary();
+}
+
+function normalizeNetworkContext(context) {
+  return ["filtered", "unfiltered", "unknown"].includes(context) ? context : "unknown";
+}
+
+function recordReactivationBurst(entry) {
+  const burst = telemetry.context.reactivationBurst;
+  burst.count += 1;
+  burst.firstAt ||= entry.time;
+  burst.lastAt = entry.time;
+  burst.maxActive = Math.max(burst.maxActive || 0, entry.activeTotal);
+}
+
+function updateContextDetection() {
+  const validRatio = metrics.mtuTotal ? (metrics.mtuValid || 0) / metrics.mtuTotal : null;
+  const filteredSignals = [
+    validRatio !== null && validRatio < 0.01,
+    telemetry.session.failures > 0,
+    telemetry.resolvers.disabled.size > 0,
+    telemetry.context.lowestActiveAfterDisable !== null && telemetry.context.lowestActiveAfterDisable <= 10
+  ].filter(Boolean).length;
+  const unfilteredSignals = [
+    telemetry.context.reactivationBurst.count >= 20,
+    (telemetry.context.reactivationBurst.maxActive || 0) >= 50
+  ].filter(Boolean).length;
+  telemetry.context.mixed = filteredSignals >= 2 && unfilteredSignals >= 1;
+  telemetry.context.detected = telemetry.context.mixed
+    ? "mixed"
+    : filteredSignals >= 2
+      ? "filtered"
+      : unfilteredSignals >= 1
+        ? "unfiltered"
+        : "unknown";
+  const notes = [];
+  if (filteredSignals >= 2) notes.push("Filtered-network signals: low valid ratio, session retries/failures, resolver loss, or very low active count.");
+  if (unfilteredSignals >= 1) notes.push(`Unfiltered-network signals: ${telemetry.context.reactivationBurst.count} resolver reactivations and active total up to ${telemetry.context.reactivationBurst.maxActive || 0}.`);
+  if (telemetry.context.mixed) notes.push("Mixed log context detected; do not use unfiltered reactivation bursts to tune the filtered profile.");
+  telemetry.context.notes = notes;
+}
+
+function contextSummary() {
+  updateContextDetection();
+  return {
+    selected: telemetry.context.selected,
+    detected: telemetry.context.detected,
+    mixed: telemetry.context.mixed,
+    notes: telemetry.context.notes,
+    lowestActiveAfterDisable: telemetry.context.lowestActiveAfterDisable,
+    reactivationBurst: telemetry.context.reactivationBurst
+  };
+}
+
+function contextActiveResolvers(context = telemetry.context.selected) {
+  context = effectiveNetworkContext(context);
+  if (context === "filtered") return telemetry.context.lowestActiveAfterDisable ?? metrics.mtuValid ?? 0;
+  if (context === "unfiltered") return telemetry.context.reactivationBurst.maxActive ?? telemetry.resolvers.activeTotal ?? metrics.mtuValid ?? 0;
+  return telemetry.resolvers.activeTotal ?? metrics.mtuValid ?? 0;
+}
+
+function knownGoodResolvers(context = telemetry.context.selected) {
+  context = effectiveNetworkContext(context);
   const disabled = new Set(telemetry.resolvers.disabled.keys());
-  const candidates = [
-    ...telemetry.mtu.validResolvers.map((item) => item.resolver),
-    ...Array.from(telemetry.resolvers.reactivated.keys())
-  ];
+  const baseCandidates = telemetry.mtu.validResolvers.map((item) => item.resolver);
+  const candidates = context === "filtered"
+    ? baseCandidates
+    : [...baseCandidates, ...Array.from(telemetry.resolvers.reactivated.keys())];
   return Array.from(new Set(candidates)).filter((resolver) => resolver && !disabled.has(resolver));
 }
 
-function exportGoodResolvers() {
-  const resolvers = knownGoodResolvers();
-  writeFileSync(GOOD_RESOLVERS_FILE, `${resolvers.join("\n")}${resolvers.length ? "\n" : ""}`, "utf8");
-  return { file: GOOD_RESOLVERS_FILE, count: resolvers.length, resolvers };
+function exportGoodResolvers(context) {
+  const selectedContext = effectiveNetworkContext(normalizeNetworkContext(context || telemetry.context.selected));
+  const resolvers = knownGoodResolvers(selectedContext);
+  const target = selectedContext === "unknown"
+    ? GOOD_RESOLVERS_FILE
+    : GOOD_RESOLVERS_FILE.replace(/\.txt$/i, `-${selectedContext}.txt`);
+  writeFileSync(target, `${resolvers.join("\n")}${resolvers.length ? "\n" : ""}`, "utf8");
+  return { file: target, context: selectedContext, count: resolvers.length, resolvers };
+}
+
+function effectiveNetworkContext(context = telemetry.context.selected) {
+  const normalized = normalizeNetworkContext(context);
+  return normalized === "unknown" && telemetry.context.mixed ? "filtered" : normalized;
 }
 
 function detectStateDrift() {

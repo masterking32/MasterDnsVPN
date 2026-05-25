@@ -67,3 +67,7 @@ management API for the Go client.
 - Never auto-apply `DOMAINS`, `ENCRYPTION_KEY`, or `DATA_ENCRYPTION_METHOD`.
 - Do not commit local logs, resolver exports, or real client configs.
 - Keep generated telemetry in the release package root, not the source repo.
+- Treat filtered and unfiltered network logs as separate optimization contexts.
+  If one log contains harsh-network failures followed by mass resolver
+  reactivation, the dashboard marks it as mixed and defaults recommendations to
+  the filtered-safe view until the user explicitly selects another context.

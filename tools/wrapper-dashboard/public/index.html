@@ -52,11 +52,25 @@
 
       <section class="panel wide" data-tab-panel="optimizer">
         <h2>AI Optimizer</h2>
+        <div class="context-tools">
+          <label>
+            Network context
+            <select id="networkContextSelect">
+              <option value="unknown">Unknown</option>
+              <option value="filtered">Filtered</option>
+              <option value="unfiltered">Unfiltered</option>
+            </select>
+          </label>
+          <span id="networkContextBadge" class="tag">unknown</span>
+        </div>
+        <div id="networkContextNotes" class="context-notes"></div>
         <div id="aiScores" class="score-grid"></div>
         <div class="optimizer-actions ai-actions">
           <button id="previewDynamicBtn" type="button">Preview Config Patch</button>
           <button id="copyAIContextBtn" type="button">Copy AI Context</button>
           <button id="exportGoodResolversBtn" type="button">Export Good Resolvers</button>
+          <button id="exportFilteredResolversBtn" type="button">Export Filtered Good Resolvers</button>
+          <button id="exportUnfilteredResolversBtn" type="button">Export Unfiltered Good Resolvers</button>
         </div>
         <div id="aiOptimizerStatus" class="editor-status"></div>
         <div id="dynamicRecommendations" class="recommendations"></div>

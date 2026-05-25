@@ -51,6 +51,8 @@ committed unless intentionally adding fixtures.
 - Config and resolver editor with preview-before-apply behavior.
 - Balanced optimizer recommendations.
 - Dynamic AI optimizer from parsed logs and rules.
+- Filtered/unfiltered/unknown network-context tagging so mixed logs do not
+  accidentally tune the filtered profile from unfiltered resolver recovery.
 - Known-good resolver export.
 - Process start/stop wrapper for the headless client.
 - SSE-driven UI refresh.

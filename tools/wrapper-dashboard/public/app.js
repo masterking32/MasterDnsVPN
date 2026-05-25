@@ -40,7 +40,10 @@ function bindControls() {
   $("smokeBtn").addEventListener("click", () => post("/api/smoke").then(refresh));
   $("previewDynamicBtn").addEventListener("click", previewDynamicPatch);
   $("copyAIContextBtn").addEventListener("click", copyAIContext);
-  $("exportGoodResolversBtn").addEventListener("click", exportGoodResolvers);
+  $("exportGoodResolversBtn").addEventListener("click", () => exportGoodResolvers());
+  $("exportFilteredResolversBtn").addEventListener("click", () => exportGoodResolvers("filtered"));
+  $("exportUnfilteredResolversBtn").addEventListener("click", () => exportGoodResolvers("unfiltered"));
+  $("networkContextSelect").addEventListener("change", setNetworkContext);
   $("reloadEditorBtn").addEventListener("click", loadEditor);
   $("stripCommentsBtn").addEventListener("click", stripConfigComments);
   $("dedupeResolversBtn").addEventListener("click", dedupeResolverEditor);
@@ -156,9 +159,15 @@ async function copyAIContext() {
   }
 }
 
-async function exportGoodResolvers() {
-  const data = await post("/api/resolvers/export-good");
-  setAIStatus(`Exported ${data.count} known-good resolvers to ${data.file}.`, "ok");
+async function exportGoodResolvers(context = null) {
+  const data = await postJson("/api/resolvers/export-good", { context });
+  setAIStatus(`Exported ${data.count} ${data.context} known-good resolvers to ${data.file}.`, "ok");
+}
+
+async function setNetworkContext(event) {
+  const data = await postJson("/api/network-context", { context: event.target.value });
+  setAIStatus(`Network context set to ${data.selected}.`, data.mixed ? "warn" : "ok");
+  await refresh();
 }
 
 async function ignoreRecommendation(id) {

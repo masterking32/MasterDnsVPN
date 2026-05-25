@@ -2,6 +2,18 @@ import { $, escapeHtml } from "../dom.js";
 
 export function renderAIOptimizer(state, actions) {
   const telemetry = state.telemetry || {};
+  const context = telemetry.networkContext || state.dynamicRecommendations?.networkContext || {};
+  const selector = $("networkContextSelect");
+  if (selector) selector.value = context.selected || "unknown";
+  const badge = $("networkContextBadge");
+  if (badge) {
+    badge.textContent = context.mixed ? "mixed log context detected" : (context.detected || "unknown");
+    badge.className = `tag ${context.mixed ? "warn" : context.detected === "filtered" ? "running" : context.detected === "unfiltered" ? "ok" : ""}`;
+  }
+  const notes = context.notes || [];
+  $("networkContextNotes").innerHTML = notes.length
+    ? notes.map((note) => `<div class="validation-item"><span class="tag ${context.mixed ? "warn" : "ok"}">${context.mixed ? "warn" : "info"}</span> ${escapeHtml(note)}</div>`).join("")
+    : "";
   const scores = telemetry.scores || {};
   const scoreRows = [
     ["Health", scores.healthScore],

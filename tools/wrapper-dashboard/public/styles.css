@@ -224,6 +224,39 @@ button.active,
   margin-bottom: 10px;
 }
 
+.context-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.context-tools label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.context-tools select {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--text);
+  padding: 0 8px;
+  font: inherit;
+}
+
+.context-notes {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
 .dynamic-rec p {
   margin-top: 8px;
   color: var(--text);
