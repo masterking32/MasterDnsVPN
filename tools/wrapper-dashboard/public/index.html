@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>MasterDnsVPN Dashboard</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>MasterDnsVPN Client</h1>
+        <p id="subtitle">Wrapper dashboard</p>
+      </div>
+      <div class="top-actions">
+        <button id="refreshBtn" type="button">Refresh</button>
+        <button id="startBtn" type="button">Start</button>
+        <button id="stopBtn" type="button">Stop</button>
+      </div>
+    </header>
+
+    <nav class="tabbar" data-tabs aria-label="Dashboard sections"></nav>
+
+    <main class="layout">
+      <section class="panel overview" data-tab-panel="overview">
+        <h2>Overview</h2>
+        <div class="metrics" id="overview"></div>
+      </section>
+
+      <section class="panel" data-tab-panel="overview">
+        <h2>Plan Stages</h2>
+        <div id="stages" class="stage-list"></div>
+      </section>
+
+      <section class="panel" data-tab-panel="optimizer">
+        <h2>Config Optimizer</h2>
+        <div class="profile-tabs">
+          <button class="active" data-profile="balanced" type="button">Balanced</button>
+          <button data-profile="speed" type="button">Speed</button>
+          <button data-profile="reliability" type="button">Reliability</button>
+          <button data-profile="scanner" type="button">Scanner</button>
+          <button data-profile="debug" type="button">Debug</button>
+        </div>
+        <div class="optimizer-actions">
+          <button id="previewBtn" type="button">Preview Balanced</button>
+          <button id="applyBtn" type="button">Apply Balanced</button>
+          <button id="smokeBtn" type="button">Smoke Test</button>
+        </div>
+        <div id="recommendations" class="recommendations"></div>
+        <pre id="diff" class="diff"></pre>
+      </section>
+
+      <section class="panel wide" data-tab-panel="optimizer">
+        <h2>AI Optimizer</h2>
+        <div id="aiScores" class="score-grid"></div>
+        <div class="optimizer-actions ai-actions">
+          <button id="previewDynamicBtn" type="button">Preview Config Patch</button>
+          <button id="copyAIContextBtn" type="button">Copy AI Context</button>
+          <button id="exportGoodResolversBtn" type="button">Export Good Resolvers</button>
+        </div>
+        <div id="aiOptimizerStatus" class="editor-status"></div>
+        <div id="dynamicRecommendations" class="recommendations"></div>
+        <pre id="dynamicDiff" class="diff"></pre>
+      </section>
+
+      <section class="panel" data-tab-panel="overview">
+        <h2>Validation</h2>
+        <div id="validation"></div>
+      </section>
+
+      <section class="panel full" data-tab-panel="editor">
+        <h2>Configuration Editor</h2>
+        <div class="editor-toolbar">
+          <button id="reloadEditorBtn" type="button">Reload Files</button>
+          <button id="stripCommentsBtn" type="button">Remove TOML Comments</button>
+          <button id="dedupeResolversBtn" type="button">Remove Resolver Duplicates</button>
+          <label class="checkline">
+            <input id="restartAfterSave" type="checkbox">
+            Restart running client after save
+          </label>
+          <button id="saveEditorBtn" type="button">Save Config & Resolvers</button>
+        </div>
+        <div id="editorStatus" class="editor-status"></div>
+        <div class="editor-grid">
+          <label class="editor-pane">
+            <span>client_config.toml</span>
+            <textarea id="configEditor" spellcheck="false"></textarea>
+          </label>
+          <label class="editor-pane">
+            <span>client_resolvers.txt <b id="editorResolverCount"></b></span>
+            <textarea id="resolverEditor" spellcheck="false"></textarea>
+          </label>
+        </div>
+      </section>
+
+      <section class="panel wide" data-tab-panel="resolvers">
+        <h2>Resolver Pool</h2>
+        <div class="resolver-tools">
+          <input id="resolverFilter" type="search" placeholder="Filter resolver IP">
+          <span id="resolverCount"></span>
+        </div>
+        <div id="resolvers" class="resolver-list"></div>
+      </section>
+
+      <section class="panel wide" data-tab-panel="logs">
+        <h2>Run Logs</h2>
+        <div id="events" class="event-list"></div>
+        <pre id="logs" class="logs"></pre>
+      </section>
+
+      <section class="panel wide" data-tab-panel="logs">
+        <h2>AI Monitor</h2>
+        <div id="monitor"></div>
+        <div class="schematic" aria-label="Dashboard schematic">
+          <div>Overview</div><div>Plan Stages</div><div>Config Optimizer</div>
+          <div>Resolver Pool</div><div>Run Logs</div><div>AI Monitor</div>
+          <div>Profiles</div><div>Apply Preview</div><div>Smoke Tests</div>
+        </div>
+        <div class="rtl-note" dir="rtl">پشتیبانی راست به چپ برای رابط فارسی آماده است.</div>
+      </section>
+    </main>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

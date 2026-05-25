@@ -63,6 +63,18 @@ For the latest news, releases, and project updates, follow our Telegram channel:
 
 ---
 
+## Optional Wrapper Dashboard 🖥️
+
+A local browser dashboard is available in [`tools/wrapper-dashboard`](tools/wrapper-dashboard).
+It can manage a downloaded client release package by editing `client_config.toml`,
+editing `client_resolvers.txt`, starting/stopping the headless client binary,
+parsing logs, and showing optimizer recommendations.
+
+Architecture and safety notes are documented in
+[`docs/wrapper-dashboard.md`](docs/wrapper-dashboard.md).
+
+---
+
 ### If you like this project, please support it by starring it on GitHub (⭐). It helps the project get discovered.
 
 ---
