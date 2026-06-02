@@ -953,6 +953,10 @@ You can review these related projects here:
 - [KevinNet DNS](https://github.com/kamalalhagh/kevinnet-dns)
   A companion tool for MasterDnsVPN that discovers and validates working DNS resolvers, especially for users in Iran. It generates ready-to-use configuration files and performs end-to-end tunnel verification. This project is developed independently by Kevin Haji.
 
+- [VpnDad](https://github.com/arianizadi/VpnDad): iOS client for MasterDnsVPN. It runs the MasterDnsVPN engine
+  on-device through a mobile bridge, uses JSON profiles for configuration, and
+  forwards device traffic through the VPN tunnel. Developed by Arian Izadi.
+
 ---
 
 ### Section 5.2: Fixing Port 53 Already in Use (Linux Server) 🛑
