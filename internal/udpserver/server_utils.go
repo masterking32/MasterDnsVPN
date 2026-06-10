@@ -44,12 +44,24 @@ func buildNoDataResponseLite(packet []byte, parsed DnsParser.LitePacket) []byte 
 	return response
 }
 
+func buildNameErrorResponseLite(packet []byte, parsed DnsParser.LitePacket) []byte {
+	response, err := DnsParser.BuildNameErrorResponseFromLite(packet, parsed)
+	if err != nil {
+		return nil
+	}
+	return response
+}
+
 func (s *Server) buildNoDataResponseLogged(packet []byte, reason string) []byte {
 	return buildNoDataResponse(packet)
 }
 
 func (s *Server) buildNoDataResponseLiteLogged(packet []byte, parsed DnsParser.LitePacket, reason string) []byte {
 	return buildNoDataResponseLite(packet, parsed)
+}
+
+func (s *Server) buildNameErrorResponseLiteLogged(packet []byte, parsed DnsParser.LitePacket, reason string) []byte {
+	return buildNameErrorResponseLite(packet, parsed)
 }
 
 func isClosedStreamAwarePacketType(packetType uint8) bool {
