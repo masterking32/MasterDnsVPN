@@ -225,12 +225,17 @@ else log_error "No supported package manager found (apt/dnf/yum)."; fi
 log_header "Preparing Environment"
 log_info "Installing dependencies..."
 if [[ "$PM" == "apt" ]]; then
-  apt-get update -y >/dev/null 2>&1
-  apt-get install -y lsof net-tools wget unzip curl ca-certificates iproute2 procps irqbalance >/dev/null 2>&1
+  if ! apt-get update -y >/dev/null; then
+    log_error "apt-get update failed. Check the output above for details."
+  fi
+  apt-get install -y lsof net-tools wget unzip curl ca-certificates iproute2 procps irqbalance >/dev/null
 elif [[ "$PM" == "dnf" ]]; then
-  dnf -y install lsof net-tools wget unzip curl ca-certificates iproute procps-ng irqbalance >/dev/null 2>&1
+  dnf -y install lsof net-tools wget unzip curl ca-certificates iproute procps-ng irqbalance >/dev/null
 else
-  yum -y install lsof net-tools wget unzip curl ca-certificates iproute procps-ng irqbalance >/dev/null 2>&1
+  yum -y install lsof net-tools wget unzip curl ca-certificates iproute procps-ng irqbalance >/dev/null
+fi
+if [ "$?" -ne 0 ]; then
+  log_error "Some dependencies may have failed to install. Check the output above for details."
 fi
 require_cmd ss
 require_cmd unzip

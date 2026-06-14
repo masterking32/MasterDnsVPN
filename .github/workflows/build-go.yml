@@ -502,6 +502,7 @@ jobs:
 
           docs = [
               ("README.MD", "MasterDnsVPN Documentation", "README.html"),
+              ("README_RU.MD", "MasterDnsVPN Documentation (RU)", "README_RU.html"),
               ("README_FA.MD", "MasterDnsVPN Documentation (FA)", "README_FA.html"),
           ]
 
@@ -575,6 +576,9 @@ jobs:
           if (Test-Path "README.html") {
             Compress-Archive -Path "README.html" -Update -DestinationPath "${clientZipBase}.zip"
           }
+          if (Test-Path "README_RU.html") {
+            Compress-Archive -Path "README_RU.html" -Update -DestinationPath "${clientZipBase}.zip"
+          }
           if (Test-Path "README_FA.html") {
             Compress-Archive -Path "README_FA.html" -Update -DestinationPath "${clientZipBase}.zip"
           }
@@ -622,11 +626,13 @@ jobs:
           CLIENT_TOML="client_config.toml"
           CLIENT_RESOLVERS="client_resolvers.txt"
           CLIENT_README_EN="README.html"
+          CLIENT_README_RU="README_RU.html"
           CLIENT_README_FA="README_FA.html"
           SERVER_TOML="server_config.toml"
 
           CLIENT_FILES=( "${CLIENT_EXE_NAME}" "${CLIENT_TOML}" "${CLIENT_RESOLVERS}" )
           [ -f "${CLIENT_README_EN}" ] && CLIENT_FILES+=( "${CLIENT_README_EN}" )
+          [ -f "${CLIENT_README_RU}" ] && CLIENT_FILES+=( "${CLIENT_README_RU}" )
           [ -f "${CLIENT_README_FA}" ] && CLIENT_FILES+=( "${CLIENT_README_FA}" )
 
           zip -j "${CLIENT_ZIP}" "${CLIENT_FILES[@]}" || true
