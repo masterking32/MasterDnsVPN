@@ -42,11 +42,15 @@ func (s *Server) handlePacket(packet []byte) []byte {
 		return s.buildNoDataResponseLiteLogged(packet, parsed, "domain-match-process-failed")
 	}
 
-	if decision.Action == domainMatcher.ActionFormatError || decision.Action == domainMatcher.ActionNoData {
-		return s.buildNoDataResponseLiteLogged(packet, parsed, "domain-match-no-data")
+	if decision.Action == domainMatcher.ActionFormatError {
+		return s.buildFormatErrorResponseLiteLogged(packet, parsed, "domain-match-format-error")
 	}
 
-	return s.buildNoDataResponseLiteLogged(packet, parsed, "domain-match-no-data")
+	if decision.Action == domainMatcher.ActionNoData {
+		return s.buildNameErrorResponseLiteLogged(packet, parsed, "domain-match-name-error")
+	}
+
+	return s.buildNameErrorResponseLiteLogged(packet, parsed, "domain-match-name-error")
 }
 
 func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacket, decision domainMatcher.Decision) []byte {
