@@ -40,6 +40,40 @@ func TestHandlePacketRejectsUnauthorizedDomainAsNXDOMAIN(t *testing.T) {
 	}
 }
 
+func TestHandlePacketRejectsMatcherFormatErrorAsFORMERR(t *testing.T) {
+	server := &Server{
+		domainMatcher: domainMatcher.New([]string{"vpn.example.com"}, 3),
+	}
+	request := buildTestDNSQuery(0x5151, ".", Enums.DNS_RECORD_TYPE_TXT)
+
+	response := server.handlePacket(request)
+	if response == nil {
+		t.Fatal("expected DNS response, got nil")
+	}
+
+	flags := binary.BigEndian.Uint16(response[2:4])
+	if got := flags & 0x000F; got != Enums.DNSR_CODE_FORMAT_ERROR {
+		t.Fatalf("unexpected rcode: got=%d want=%d", got, Enums.DNSR_CODE_FORMAT_ERROR)
+	}
+}
+
+func TestHandlePacketKeepsUnsupportedAllowedAQueryAsNXDOMAIN(t *testing.T) {
+	server := &Server{
+		domainMatcher: domainMatcher.New([]string{"vpn.example.com"}, 3),
+	}
+	request := buildTestDNSQuery(0x6161, "probe.vpn.example.com", Enums.DNS_RECORD_TYPE_A)
+
+	response := server.handlePacket(request)
+	if response == nil {
+		t.Fatal("expected DNS response, got nil")
+	}
+
+	flags := binary.BigEndian.Uint16(response[2:4])
+	if got := flags & 0x000F; got != Enums.DNSR_CODE_NAME_ERROR {
+		t.Fatalf("unexpected rcode: got=%d want=%d", got, Enums.DNSR_CODE_NAME_ERROR)
+	}
+}
+
 func buildTestDNSQuery(id uint16, name string, qtype uint16) []byte {
 	qname := encodeTestDNSName(name)
 	packet := make([]byte, 12+len(qname)+4)

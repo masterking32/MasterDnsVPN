@@ -43,7 +43,7 @@ func (s *Server) handlePacket(packet []byte) []byte {
 	}
 
 	if decision.Action == domainMatcher.ActionFormatError {
-		return s.buildNoDataResponseLiteLogged(packet, parsed, "domain-match-no-data")
+		return s.buildFormatErrorResponseLiteLogged(packet, parsed, "domain-match-format-error")
 	}
 
 	if decision.Action == domainMatcher.ActionNoData {
