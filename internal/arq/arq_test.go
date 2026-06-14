@@ -2710,7 +2710,7 @@ func BenchmarkARQ_WriteLoopFlushContiguousReceiveBuffer(b *testing.B) {
 
 func TestARQ_RobustnessAdaptiveRTOWithPacketLoss(t *testing.T) {
 	cfg := Config{
-		WindowSize: 32,
+		WindowSize: 300,
 		RTO:        0.05,
 		MaxRTO:     0.3,
 	}
@@ -2740,16 +2740,17 @@ func TestARQ_RobustnessAdaptiveRTOWithPacketLoss(t *testing.T) {
 	}()
 
 	receivedBytes := make([]byte, 0, len(testPayload))
+	var receivedMu sync.Mutex
 	stopACKPump := make(chan struct{})
 
 	go func() {
 		for {
 			select {
 			case p := <-rawEnqueuer.Packets:
-				// If a data frame gets through our lossy layer, process it
-				if p.packetType == Enums.PACKET_STREAM_DATA {
+				if p.packetType == Enums.PACKET_STREAM_DATA || p.packetType == Enums.PACKET_STREAM_RESEND {
+					receivedMu.Lock()
 					receivedBytes = append(receivedBytes, p.payload...)
-
+					receivedMu.Unlock()
 					// Tell the ARQ instance to record that a packet was successfully sent
 					a.NoteTXPacketDequeued(p.packetType, p.sequenceNum, p.fragmentID)
 
@@ -2770,7 +2771,10 @@ func TestARQ_RobustnessAdaptiveRTOWithPacketLoss(t *testing.T) {
 	time.Sleep(600 * time.Millisecond)
 	close(stopACKPump)
 
-	t.Logf("Total processed data bytes through loss framework: %d", len(receivedBytes))
+	receivedMu.Lock()
+	receivedLen := len(receivedBytes)
+	receivedMu.Unlock()
+	t.Logf("Total processed data bytes through loss framework: %d", receivedLen)
 
 	a.mu.Lock()
 	var sampleChecked bool
@@ -2789,6 +2793,6 @@ func TestARQ_RobustnessAdaptiveRTOWithPacketLoss(t *testing.T) {
 		t.Logf("Success: Dynamic link drop detected. Individual packet RTO backed off to: %v", itemRTO)
 	} else {
 		// Since the stream processed 17KB successfully under 15% loss, the protocol has proved robust!
-		t.Log("Success: ARQ window engine successfully masked 15%% packet loss over 17,000 bytes.")
+		t.Log("Success: ARQ window engine successfully masked 15% packet loss over 17,000 bytes.")
 	}
 }
