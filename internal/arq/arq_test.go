@@ -112,7 +112,7 @@ func (l *LossyPacketEnqueuer) PushTXPacket(priority int, packetType uint8, seque
 	l.mu.Unlock()
 
 	if drop {
-		return true
+		return false
 	}
 
 	if jitter > 0 {
