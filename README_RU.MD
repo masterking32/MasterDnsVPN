@@ -1,6 +1,6 @@
 ﻿# MasterDnsVPN Project 🔐
 
-## | [نسخه فارسی](https://github.com/masterking32/MasterDnsVPN/blob/main/README_FA.MD) | [English Version](https://github.com/masterking32/MasterDnsVPN/blob/main/README.MD) | [Русская  версия](https://github.com/masterking32/MasterDnsVPN/blob/main/README_RU.MD)  |
+## | 🇮🇷 [فارسی](https://github.com/masterking32/MasterDnsVPN/blob/main/README_FA.MD) | 🇬🇧 [English](https://github.com/masterking32/MasterDnsVPN/blob/main/README.MD) | 🇷🇺 [Русский](https://github.com/masterking32/MasterDnsVPN/blob/main/README_RU.MD) | 🇨🇳 [中文](https://github.com/masterking32/MasterDnsVPN/blob/main/README_ZH.MD) | 🇪🇸 [Español](https://github.com/masterking32/MasterDnsVPN/blob/main/README_ES.MD) | 🇮🇹 [Italiano](https://github.com/masterking32/MasterDnsVPN/blob/main/README_IT.MD) |
 
 **MasterDnsVPN** - это научно-исследовательский проект, предназначенный для передачи TCP-трафика через DNS-запросы и ответы. В общем смысле он схож с проектами вроде DNSTT или SlipStream, однако использует принципиально иную архитектуру и подход к реализации.
 Система спроектирована с учётом совместимости с различными типами DNS-резолверов и жёсткими сетевыми условиями, с целью обеспечить максимально возможную стабильность и доставку данных даже в неблагоприятных сценариях.
