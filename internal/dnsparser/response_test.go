@@ -310,6 +310,55 @@ func TestBuildNoDataResponseFromLiteBuildsEmptyNoErrorResponse(t *testing.T) {
 	}
 }
 
+func TestBuildNameErrorResponseFromLiteBuildsAuthoritativeNXDOMAIN(t *testing.T) {
+	request := buildDNSQuery(0x6161, "outside.example", Enums.DNS_RECORD_TYPE_A, true)
+	request[3] |= 0x10 // CD
+
+	parsed, err := ParsePacketLite(request)
+	if err != nil {
+		t.Fatalf("ParsePacketLite returned error: %v", err)
+	}
+
+	response, err := BuildNameErrorResponseFromLite(request, parsed)
+	if err != nil {
+		t.Fatalf("BuildNameErrorResponseFromLite returned error: %v", err)
+	}
+
+	flags := binary.BigEndian.Uint16(response[2:4])
+	if got := flags & 0x000F; got != Enums.DNSR_CODE_NAME_ERROR {
+		t.Fatalf("unexpected rcode: got=%d want=%d", got, Enums.DNSR_CODE_NAME_ERROR)
+	}
+	if flags&(1<<15) == 0 {
+		t.Fatal("response must set QR")
+	}
+	if flags&(1<<10) == 0 {
+		t.Fatal("authoritative name error response must set AA")
+	}
+	if flags&(1<<7) != 0 {
+		t.Fatal("authoritative name error response must clear RA")
+	}
+	if flags&(1<<8) == 0 {
+		t.Fatal("response must preserve RD")
+	}
+	if flags&(1<<4) == 0 {
+		t.Fatal("response must preserve CD")
+	}
+	if got := binary.BigEndian.Uint16(response[6:8]); got != 0 {
+		t.Fatalf("unexpected ancount: got=%d want=0", got)
+	}
+
+	full, err := ParsePacket(response)
+	if err != nil {
+		t.Fatalf("ParsePacket(response) returned error: %v", err)
+	}
+	if len(full.Questions) != 1 || full.Questions[0].Name != "outside.example" {
+		t.Fatalf("unexpected question section: got=%+v", full.Questions)
+	}
+	if len(full.Additional) != 1 || full.Additional[0].Type != Enums.DNS_RECORD_TYPE_OPT {
+		t.Fatalf("response must preserve the OPT record")
+	}
+}
+
 func buildDNSQuery(id uint16, name string, qtype uint16, withOPT bool) []byte {
 	qname := encodeDNSName(name)
 	arCount := uint16(0)

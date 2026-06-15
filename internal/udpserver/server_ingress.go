@@ -33,20 +33,24 @@ func (s *Server) handlePacket(packet []byte) []byte {
 	}
 
 	decision := s.domainMatcher.Match(parsed)
-	if decision.Action == domainMatcher.ActionProcess {
+	switch decision.Action {
+	case domainMatcher.ActionProcess:
 		response := s.handleTunnelCandidate(packet, parsed, decision)
 		if response != nil {
 			return response
 		}
 
 		return s.buildNoDataResponseLiteLogged(packet, parsed, "domain-match-process-failed")
+	case domainMatcher.ActionFormatError:
+		return s.buildFormatErrorResponseLiteLogged(packet, parsed, decision.Reason)
+	case domainMatcher.ActionNoData:
+		if decision.Reason == "unauthorized-domain" {
+			return s.buildNameErrorResponseLiteLogged(packet, parsed, decision.Reason)
+		}
+		return s.buildNoDataResponseLiteLogged(packet, parsed, decision.Reason)
+	default:
+		return s.buildNoDataResponseLiteLogged(packet, parsed, "domain-match-unknown-action")
 	}
-
-	if decision.Action == domainMatcher.ActionFormatError || decision.Action == domainMatcher.ActionNoData {
-		return s.buildNoDataResponseLiteLogged(packet, parsed, "domain-match-no-data")
-	}
-
-	return s.buildNoDataResponseLiteLogged(packet, parsed, "domain-match-no-data")
 }
 
 func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacket, decision domainMatcher.Decision) []byte {

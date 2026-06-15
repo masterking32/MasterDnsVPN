@@ -40,6 +40,10 @@ func BuildNoDataResponseFromLite(request []byte, parsed LitePacket) ([]byte, err
 	return buildNoDataResponseLite(request, parsed)
 }
 
+func BuildNameErrorResponseFromLite(request []byte, parsed LitePacket) ([]byte, error) {
+	return buildAuthoritativeResponseWithRCodeLite(request, parsed, Enums.DNSR_CODE_NAME_ERROR)
+}
+
 func BuildFormatErrorResponse(request []byte) ([]byte, error) {
 	return buildResponseWithRCode(request, Enums.DNSR_CODE_FORMAT_ERROR)
 }
@@ -102,6 +106,14 @@ func buildResponseWithRCode(request []byte, rcode uint8) ([]byte, error) {
 }
 
 func buildResponseWithRCodeLite(request []byte, parsed LitePacket, rcode uint8) ([]byte, error) {
+	return buildResponseWithFlagsLite(request, parsed, buildResponseFlags(parsed.Header.Flags, rcode))
+}
+
+func buildAuthoritativeResponseWithRCodeLite(request []byte, parsed LitePacket, rcode uint8) ([]byte, error) {
+	return buildResponseWithFlagsLite(request, parsed, buildAuthoritativeResponseFlags(parsed.Header.Flags, rcode))
+}
+
+func buildResponseWithFlagsLite(request []byte, parsed LitePacket, flags uint16) ([]byte, error) {
 	if len(request) < dnsHeaderSize {
 		return nil, ErrPacketTooShort
 	}
@@ -118,7 +130,7 @@ func buildResponseWithRCodeLite(request []byte, parsed LitePacket, rcode uint8) 
 
 	response := make([]byte, dnsHeaderSize+questionLen+optLen)
 	binary.BigEndian.PutUint16(response[0:2], parsed.Header.ID)
-	binary.BigEndian.PutUint16(response[2:4], buildResponseFlags(parsed.Header.Flags, rcode))
+	binary.BigEndian.PutUint16(response[2:4], flags)
 	binary.BigEndian.PutUint16(response[4:6], parsed.Header.QDCount)
 	binary.BigEndian.PutUint16(response[10:12], uint16(getARCount(optLen)))
 
@@ -188,6 +200,29 @@ func buildResponseFlags(requestFlags uint16, rcode uint8) uint16 {
 	// AA/TC are intentionally cleared unless we are relaying an upstream answer
 	// verbatim, in which case those bits come from the upstream packet itself.
 	flags &^= flagAA | flagTC
+	return flags
+}
+
+func buildAuthoritativeResponseFlags(requestFlags uint16, rcode uint8) uint16 {
+	const (
+		flagQR     uint16 = 1 << 15
+		flagAA     uint16 = 1 << 10
+		flagTC     uint16 = 1 << 9
+		flagRD     uint16 = 1 << 8
+		flagRA     uint16 = 1 << 7
+		flagCD     uint16 = 1 << 4
+		opcodeMask uint16 = 0x7800
+	)
+
+	flags := flagQR | flagAA | (requestFlags & opcodeMask) | uint16(rcode&0x0F)
+	if requestFlags&flagRD != 0 {
+		flags |= flagRD
+	}
+	if requestFlags&flagCD != 0 {
+		flags |= flagCD
+	}
+
+	flags &^= flagRA | flagTC
 	return flags
 }
 
