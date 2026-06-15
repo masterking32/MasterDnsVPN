@@ -57,7 +57,7 @@ func TestHandlePacketRejectsMatcherFormatErrorAsFORMERR(t *testing.T) {
 	}
 }
 
-func TestHandlePacketKeepsUnsupportedAllowedAQueryAsNXDOMAIN(t *testing.T) {
+func TestHandlePacketKeepsUnsupportedAllowedAQueryAsNoData(t *testing.T) {
 	server := &Server{
 		domainMatcher: domainMatcher.New([]string{"vpn.example.com"}, 3),
 	}
@@ -69,8 +69,11 @@ func TestHandlePacketKeepsUnsupportedAllowedAQueryAsNXDOMAIN(t *testing.T) {
 	}
 
 	flags := binary.BigEndian.Uint16(response[2:4])
-	if got := flags & 0x000F; got != Enums.DNSR_CODE_NAME_ERROR {
-		t.Fatalf("unexpected rcode: got=%d want=%d", got, Enums.DNSR_CODE_NAME_ERROR)
+	if got := flags & 0x000F; got != Enums.DNSR_CODE_NO_ERROR {
+		t.Fatalf("unexpected rcode: got=%d want=%d", got, Enums.DNSR_CODE_NO_ERROR)
+	}
+	if got := binary.BigEndian.Uint16(response[6:8]); got != 0 {
+		t.Fatalf("unexpected ancount: got=%d want=0", got)
 	}
 }
 
