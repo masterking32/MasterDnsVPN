@@ -155,7 +155,7 @@ func (c *Client) getUDPConn(resolverLabel string) (*net.UDPConn, error) {
 			}
 			return pc.conn, nil
 		default:
-			return dialUDPResolver(resolverLabel)
+			return c.dialUDPResolver(resolverLabel)
 		}
 	}
 }
@@ -235,15 +235,6 @@ func (c *Client) putRuntimeUDPBuffer(buf []byte) {
 	c.udpBufferPool.Put(buf[:RuntimeUDPReadBufferSize])
 }
 
-// dialUDPResolver resolves the resolver address and establishes a new UDP connection.
-func dialUDPResolver(resolverLabel string) (*net.UDPConn, error) {
-	addr, err := net.ResolveUDPAddr("udp", resolverLabel)
-	if err != nil {
-		return nil, err
-	}
-	return net.DialUDP("udp", nil, addr)
-}
-
 // normalizeTimeout ensures the timeout is positive, falling back to a default if necessary.
 func normalizeTimeout(timeout time.Duration, fallback time.Duration) time.Duration {
 	if timeout <= 0 {
@@ -258,8 +249,8 @@ type udpQueryTransport struct {
 }
 
 // newUDPQueryTransport creates a new transport for UDP queries to the specified resolver.
-func newUDPQueryTransport(resolverLabel string) (*udpQueryTransport, error) {
-	conn, err := dialUDPResolver(resolverLabel)
+func (c *Client) newUDPQueryTransport(resolverLabel string) (*udpQueryTransport, error) {
+	conn, err := c.dialUDPResolver(resolverLabel)
 	if err != nil {
 		return nil, err
 	}

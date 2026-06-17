@@ -47,6 +47,7 @@ func (l *DNSListener) Start(ctx context.Context, ip string, port int) error {
 	if err != nil {
 		return err
 	}
+	// Local app-facing DNS listener; upstream resolver sockets are protected elsewhere.
 	conn, err := net.ListenUDP("udp", addr)
 	if err != nil {
 		return err

@@ -313,7 +313,7 @@ func (c *Client) StartAsyncRuntime(parentCtx context.Context) error {
 	// 3. Open dedicated UDP sockets for each RX/TX worker.
 	conns := make([]*net.UDPConn, 0, c.tunnelRX_TX_Workers)
 	for i := 0; i < c.tunnelRX_TX_Workers; i++ {
-		conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+		conn, err := c.listenUDPProtected(runtimeCtx, &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 		if err != nil {
 			for _, opened := range conns {
 				_ = opened.Close()
