@@ -474,8 +474,8 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 	cfg.MTUReactiveAddedServerLogFormat = strings.TrimSpace(cfg.MTUReactiveAddedServerLogFormat)
 
 	cfg.EncryptionKey = strings.TrimSpace(cfg.EncryptionKey)
-	if cfg.EncryptionKey == "" {
-		return cfg, fmt.Errorf("ENCRYPTION_KEY is required in client config")
+	if cfg.DataEncryptionMethod != 0 && cfg.EncryptionKey == "" {
+		return cfg, fmt.Errorf("ENCRYPTION_KEY is required when DATA_ENCRYPTION_METHOD is not 0 (None)")
 	}
 
 	cfg.Domains = normalizeClientDomains(cfg.Domains)

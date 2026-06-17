@@ -106,6 +106,52 @@ FD_CONTROL_UNIX_SOCKET = " /tmp/masterdnsvpn-protect.sock "
 	}
 }
 
+func TestLoadClientConfigAllowsEmptyKeyWhenEncryptionNone(t *testing.T) {
+	t.Setenv("MASTERDNSVPN_PROTECT_PATH", "")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "client_config.toml")
+	resolversPath := filepath.Join(dir, "client_resolvers.txt")
+
+	// DATA_ENCRYPTION_METHOD = 0 (None) with no key must be accepted.
+	if err := os.WriteFile(configPath, []byte(`
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["v.domain.com"]
+DATA_ENCRYPTION_METHOD = 0
+ENCRYPTION_KEY = ""
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile config failed: %v", err)
+	}
+	if err := os.WriteFile(resolversPath, []byte("8.8.8.8\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile resolvers failed: %v", err)
+	}
+	if _, err := LoadClientConfig(configPath); err != nil {
+		t.Fatalf("expected empty key to be allowed with method 0, got: %v", err)
+	}
+}
+
+func TestLoadClientConfigRejectsEmptyKeyWhenEncryptionEnabled(t *testing.T) {
+	t.Setenv("MASTERDNSVPN_PROTECT_PATH", "")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "client_config.toml")
+	resolversPath := filepath.Join(dir, "client_resolvers.txt")
+
+	// DATA_ENCRYPTION_METHOD != 0 with an empty key must still be rejected.
+	if err := os.WriteFile(configPath, []byte(`
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["v.domain.com"]
+DATA_ENCRYPTION_METHOD = 1
+ENCRYPTION_KEY = ""
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile config failed: %v", err)
+	}
+	if err := os.WriteFile(resolversPath, []byte("8.8.8.8\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile resolvers failed: %v", err)
+	}
+	if _, err := LoadClientConfig(configPath); err == nil {
+		t.Fatalf("expected empty key to be rejected when encryption is enabled")
+	}
+}
+
 func TestLoadClientConfigFDControlEnvOverridesTOML(t *testing.T) {
 	t.Setenv("MASTERDNSVPN_PROTECT_PATH", "/tmp/env-protect.sock")
 	dir := t.TempDir()
