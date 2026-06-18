@@ -35,19 +35,28 @@ func (c *Client) protectControl(network, address string, rc syscall.RawConn) err
 	return nil
 }
 
-func (c *Client) dialUDPResolver(resolverLabel string) (*net.UDPConn, error) {
+func (c *Client) dialUDPResolver(ctx context.Context, resolverLabel string) (*net.UDPConn, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if c.protectPath() == "" {
-		addr, err := net.ResolveUDPAddr("udp", resolverLabel)
+		var dialer net.Dialer
+		conn, err := dialer.DialContext(ctx, "udp", resolverLabel)
 		if err != nil {
 			return nil, err
 		}
-		return net.DialUDP("udp", nil, addr)
+		udpConn, ok := conn.(*net.UDPConn)
+		if !ok {
+			_ = conn.Close()
+			return nil, fmt.Errorf("unexpected udp resolver connection type %T", conn)
+		}
+		return udpConn, nil
 	}
 
 	dialer := net.Dialer{
 		Control: c.protectControl,
 	}
-	conn, err := dialer.DialContext(context.Background(), "udp", resolverLabel)
+	conn, err := dialer.DialContext(ctx, "udp", resolverLabel)
 	if err != nil {
 		return nil, err
 	}

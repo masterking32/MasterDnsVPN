@@ -12,6 +12,7 @@
 package client
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"net"
@@ -115,7 +116,7 @@ func (c *Client) exchangeUDPQueryWithConn(conn *net.UDPConn, packet []byte, time
 }
 
 func (c *Client) sendOneWayDNSQuery(resolver Connection, packet []byte, deadline time.Time) error {
-	udpConn, err := c.getUDPConn(resolver.ResolverLabel)
+	udpConn, err := c.getUDPConn(context.Background(), resolver.ResolverLabel)
 	if err != nil {
 		return err
 	}
@@ -136,7 +137,7 @@ func (c *Client) sendOneWayDNSQuery(resolver Connection, packet []byte, deadline
 
 // getUDPConn retrieves a UDP connection from the pool for the specified resolver.
 // If no connection is available in the pool, it dials a new one.
-func (c *Client) getUDPConn(resolverLabel string) (*net.UDPConn, error) {
+func (c *Client) getUDPConn(ctx context.Context, resolverLabel string) (*net.UDPConn, error) {
 	c.resolverConnsMu.Lock()
 	pool, ok := c.resolverConns[resolverLabel]
 	if !ok {
@@ -155,7 +156,7 @@ func (c *Client) getUDPConn(resolverLabel string) (*net.UDPConn, error) {
 			}
 			return pc.conn, nil
 		default:
-			return c.dialUDPResolver(resolverLabel)
+			return c.dialUDPResolver(ctx, resolverLabel)
 		}
 	}
 }
@@ -249,8 +250,8 @@ type udpQueryTransport struct {
 }
 
 // newUDPQueryTransport creates a new transport for UDP queries to the specified resolver.
-func (c *Client) newUDPQueryTransport(resolverLabel string) (*udpQueryTransport, error) {
-	conn, err := c.dialUDPResolver(resolverLabel)
+func (c *Client) newUDPQueryTransport(ctx context.Context, resolverLabel string) (*udpQueryTransport, error) {
+	conn, err := c.dialUDPResolver(ctx, resolverLabel)
 	if err != nil {
 		return nil, err
 	}
@@ -271,7 +272,7 @@ func (c *Client) exchangeUDPQuery(transport *udpQueryTransport, packet []byte, t
 
 // exchangeDNSOverConnection sends a DNS query and returns the extracted VPN packet.
 func (c *Client) exchangeDNSOverConnection(conn Connection, query []byte, timeout time.Duration) (VpnProto.Packet, error) {
-	udpConn, err := c.getUDPConn(conn.ResolverLabel)
+	udpConn, err := c.getUDPConn(context.Background(), conn.ResolverLabel)
 	if err != nil {
 		return VpnProto.Packet{}, err
 	}

@@ -146,7 +146,7 @@ func TestProtectedResolverQuerySendsFDToProtectServer(t *testing.T) {
 		_, _ = resolverConn.WriteToUDP([]byte{buf[0], buf[1], 0x81, 0x00}, addr)
 	}()
 
-	udpConn, err := c.getUDPConn(resolverConn.LocalAddr().String())
+	udpConn, err := c.getUDPConn(context.Background(), resolverConn.LocalAddr().String())
 	if err != nil {
 		t.Fatalf("getUDPConn returned error: %v", err)
 	}
