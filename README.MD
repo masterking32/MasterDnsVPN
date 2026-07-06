@@ -316,9 +316,7 @@ services:
       - DOMAIN=v.example.com
     volumes:
       - ./data:/data
-    ports:
-      - "53:53/tcp"
-      - "53:53/udp"
+    network_mode: host
 ```
 
 ---
