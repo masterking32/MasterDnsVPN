@@ -156,13 +156,20 @@ func getARCount(optLen int) int {
 }
 
 func isLikelyDNSRequestHeader(header Header) bool {
-	if header.QR != 0 {
+	if header.QR != 0 || header.QDCount == 0 {
 		return false
 	}
-	if header.QDCount == 0 || header.QDCount > maxLikelyQuestions {
+	return isLikelyDNSMessageHeader(header)
+}
+
+func isLikelyDNSMessageHeader(header Header) bool {
+	if (header.QR == 0 && header.QDCount == 0) || header.QDCount > maxLikelyQuestions {
 		return false
 	}
 	if header.OpCode > 6 {
+		return false
+	}
+	if header.Flags&0x0040 != 0 {
 		return false
 	}
 	if header.ANCount > maxLikelyAnswers {
@@ -389,28 +396,6 @@ func extractRawOPTRecords(data []byte, offset int, count int) ([][]byte, int, in
 }
 
 func skipName(data []byte, offset int) (int, error) {
-	dataLen := len(data)
-	for {
-		if offset >= dataLen {
-			return offset, ErrInvalidName
-		}
-
-		length := int(data[offset])
-		if length == 0 {
-			return offset + 1, nil
-		}
-
-		if length >= 192 { // 0xC0
-			if offset+1 >= dataLen {
-				return offset, ErrInvalidName
-			}
-			return offset + 2, nil
-		}
-
-		if length > 63 {
-			return offset, ErrInvalidName
-		}
-
-		offset += length + 1
-	}
+	nextOffset, _, err := walkName(data, offset, nil)
+	return nextOffset, err
 }

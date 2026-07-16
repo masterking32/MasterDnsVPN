@@ -44,6 +44,12 @@ SUPPORTED_DOWNLOAD_COMPRESSION_TYPES = [0, 1, 2, 3]
 UDP_HOST = "0.0.0.0"
 UDP_PORT = 53
 
+# Optional raw UDP fallback target for non-DNS datagrams received on the DNS
+# listener. Leave this unset to disable fallback. The value must be HOST:PORT;
+# bracket IPv6 addresses, for example "[2001:db8::1]:5353". The target must
+# not resolve back to this listener. Fallback uses one ordered ingress reader.
+# FALLBACK = "127.0.0.1:5353"
+
 # UDP readers, DNS workers, and front-door request queue are smart-sized
 # internally. Only override them if you are profiling a specific host.
 UDP_READERS = 6

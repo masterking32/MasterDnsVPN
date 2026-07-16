@@ -8,7 +8,6 @@
 package udpserver
 
 import (
-	"errors"
 	"fmt"
 	"time"
 
@@ -19,13 +18,13 @@ import (
 )
 
 func (s *Server) handlePacket(packet []byte) []byte {
-	parsed, err := DnsParser.ParseDNSRequestLite(packet)
-	if err != nil {
-		if errors.Is(err, DnsParser.ErrNotDNSRequest) || errors.Is(err, DnsParser.ErrPacketTooShort) {
-			return nil
-		}
+	parsed, err := DnsParser.ParseDNSDatagramLite(packet)
+	return s.handleParsedPacket(packet, parsed, err)
+}
 
-		return s.buildNoDataResponseLogged(packet, "request-parse-failed")
+func (s *Server) handleParsedPacket(packet []byte, parsed DnsParser.LitePacket, err error) []byte {
+	if err != nil || parsed.Header.QR != 0 {
+		return nil
 	}
 
 	if !parsed.HasQuestion {
@@ -52,7 +51,6 @@ func (s *Server) handlePacket(packet []byte) []byte {
 		return s.buildNoDataResponseLiteLogged(packet, parsed, "domain-match-unknown-action")
 	}
 }
-
 func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacket, decision domainMatcher.Decision) []byte {
 	vpnPacket, err := VpnProto.ParseInflatedFromLabels(decision.Labels, s.codec)
 	if err != nil {

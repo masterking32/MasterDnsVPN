@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	DnsParser "masterdnsvpn-go/internal/dnsparser"
 	"masterdnsvpn-go/internal/logger"
 )
 
@@ -27,12 +28,12 @@ func (s *Server) configureSocketBuffers(conn *net.UDPConn) {
 	}
 }
 
-func (s *Server) openUDPListeners() ([]*net.UDPConn, error) {
+func (s *Server) openUDPListeners(readerCount int) ([]*net.UDPConn, error) {
 	addr := &net.UDPAddr{
 		IP:   net.ParseIP(s.cfg.UDPHost),
 		Port: s.cfg.UDPPort,
 	}
-	desired := s.cfg.EffectiveUDPReaders()
+	desired := readerCount
 	if desired < 1 {
 		desired = 1
 	}
@@ -74,12 +75,11 @@ func (s *Server) startDNSWorkers(ctx context.Context, conn *net.UDPConn, reqCh <
 	}
 }
 
-func (s *Server) startReaders(ctx context.Context, conns []*net.UDPConn, reqCh chan<- request, readErrCh chan<- error, readerWG *sync.WaitGroup) {
+func (s *Server) startReaders(ctx context.Context, conns []*net.UDPConn, readerCount int, reqCh chan<- request, readErrCh chan<- error, readerWG *sync.WaitGroup) {
 	if len(conns) == 0 {
 		return
 	}
 
-	readerCount := s.cfg.EffectiveUDPReaders()
 	if readerCount < 1 {
 		readerCount = 1
 	}
@@ -195,8 +195,40 @@ func (s *Server) readLoop(ctx context.Context, conn *net.UDPConn, reqCh chan<- r
 			return err
 		}
 
+		req := request{buf: buffer, size: n, addr: addr, conn: conn}
+		if fallback := s.fallback; fallback != nil {
+			packet := buffer[:n]
+			if fallback.ForwardIfActive(packet, addr, conn) {
+				s.packetPool.Put(buffer)
+				continue
+			}
+			parsed, parseErr, ok := s.safeParseDNSDatagram(packet)
+			if !ok {
+				s.packetPool.Put(buffer)
+				continue
+			}
+			if parseErr != nil {
+				fallback.RouteNonDNS(packet, addr, conn)
+				s.packetPool.Put(buffer)
+				continue
+			}
+			routeDNS, epoch := fallback.RouteDNS(packet, addr, conn)
+			if !routeDNS {
+				s.packetPool.Put(buffer)
+				continue
+			}
+			if parsed.Header.QR != 0 {
+				s.packetPool.Put(buffer)
+				continue
+			}
+			req.parsed = parsed
+			req.parseErr = parseErr
+			req.hasParsedDNS = true
+			req.fallbackEpoch = epoch
+		}
+
 		select {
-		case reqCh <- request{buf: buffer, size: n, addr: addr, conn: conn}:
+		case reqCh <- req:
 		case <-ctx.Done():
 			s.packetPool.Put(buffer)
 			return nil
@@ -217,13 +249,25 @@ func (s *Server) dnsWorker(ctx context.Context, conn *net.UDPConn, reqCh <-chan 
 				return
 			}
 
-			response := s.safeHandlePacket(req.buf[:req.size])
+			var response []byte
+			packet := req.buf[:req.size]
+			if req.hasParsedDNS {
+				response = s.safeHandleParsedPacket(packet, req.parsed, req.parseErr)
+			} else {
+				response = s.safeHandlePacket(packet)
+			}
 			if len(response) != 0 {
 				writeConn := conn
 				if req.conn != nil {
 					writeConn = req.conn
 				}
-				if _, err := writeConn.WriteToUDP(response, req.addr); err != nil {
+				var err error
+				if req.fallbackEpoch != nil {
+					err = req.fallbackEpoch.writeIfActive(writeConn, response, req.addr)
+				} else {
+					_, err = writeConn.WriteToUDP(response, req.addr)
+				}
+				if err != nil {
 					s.log.Debugf(
 						"\U0001F4A5 <yellow>UDP Write Error, Worker: <cyan>%d</cyan>, Remote: <cyan>%v</cyan>, Error: <cyan>%v</cyan></yellow>",
 						workerID,
@@ -238,7 +282,31 @@ func (s *Server) dnsWorker(ctx context.Context, conn *net.UDPConn, reqCh <-chan 
 	}
 }
 
-func (s *Server) safeHandlePacket(packet []byte) (response []byte) {
+func (s *Server) safeHandlePacket(packet []byte) []byte {
+	parsed, parseErr, ok := s.safeParseDNSDatagram(packet)
+	if !ok {
+		return nil
+	}
+	return s.safeHandleParsedPacket(packet, parsed, parseErr)
+}
+
+func (s *Server) safeParseDNSDatagram(packet []byte) (parsed DnsParser.LitePacket, parseErr error, ok bool) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if s.log != nil {
+				s.log.Errorf(
+					"\U0001F4A5 <red>Packet Parser Panic Recovered, <yellow>%v</yellow></red>",
+					recovered,
+				)
+			}
+		}
+	}()
+
+	parsed, parseErr = DnsParser.ParseDNSDatagramLite(packet)
+	return parsed, parseErr, true
+}
+
+func (s *Server) safeHandleParsedPacket(packet []byte, parsed DnsParser.LitePacket, parseErr error) (response []byte) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			if s.log != nil {
@@ -251,7 +319,7 @@ func (s *Server) safeHandlePacket(packet []byte) (response []byte) {
 		}
 	}()
 
-	return s.handlePacket(packet)
+	return s.handleParsedPacket(packet, parsed, parseErr)
 }
 
 func (s *Server) onDrop(addr *net.UDPAddr, queueLen int, queueCap int) {
