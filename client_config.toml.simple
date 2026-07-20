@@ -149,6 +149,12 @@ AUTO_DISABLE_TIMEOUT_SERVERS = true
 # Clamped to [1s, 86400s].
 AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS = 30.0
 
+# Android VpnService integrations only.
+# When set, every upstream resolver/carrier socket fd is sent to this Unix socket
+# for VpnService.protect(fd) before connect/bind.
+# MASTERDNSVPN_PROTECT_PATH overrides this TOML value.
+# FD_CONTROL_UNIX_SOCKET = ""
+
 # If true, payload labels are base-encoded before tunneling.
 # Usually keep false unless a specific resolver path behaves better with it.
 BASE_ENCODE_DATA = false

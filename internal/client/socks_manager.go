@@ -593,6 +593,7 @@ func (c *Client) handleSocksUDPAssociate(ctx context.Context, conn net.Conn, cli
 		IP:   net.IPv4zero,
 		Port: 0,
 	}
+	// Local SOCKS5 UDP ASSOCIATE relay socket; do not protect app-facing listeners.
 	udpConn, err := net.ListenUDP("udp", bindAddr)
 	if err != nil {
 		_ = c.sendSocksReply(conn, SOCKS5_REPLY_GENERAL_FAILURE, SOCKS5_ATYP_IPV4, net.IPv4zero, 0)
