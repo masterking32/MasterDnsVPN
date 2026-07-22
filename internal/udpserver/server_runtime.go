@@ -28,8 +28,13 @@ func (s *Server) configureSocketBuffers(conn *net.UDPConn) {
 }
 
 func (s *Server) openUDPListeners() ([]*net.UDPConn, error) {
+	ip := net.ParseIP(s.cfg.UDPHost)
+	if ip != nil && ip.IsUnspecified() && ip.To4() != nil {
+		// Let Go select a dual-stack wildcard socket where the platform supports it.
+		ip = nil
+	}
 	addr := &net.UDPAddr{
-		IP:   net.ParseIP(s.cfg.UDPHost),
+		IP:   ip,
 		Port: s.cfg.UDPPort,
 	}
 	desired := s.cfg.EffectiveUDPReaders()

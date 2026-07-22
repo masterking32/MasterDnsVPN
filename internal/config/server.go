@@ -10,6 +10,7 @@ package config
 import (
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -472,7 +473,7 @@ func finalizeServerConfig(cfg ServerConfig) (ServerConfig, error) {
 }
 
 func (c ServerConfig) Address() string {
-	return fmt.Sprintf("%s:%d", c.UDPHost, c.UDPPort)
+	return net.JoinHostPort(c.UDPHost, strconv.Itoa(c.UDPPort))
 }
 
 func (c ServerConfig) DropLogInterval() time.Duration {

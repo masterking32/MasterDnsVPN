@@ -40,7 +40,9 @@ SUPPORTED_DOWNLOAD_COMPRESSION_TYPES = [0, 1, 2, 3]
 # - Defines front-door queueing and worker limits before session handling.
 # ------------------------------------------------------------------------------
 
-# UDP bind endpoint.
+# UDP bind endpoint. On systems with IPv4-mapped IPv6 support, the default
+# "0.0.0.0" accepts both IPv4 and IPv6 through the same bind. Use "::" to
+# explicitly request an IPv6 wildcard on systems without mapped IPv6 support.
 UDP_HOST = "0.0.0.0"
 UDP_PORT = 53
 

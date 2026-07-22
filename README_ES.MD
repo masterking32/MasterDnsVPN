@@ -716,7 +716,7 @@ Estos ajustes son críticos en el servidor:
 
 | Parámetro | Valor de ejemplo | Valores permitidos / Comportamiento real | Explicación completa |
 | :--- | :--- | :--- | :--- |
-| `UDP_HOST` | `"0.0.0.0"` | si está vacío, se usa este valor | Dirección donde se vincula el servidor DNS.<br>`0.0.0.0` significa escuchar en todas las interfaces. |
+| `UDP_HOST` | `"0.0.0.0"` | si está vacío, se usa este valor | Dirección donde se vincula el servidor DNS.<br>El comodín UDP genérico (`0.0.0.0` o `::`) acepta IPv4 e IPv6 en sistemas compatibles con IPv6 que mapea IPv4; de lo contrario, Go usa la familia de direcciones disponible. Una dirección concreta limita el listener a esa familia. |
 | `UDP_PORT` | `53` | `1..65535` | Puerto UDP usado por el servidor.<br>En la mayoría de los despliegues debe permanecer en `53` para que los resolutores puedan consultarlo directamente. |
 | `UDP_READERS` | `4` | valor automático por defecto si es `<=0` | Número de goroutines que leen directamente del socket UDP.<br>Un número mayor puede ayudar en servidores muy concurridos, pero a partir de cierto punto solo aumenta el cambio de contexto. |
 | `DNS_REQUEST_WORKERS` | `8` | valor automático por defecto si es `<=0` | Número de workers que toman solicitudes de la cola de entrada y las pasan a la capa de sesión/decodificación. |

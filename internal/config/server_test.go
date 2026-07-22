@@ -15,6 +15,27 @@ import (
 	"testing"
 )
 
+func TestServerConfigAddress(t *testing.T) {
+	tests := []struct {
+		name string
+		host string
+		want string
+	}{
+		{name: "IPv4", host: "0.0.0.0", want: "0.0.0.0:53"},
+		{name: "IPv6", host: "::", want: "[::]:53"},
+		{name: "concrete IPv6", host: "2001:db8::1", want: "[2001:db8::1]:53"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := ServerConfig{UDPHost: tt.host, UDPPort: 53}
+			if got := cfg.Address(); got != tt.want {
+				t.Fatalf("Address()=%q want=%q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoadServerConfigWithOverridesAppliesFlagPrecedence(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "server_config.toml")
