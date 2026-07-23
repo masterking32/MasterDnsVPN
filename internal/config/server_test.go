@@ -36,6 +36,41 @@ func TestServerConfigAddress(t *testing.T) {
 	}
 }
 
+func TestServerConfigUDPHostValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		host    string
+		want    string
+		wantErr bool
+	}{
+		{name: "empty uses IPv6 wildcard", want: "::"},
+		{name: "IPv4 literal", host: "0.0.0.0", want: "0.0.0.0"},
+		{name: "IPv6 literal", host: "2001:db8::1", want: "2001:db8::1"},
+		{name: "non-IP value", host: "not-an-ip", wantErr: true},
+		{name: "bracketed IPv6 literal", host: "[::]", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := defaultServerConfig()
+			cfg.UDPHost = tt.host
+			got, err := finalizeServerConfig(cfg)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("finalizeServerConfig(%q) unexpectedly succeeded", tt.host)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("finalizeServerConfig(%q) returned error: %v", tt.host, err)
+			}
+			if got.UDPHost != tt.want {
+				t.Fatalf("UDPHost=%q want=%q", got.UDPHost, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoadServerConfigWithOverridesAppliesFlagPrecedence(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "server_config.toml")
@@ -290,6 +325,9 @@ func TestLoadServerConfigFromJSONBase64AppliesDefaults(t *testing.T) {
 	}
 	if cfg.UDPPort != 5301 {
 		t.Fatalf("unexpected JSON base64 UDP port: got=%d want=%d", cfg.UDPPort, 5301)
+	}
+	if cfg.UDPHost != "::" {
+		t.Fatalf("unexpected default UDP host: got=%q want=%q", cfg.UDPHost, "::")
 	}
 	if cfg.MaxPacketsPerBatch != defaultServerConfig().MaxPacketsPerBatch {
 		t.Fatalf("expected default max packets per batch to apply: got=%d want=%d", cfg.MaxPacketsPerBatch, defaultServerConfig().MaxPacketsPerBatch)
