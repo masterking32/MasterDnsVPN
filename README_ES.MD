@@ -716,7 +716,7 @@ Estos ajustes son críticos en el servidor:
 
 | Parámetro | Valor de ejemplo | Valores permitidos / Comportamiento real | Explicación completa |
 | :--- | :--- | :--- | :--- |
-| `UDP_HOST` | `"::"` | literal IP sin corchetes; si está vacío, se usa este valor | Dirección donde se vincula el servidor DNS.<br>El comodín IPv6 predeterminado (`::`) acepta tráfico IPv4 mapeado donde sea compatible, por lo que un solo socket recibe IPv6 e IPv4; de lo contrario, permanece solo en IPv6. Usa `0.0.0.0` para el comodín IPv4. Una dirección concreta limita el listener a esa familia. |
+| `UDP_HOST` | `""` | vacío para el comodín independiente de la familia, o un literal IP sin corchetes | Dirección donde se vincula el servidor DNS.<br>El valor vacío predeterminado permite que Go elija un comodín UDP genérico. Acepta IPv4 e IPv6 mediante un solo socket donde se admite IPv6 con mapeo de IPv4; de lo contrario, Go selecciona una familia disponible. Los comodines explícitos `0.0.0.0` y `::` conservan su familia IPv4 o IPv6 cuando no hay sockets de doble pila mapeados. Una dirección concreta limita el listener a esa familia. |
 | `UDP_PORT` | `53` | `1..65535` | Puerto UDP usado por el servidor.<br>En la mayoría de los despliegues debe permanecer en `53` para que los resolutores puedan consultarlo directamente. |
 | `UDP_READERS` | `4` | valor automático por defecto si es `<=0` | Número de goroutines que leen directamente del socket UDP.<br>Un número mayor puede ayudar en servidores muy concurridos, pero a partir de cierto punto solo aumenta el cambio de contexto. |
 | `DNS_REQUEST_WORKERS` | `8` | valor automático por defecto si es `<=0` | Número de workers que toman solicitudes de la cola de entrada y las pasan a la capa de sesión/decodificación. |

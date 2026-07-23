@@ -21,6 +21,7 @@ func TestServerConfigAddress(t *testing.T) {
 		host string
 		want string
 	}{
+		{name: "family-neutral wildcard", host: "", want: ":53"},
 		{name: "IPv4", host: "0.0.0.0", want: "0.0.0.0:53"},
 		{name: "IPv6", host: "::", want: "[::]:53"},
 		{name: "concrete IPv6", host: "2001:db8::1", want: "[2001:db8::1]:53"},
@@ -43,7 +44,7 @@ func TestServerConfigUDPHostValidation(t *testing.T) {
 		want    string
 		wantErr bool
 	}{
-		{name: "empty uses IPv6 wildcard", want: "::"},
+		{name: "empty uses family-neutral wildcard", want: ""},
 		{name: "IPv4 literal", host: "0.0.0.0", want: "0.0.0.0"},
 		{name: "IPv6 literal", host: "2001:db8::1", want: "2001:db8::1"},
 		{name: "non-IP value", host: "not-an-ip", wantErr: true},
@@ -326,8 +327,8 @@ func TestLoadServerConfigFromJSONBase64AppliesDefaults(t *testing.T) {
 	if cfg.UDPPort != 5301 {
 		t.Fatalf("unexpected JSON base64 UDP port: got=%d want=%d", cfg.UDPPort, 5301)
 	}
-	if cfg.UDPHost != "::" {
-		t.Fatalf("unexpected default UDP host: got=%q want=%q", cfg.UDPHost, "::")
+	if cfg.UDPHost != "" {
+		t.Fatalf("unexpected default UDP host: got=%q want empty", cfg.UDPHost)
 	}
 	if cfg.MaxPacketsPerBatch != defaultServerConfig().MaxPacketsPerBatch {
 		t.Fatalf("expected default max packets per batch to apply: got=%d want=%d", cfg.MaxPacketsPerBatch, defaultServerConfig().MaxPacketsPerBatch)

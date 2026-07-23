@@ -13,7 +13,7 @@ import (
 
 const dualStackTestTimeout = 2 * time.Second
 
-func TestIPv6WildcardUDPListenerIsDualStack(t *testing.T) {
+func TestDefaultUDPListenerIsDualStack(t *testing.T) {
 	probe, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv6unspecified})
 	if err != nil {
 		t.Skipf("IPv6 wildcard unavailable: %v", err)
@@ -48,7 +48,7 @@ func TestIPv6WildcardUDPListenerIsDualStack(t *testing.T) {
 	}
 
 	server := New(config.ServerConfig{
-		UDPHost:          "::",
+		UDPHost:          "",
 		UDPPort:          0,
 		UDPReaders:       1,
 		SocketBufferSize: 64 * 1024,
@@ -125,7 +125,7 @@ func TestIPv6WildcardUDPListenerIsDualStack(t *testing.T) {
 	}
 }
 
-func TestExplicitIPv6WildcardRemainsIPv6(t *testing.T) {
+func TestExplicitIPv6WildcardUsesIPv6Socket(t *testing.T) {
 	probe, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.IPv6loopback})
 	if err != nil {
 		t.Skipf("IPv6 loopback unavailable: %v", err)
