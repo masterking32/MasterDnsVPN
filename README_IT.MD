@@ -716,7 +716,7 @@ Queste impostazioni sono critiche sul server:
 
 | Parametro | Valore di Esempio | Valori Consentiti / Comportamento Reale | Spiegazione Completa |
 | :--- | :--- | :--- | :--- |
-| `UDP_HOST` | `"0.0.0.0"` | se vuoto, viene usato questo valore | Indirizzo su cui il server DNS si lega.<br>`0.0.0.0` significa ascoltare su tutte le interfacce. |
+| `UDP_HOST` | `""` | vuoto per il wildcard indipendente dalla famiglia, oppure un indirizzo IP letterale senza parentesi | Indirizzo su cui il server DNS si lega.<br>Il valore vuoto predefinito lascia che Go scelga un wildcard UDP generico. Accetta IPv4 e IPv6 tramite un solo socket dove è supportato IPv6 con mapping IPv4; altrimenti Go seleziona una famiglia disponibile. I wildcard espliciti `0.0.0.0` e `::` mantengono la propria famiglia IPv4 o IPv6 quando i socket dual-stack mappati non sono disponibili. Un indirizzo concreto limita il listener a quella famiglia. |
 | `UDP_PORT` | `53` | `1..65535` | Porta UDP usata dal server.<br>Nella maggior parte delle distribuzioni questa dovrebbe rimanere `53` così che i resolver possano interrogarla direttamente. |
 | `UDP_READERS` | `4` | predefinito automatico se `<=0` | Numero di goroutine che leggono direttamente dal socket UDP.<br>Un numero maggiore può essere d'aiuto su server molto trafficati, ma oltre un certo punto aumenta solo il context switching. |
 | `DNS_REQUEST_WORKERS` | `8` | predefinito automatico se `<=0` | Numero di worker che prelevano le richieste dalla coda di ingresso e le passano al livello di sessione/decodifica. |

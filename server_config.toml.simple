@@ -40,8 +40,10 @@ SUPPORTED_DOWNLOAD_COMPRESSION_TYPES = [0, 1, 2, 3]
 # - Defines front-door queueing and worker limits before session handling.
 # ------------------------------------------------------------------------------
 
-# UDP bind endpoint.
-UDP_HOST = "0.0.0.0"
+# UDP bind endpoint. Leave empty for Go's family-neutral wildcard, which uses
+# one dual-stack socket where IPv4-mapped IPv6 is supported and otherwise
+# selects an available family. Non-empty values must be unbracketed IP literals.
+UDP_HOST = ""
 UDP_PORT = 53
 
 # UDP readers, DNS workers, and front-door request queue are smart-sized
