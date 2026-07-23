@@ -77,6 +77,46 @@ func TestHandlePacketKeepsUnsupportedAllowedAQueryAsNoData(t *testing.T) {
 	}
 }
 
+func TestSafeHandlePacketPreservesRequestParsingWithoutFallback(t *testing.T) {
+	server := &Server{
+		domainMatcher: domainMatcher.New([]string{"vpn.example.com"}, 3),
+	}
+	request := append(buildTestDNSQuery(0x6262, "example.org", Enums.DNS_RECORD_TYPE_A), 0)
+
+	response := server.safeHandlePacket(request)
+	if response == nil {
+		t.Fatal("expected DNS response for request with trailing data, got nil")
+	}
+
+	flags := binary.BigEndian.Uint16(response[2:4])
+	if got := flags & 0x000F; got != Enums.DNSR_CODE_NAME_ERROR {
+		t.Fatalf("unexpected rcode: got=%d want=%d", got, Enums.DNSR_CODE_NAME_ERROR)
+	}
+}
+
+func TestHandlePacketDropsNonRequestDatagrams(t *testing.T) {
+	server := &Server{}
+	response := buildTestDNSQuery(0x6262, "example.org", Enums.DNS_RECORD_TYPE_A)
+	response[2] |= 0x80
+
+	incompleteQuestions := buildTestDNSQuery(0x6363, "example.org", Enums.DNS_RECORD_TYPE_A)
+	binary.BigEndian.PutUint16(incompleteQuestions[4:6], 2)
+
+	emptyQuestion := make([]byte, 12)
+
+	for name, packet := range map[string][]byte{
+		"response":             response,
+		"incomplete questions": incompleteQuestions,
+		"empty question":       emptyQuestion,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if reply := server.handlePacket(packet); reply != nil {
+				t.Fatalf("non-request datagram received a reply: %x", reply)
+			}
+		})
+	}
+}
+
 func buildTestDNSQuery(id uint16, name string, qtype uint16) []byte {
 	qname := encodeTestDNSName(name)
 	packet := make([]byte, 12+len(qname)+4)

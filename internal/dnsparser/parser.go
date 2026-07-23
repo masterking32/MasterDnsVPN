@@ -17,12 +17,14 @@ var (
 	ErrInvalidName     = errors.New("invalid dns name")
 	ErrInvalidQuestion = errors.New("invalid dns question section")
 	ErrInvalidAnswer   = errors.New("invalid dns resource record section")
+	ErrNotDNSMessage   = errors.New("packet does not look like a complete dns message")
 	ErrNotDNSRequest   = errors.New("packet does not look like a supported dns request")
 )
 
 const (
-	dnsHeaderSize = 12
-	maxNameJumps  = 10
+	dnsHeaderSize     = 12
+	maxNameJumps      = 10
+	maxNameWireLength = 255
 )
 
 type Header struct {
@@ -90,6 +92,42 @@ func ParseDNSRequestLite(data []byte) (LitePacket, error) {
 	header := parseHeader(data)
 	if !isLikelyDNSRequestHeader(header) {
 		return LitePacket{}, ErrNotDNSRequest
+	}
+
+	return parsePacketLiteWithHeader(data, header)
+}
+
+// ParseDNSDatagramLite parses a complete, structurally plausible DNS request or
+// response. Unlike ParseDNSRequestLite, it validates every declared section and
+// rejects trailing data so callers can use success as a routing boundary.
+func ParseDNSDatagramLite(data []byte) (LitePacket, error) {
+	if len(data) < dnsHeaderSize {
+		return LitePacket{}, ErrPacketTooShort
+	}
+
+	header := parseHeader(data)
+	if !isLikelyDNSMessageHeader(header) {
+		return LitePacket{}, ErrNotDNSMessage
+	}
+
+	offset, err := skipQuestions(data, dnsHeaderSize, int(header.QDCount))
+	if err != nil {
+		return LitePacket{}, err
+	}
+	offset, err = skipResourceRecords(data, offset, int(header.ANCount))
+	if err != nil {
+		return LitePacket{}, err
+	}
+	offset, err = skipResourceRecords(data, offset, int(header.NSCount))
+	if err != nil {
+		return LitePacket{}, err
+	}
+	offset, err = skipResourceRecords(data, offset, int(header.ARCount))
+	if err != nil {
+		return LitePacket{}, err
+	}
+	if offset != len(data) {
+		return LitePacket{}, ErrNotDNSMessage
 	}
 
 	return parsePacketLiteWithHeader(data, header)
@@ -247,43 +285,54 @@ func parseResourceRecords(data []byte, offset int, count int) ([]ResourceRecord,
 }
 
 func parseName(data []byte, offset int) (string, int, error) {
+	var name strings.Builder
+	nextOffset, hasLabel, err := walkName(data, offset, &name)
+	if err != nil {
+		return "", nextOffset, err
+	}
+	if !hasLabel {
+		return ".", nextOffset, nil
+	}
+	return name.String(), nextOffset, nil
+}
+
+func walkName(data []byte, offset int, name *strings.Builder) (int, bool, error) {
 	dataLen := len(data)
 	if offset >= dataLen {
-		return "", offset, ErrInvalidName
+		return offset, false, ErrInvalidName
 	}
 
 	var (
-		jumped   bool
-		jumps    int
-		origNext = offset
-		name     strings.Builder
-		hasLabel bool
+		jumped     bool
+		jumps      int
+		nextOffset = offset
+		hasLabel   bool
+		wireLen    = 1
 	)
 
 	for {
 		if offset >= dataLen {
-			return "", origNext, ErrInvalidName
+			return nextOffset, hasLabel, ErrInvalidName
 		}
 
 		length := int(data[offset])
 		if length == 0 {
-			offset++
 			if !jumped {
-				origNext = offset
+				nextOffset = offset + 1
 			}
-			break
+			return nextOffset, hasLabel, nil
 		}
 
 		if length >= 192 { // 0xC0
 			if offset+1 >= dataLen || jumps >= maxNameJumps {
-				return "", origNext, ErrInvalidName
+				return nextOffset, hasLabel, ErrInvalidName
 			}
 			ptr := int(binary.BigEndian.Uint16(data[offset:offset+2]) & 0x3FFF)
-			if ptr >= dataLen {
-				return "", origNext, ErrInvalidName
+			if ptr < dnsHeaderSize || ptr >= offset || ptr >= dataLen {
+				return nextOffset, hasLabel, ErrInvalidName
 			}
 			if !jumped {
-				origNext = offset + 2
+				nextOffset = offset + 2
 				jumped = true
 			}
 			offset = ptr
@@ -292,33 +341,33 @@ func parseName(data []byte, offset int) (string, int, error) {
 		}
 
 		if length > 63 {
-			return "", origNext, ErrInvalidName
+			return nextOffset, hasLabel, ErrInvalidName
 		}
+		if wireLen+length+1 > maxNameWireLength {
+			return nextOffset, hasLabel, ErrInvalidName
+		}
+		wireLen += length + 1
 
 		offset++
 		end := offset + length
 		if end > dataLen {
-			return "", origNext, ErrInvalidName
+			return nextOffset, hasLabel, ErrInvalidName
 		}
 
-		if name.Len() == 0 {
-			name.Grow(64)
-		} else {
-			name.WriteByte('.')
+		if name != nil {
+			if !hasLabel {
+				name.Grow(64)
+			} else {
+				name.WriteByte('.')
+			}
+			writeLowerASCIILabel(name, data[offset:end])
 		}
-
-		writeLowerASCIILabel(&name, data[offset:end])
 		hasLabel = true
 		offset = end
 		if !jumped {
-			origNext = offset
+			nextOffset = offset
 		}
 	}
-
-	if !hasLabel {
-		return ".", origNext, nil
-	}
-	return name.String(), origNext, nil
 }
 
 func writeLowerASCIILabel(dst *strings.Builder, label []byte) {

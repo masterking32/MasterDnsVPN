@@ -10,6 +10,7 @@ package udpserver
 import (
 	"container/heap"
 	"context"
+	"fmt"
 	"net"
 	"strconv"
 	"sync"
@@ -18,6 +19,7 @@ import (
 
 	"masterdnsvpn-go/internal/config"
 	dnsCache "masterdnsvpn-go/internal/dnscache"
+	DnsParser "masterdnsvpn-go/internal/dnsparser"
 	domainMatcher "masterdnsvpn-go/internal/domainmatcher"
 	fragmentStore "masterdnsvpn-go/internal/fragmentstore"
 	"masterdnsvpn-go/internal/logger"
@@ -83,13 +85,18 @@ type Server struct {
 	lastDeferredDropLogUnix  atomic.Int64
 	pongNonce                atomic.Uint32
 	invalidDropMode          atomic.Uint32
+	fallback                 *udpFallbackManager
 }
 
 type request struct {
-	buf  []byte
-	size int
-	addr *net.UDPAddr
-	conn *net.UDPConn
+	buf           []byte
+	size          int
+	addr          *net.UDPAddr
+	conn          *net.UDPConn
+	parsed        DnsParser.LitePacket
+	parseErr      error
+	hasParsedDNS  bool
+	fallbackEpoch *udpFallbackRouteEpoch
 }
 
 type postSessionValidation struct {
@@ -119,6 +126,10 @@ func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Se
 	sessions := newSessionStore(cfg.EffectiveSessionOrphanQueueInitialCap(), cfg.EffectiveStreamQueueInitialCapacity(), cfg.SessionInitReuseTTL(), cfg.RecentlyClosedStreamTTL(), cfg.RecentlyClosedStreamCap)
 	sessions.maxActiveSessions = cfg.MaxAllowedClientActiveSessions
 	sessions.maxActiveStreams = cfg.MaxAllowedClientActiveStreams
+	packetBufferSize := cfg.MaxPacketSize
+	if cfg.FallbackAddress != "" && packetBufferSize < udpFallbackMaxUDPPacketSize {
+		packetBufferSize = udpFallbackMaxUDPPacketSize
+	}
 	return &Server{
 		cfg:                    cfg,
 		log:                    log,
@@ -167,7 +178,7 @@ func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Se
 		deferredInflightIndex: make(map[uint8]map[uint16]map[uint64]struct{}, 64),
 		packetPool: sync.Pool{
 			New: func() any {
-				return make([]byte, cfg.MaxPacketSize)
+				return make([]byte, packetBufferSize)
 			},
 		},
 	}
@@ -296,20 +307,66 @@ func (s *Server) Run(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	conns, err := s.openUDPListeners()
+	var fallbackAddr *net.UDPAddr
+	if s.cfg.FallbackAddress != "" {
+		resolved, err := net.ResolveUDPAddr("udp", s.cfg.FallbackAddress)
+		if err != nil {
+			return fmt.Errorf("resolve fallback address %q: %w", s.cfg.FallbackAddress, err)
+		}
+		if resolved.IP.IsUnspecified() {
+			return fmt.Errorf("fallback address %q resolves to an unspecified address", s.cfg.FallbackAddress)
+		}
+		fallbackAddr = resolved
+	}
+
+	readerCount := s.cfg.EffectiveUDPReaders()
+	var fallback *udpFallbackManager
+	if fallbackAddr != nil {
+		// Fallback classification is stateful and order-sensitive per source.
+		readerCount = 1
+	}
+	conns, err := s.openUDPListeners(readerCount)
 	if err != nil {
 		return err
 	}
-	defer func() {
+	var closeListenersOnce sync.Once
+	closeListeners := func() {
+		closeListenersOnce.Do(func() {
+			for _, conn := range conns {
+				_ = conn.Close()
+			}
+		})
+	}
+	defer closeListeners()
+
+	if fallbackAddr != nil {
 		for _, conn := range conns {
-			_ = conn.Close()
+			localAddr, ok := conn.LocalAddr().(*net.UDPAddr)
+			if !ok {
+				continue
+			}
+			targetsListener, err := fallbackTargetsListener(localAddr, fallbackAddr)
+			if err != nil {
+				return fmt.Errorf("validate fallback address %s against UDP listener %s: %w", fallbackAddr, localAddr, err)
+			}
+			if targetsListener {
+				return fmt.Errorf("fallback address %s resolves to the UDP listener and would loop", fallbackAddr)
+			}
 		}
-	}()
+
+		fallback = newUDPFallbackManager(fallbackAddr, s.log)
+		s.fallback = fallback
+		defer func() {
+			closeListeners()
+			fallback.Close()
+			s.fallback = nil
+		}()
+	}
 
 	s.log.Infof(
 		"\U0001F4E1 <green>UDP Listener Ready, Addr: <cyan>%s</cyan>, Readers: <cyan>%d</cyan>, Workers: <cyan>%d</cyan>, Queue: <cyan>%d</cyan>, Sockets: <cyan>%d</cyan></green>",
 		s.cfg.Address(),
-		s.cfg.EffectiveUDPReaders(),
+		readerCount,
 		s.cfg.EffectiveDNSRequestWorkers(),
 		s.cfg.EffectiveMaxConcurrentRequests(),
 		len(conns),
@@ -330,16 +387,20 @@ func (s *Server) Run(ctx context.Context) error {
 
 	go func() {
 		<-runCtx.Done()
-		for _, conn := range conns {
-			_ = conn.Close()
+		closeListeners()
+		if fallback != nil {
+			fallback.Close()
 		}
 	}()
 
 	readErrCh := make(chan error, max(1, len(conns)))
 	var readerWG sync.WaitGroup
-	s.startReaders(runCtx, conns, reqCh, readErrCh, &readerWG)
+	s.startReaders(runCtx, conns, readerCount, reqCh, readErrCh, &readerWG)
 
 	readerWG.Wait()
+	// A UDP reply can be waiting for send-buffer space. Close the listener
+	// before waiting for workers or fallback reply loops so teardown unblocks it.
+	closeListeners()
 	close(reqCh)
 	workerWG.Wait()
 	cancel()
@@ -355,4 +416,43 @@ func (s *Server) Run(ctx context.Context) error {
 	default:
 		return nil
 	}
+}
+
+func fallbackTargetsListener(listener *net.UDPAddr, target *net.UDPAddr) (bool, error) {
+	if listener == nil || target == nil || listener.Port != target.Port {
+		return false, nil
+	}
+	if target.IP.IsUnspecified() {
+		return true, nil
+	}
+	if listener.IP.Equal(target.IP) && listener.Zone == target.Zone {
+		return true, nil
+	}
+	if !listener.IP.IsUnspecified() {
+		return false, nil
+	}
+	if listener.IP.To4() != nil && target.IP.To4() == nil {
+		return false, nil
+	}
+	if target.IP.IsLoopback() {
+		return true, nil
+	}
+
+	interfaceAddrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false, fmt.Errorf("enumerate local interface addresses: %w", err)
+	}
+	for _, addr := range interfaceAddrs {
+		var ip net.IP
+		switch value := addr.(type) {
+		case *net.IPNet:
+			ip = value.IP
+		case *net.IPAddr:
+			ip = value.IP
+		}
+		if ip != nil && ip.Equal(target.IP) {
+			return true, nil
+		}
+	}
+	return false, nil
 }

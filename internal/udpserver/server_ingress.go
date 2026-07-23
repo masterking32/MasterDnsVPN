@@ -28,6 +28,14 @@ func (s *Server) handlePacket(packet []byte) []byte {
 		return s.buildNoDataResponseLogged(packet, "request-parse-failed")
 	}
 
+	return s.handleParsedPacket(packet, parsed, nil)
+}
+
+func (s *Server) handleParsedPacket(packet []byte, parsed DnsParser.LitePacket, err error) []byte {
+	if err != nil || parsed.Header.QR != 0 {
+		return nil
+	}
+
 	if !parsed.HasQuestion {
 		return s.buildNoDataResponseLogged(packet, "request-has-no-question")
 	}
@@ -52,7 +60,6 @@ func (s *Server) handlePacket(packet []byte) []byte {
 		return s.buildNoDataResponseLiteLogged(packet, parsed, "domain-match-unknown-action")
 	}
 }
-
 func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacket, decision domainMatcher.Decision) []byte {
 	vpnPacket, err := VpnProto.ParseInflatedFromLabels(decision.Labels, s.codec)
 	if err != nil {
