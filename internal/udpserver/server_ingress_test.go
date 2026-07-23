@@ -77,6 +77,23 @@ func TestHandlePacketKeepsUnsupportedAllowedAQueryAsNoData(t *testing.T) {
 	}
 }
 
+func TestSafeHandlePacketPreservesRequestParsingWithoutFallback(t *testing.T) {
+	server := &Server{
+		domainMatcher: domainMatcher.New([]string{"vpn.example.com"}, 3),
+	}
+	request := append(buildTestDNSQuery(0x6262, "example.org", Enums.DNS_RECORD_TYPE_A), 0)
+
+	response := server.safeHandlePacket(request)
+	if response == nil {
+		t.Fatal("expected DNS response for request with trailing data, got nil")
+	}
+
+	flags := binary.BigEndian.Uint16(response[2:4])
+	if got := flags & 0x000F; got != Enums.DNSR_CODE_NAME_ERROR {
+		t.Fatalf("unexpected rcode: got=%d want=%d", got, Enums.DNSR_CODE_NAME_ERROR)
+	}
+}
+
 func TestHandlePacketDropsNonRequestDatagrams(t *testing.T) {
 	server := &Server{}
 	response := buildTestDNSQuery(0x6262, "example.org", Enums.DNS_RECORD_TYPE_A)

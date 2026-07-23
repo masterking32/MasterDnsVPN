@@ -60,7 +60,11 @@ func TestFallbackTargetsListener(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := fallbackTargetsListener(tt.listener, tt.target); got != tt.want {
+			got, err := fallbackTargetsListener(tt.listener, tt.target)
+			if err != nil {
+				t.Fatalf("fallbackTargetsListener() failed: %v", err)
+			}
+			if got != tt.want {
 				t.Fatalf("fallbackTargetsListener()=%t want=%t", got, tt.want)
 			}
 		})
@@ -413,6 +417,7 @@ func TestDNSWorkerFallbackForwardsNonDNSDatagrams(t *testing.T) {
 
 	incompleteQuestions := buildTestDNSQuery(0x7373, "example.org", Enums.DNS_RECORD_TYPE_A)
 	binary.BigEndian.PutUint16(incompleteQuestions[4:6], 2)
+	trailingData := append(buildTestDNSQuery(0x7474, "example.org", Enums.DNS_RECORD_TYPE_A), 0)
 
 	for _, tt := range []struct {
 		name   string
@@ -420,6 +425,7 @@ func TestDNSWorkerFallbackForwardsNonDNSDatagrams(t *testing.T) {
 	}{
 		{name: "empty question", packet: emptyQuestion},
 		{name: "incomplete declared questions", packet: incompleteQuestions},
+		{name: "trailing data", packet: trailingData},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			echo := startFallbackIntegrationEcho(t)

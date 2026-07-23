@@ -8,6 +8,7 @@
 package udpserver
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -18,8 +19,16 @@ import (
 )
 
 func (s *Server) handlePacket(packet []byte) []byte {
-	parsed, err := DnsParser.ParseDNSDatagramLite(packet)
-	return s.handleParsedPacket(packet, parsed, err)
+	parsed, err := DnsParser.ParseDNSRequestLite(packet)
+	if err != nil {
+		if errors.Is(err, DnsParser.ErrNotDNSRequest) || errors.Is(err, DnsParser.ErrPacketTooShort) {
+			return nil
+		}
+
+		return s.buildNoDataResponseLogged(packet, "request-parse-failed")
+	}
+
+	return s.handleParsedPacket(packet, parsed, nil)
 }
 
 func (s *Server) handleParsedPacket(packet []byte, parsed DnsParser.LitePacket, err error) []byte {

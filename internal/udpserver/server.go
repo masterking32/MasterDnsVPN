@@ -342,7 +342,14 @@ func (s *Server) Run(ctx context.Context) error {
 	if fallbackAddr != nil {
 		for _, conn := range conns {
 			localAddr, ok := conn.LocalAddr().(*net.UDPAddr)
-			if ok && fallbackTargetsListener(localAddr, fallbackAddr) {
+			if !ok {
+				continue
+			}
+			targetsListener, err := fallbackTargetsListener(localAddr, fallbackAddr)
+			if err != nil {
+				return fmt.Errorf("validate fallback address %s against UDP listener %s: %w", fallbackAddr, localAddr, err)
+			}
+			if targetsListener {
 				return fmt.Errorf("fallback address %s resolves to the UDP listener and would loop", fallbackAddr)
 			}
 		}
@@ -411,29 +418,29 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 }
 
-func fallbackTargetsListener(listener *net.UDPAddr, target *net.UDPAddr) bool {
+func fallbackTargetsListener(listener *net.UDPAddr, target *net.UDPAddr) (bool, error) {
 	if listener == nil || target == nil || listener.Port != target.Port {
-		return false
+		return false, nil
 	}
 	if target.IP.IsUnspecified() {
-		return true
+		return true, nil
 	}
 	if listener.IP.Equal(target.IP) && listener.Zone == target.Zone {
-		return true
+		return true, nil
 	}
 	if !listener.IP.IsUnspecified() {
-		return false
+		return false, nil
 	}
 	if listener.IP.To4() != nil && target.IP.To4() == nil {
-		return false
+		return false, nil
 	}
 	if target.IP.IsLoopback() {
-		return true
+		return true, nil
 	}
 
 	interfaceAddrs, err := net.InterfaceAddrs()
 	if err != nil {
-		return false
+		return false, fmt.Errorf("enumerate local interface addresses: %w", err)
 	}
 	for _, addr := range interfaceAddrs {
 		var ip net.IP
@@ -444,8 +451,8 @@ func fallbackTargetsListener(listener *net.UDPAddr, target *net.UDPAddr) bool {
 			ip = value.IP
 		}
 		if ip != nil && ip.Equal(target.IP) {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }

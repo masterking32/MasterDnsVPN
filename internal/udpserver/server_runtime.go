@@ -282,12 +282,20 @@ func (s *Server) dnsWorker(ctx context.Context, conn *net.UDPConn, reqCh <-chan 
 	}
 }
 
-func (s *Server) safeHandlePacket(packet []byte) []byte {
-	parsed, parseErr, ok := s.safeParseDNSDatagram(packet)
-	if !ok {
-		return nil
-	}
-	return s.safeHandleParsedPacket(packet, parsed, parseErr)
+func (s *Server) safeHandlePacket(packet []byte) (response []byte) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if s.log != nil {
+				s.log.Errorf(
+					"\U0001F4A5 <red>Packet Handler Panic Recovered, <yellow>%v</yellow></red>",
+					recovered,
+				)
+			}
+			response = nil
+		}
+	}()
+
+	return s.handlePacket(packet)
 }
 
 func (s *Server) safeParseDNSDatagram(packet []byte) (parsed DnsParser.LitePacket, parseErr error, ok bool) {
