@@ -324,8 +324,21 @@ func (c *Client) RunInitialMTUTests(ctx context.Context) error {
 		return ErrNoValidConnections
 	}
 
+	fastStart := c.cfg.RecheckInactiveServersEnabled
+	targetValid := len(scanConnections)
+	if fastStart {
+		minRequired := c.cfg.RX_TX_Workers
+		if minRequired < 1 {
+			minRequired = 1
+		}
+		targetValid = min(len(scanConnections), minRequired)
+	}
+
 	uploadCaps := c.precomputeUploadCaps()
 	workerCount := min(max(1, c.cfg.EffectiveMTUTestParallelism()), len(scanConnections))
+	if fastStart {
+		workerCount = min(workerCount, targetValid)
+	}
 	c.logMTUStart(workerCount)
 	c.prepareMTUSuccessOutputFile()
 
@@ -335,35 +348,55 @@ func (c *Client) RunInitialMTUTests(ctx context.Context) error {
 			if err := ctx.Err(); err != nil {
 				return nil
 			}
+			if fastStart && counters.valid.Load() >= int32(targetValid) {
+				break
+			}
 			conn := scanConnections[idx]
 			c.runConnectionMTUTest(ctx, conn, idx+1, len(scanConnections), uploadCaps[conn.Domain], counters)
 		}
 	} else {
-		jobs := make(chan int, len(scanConnections))
+		scanCtx, cancelScan := context.WithCancel(ctx)
+		defer cancelScan()
+
+		jobs := make(chan int, workerCount)
 		var wg sync.WaitGroup
 		for range workerCount {
 			wg.Go(func() {
 				for idx := range jobs {
-					if err := ctx.Err(); err != nil {
+					if scanCtx.Err() != nil {
+						return
+					}
+					if fastStart && counters.valid.Load() >= int32(targetValid) {
+						cancelScan()
 						return
 					}
 					conn := scanConnections[idx]
-					c.runConnectionMTUTest(ctx, conn, idx+1, len(scanConnections), uploadCaps[conn.Domain], counters)
+					c.runConnectionMTUTest(scanCtx, conn, idx+1, len(scanConnections), uploadCaps[conn.Domain], counters)
+					if fastStart && counters.valid.Load() >= int32(targetValid) {
+						cancelScan()
+					}
 				}
 			})
 		}
 
+	dispatchLoop:
 		for idx := range scanConnections {
+			if fastStart && counters.valid.Load() >= int32(targetValid) {
+				cancelScan()
+				break dispatchLoop
+			}
 			select {
-			case <-ctx.Done():
-				close(jobs)
-				wg.Wait()
-				return nil
+			case <-scanCtx.Done():
+				break dispatchLoop
 			case jobs <- idx:
 			}
 		}
 		close(jobs)
 		wg.Wait()
+
+		if err := ctx.Err(); err != nil {
+			return nil
+		}
 	}
 
 	activeConns := c.balancer.ActiveConnections()
@@ -378,6 +411,14 @@ func (c *Client) RunInitialMTUTests(ctx context.Context) error {
 	c.applySyncedMTUState(minUpload, minDownload, minUploadChars)
 	c.appendMTUUsageSeparatorOnce()
 	c.logMTUCompletion(validConns)
+
+	if fastStart && len(validConns) < len(scanConnections) {
+		remaining := len(scanConnections) - len(validConns)
+		if c.log != nil {
+			c.log.Infof("⚡ <green>FastStart:</green> Initial connection ready with <cyan>%d</cyan> resolver(s). Background recheck will discover and test remaining <cyan>%d</cyan> resolver(s).", len(validConns), remaining)
+		}
+	}
+
 	return nil
 }
 

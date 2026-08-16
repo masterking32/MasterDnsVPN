@@ -139,6 +139,9 @@ STREAM_RESOLVER_FAILOVER_COOLDOWN = 2.5
 
 # If true, candidate resolvers rejected during initial MTU testing are rechecked in the
 # background using the current synced upload/download MTUs.
+# Also activates FastStart: connects immediately once a minimal working set of
+# resolvers (matching RX_TX_WORKERS) is validated, discovering and adding the
+# remaining resolvers in the background.
 # Note: Key name retains 'SERVERS' for backwards compatibility with existing configs.
 RECHECK_INACTIVE_SERVERS_ENABLED = true
 

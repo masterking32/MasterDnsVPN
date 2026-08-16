@@ -130,6 +130,10 @@ type ClientConfigFlagBinder struct {
 	flagToField map[string]string
 }
 
+func DefaultClientConfig() ClientConfig {
+	return defaultClientConfig()
+}
+
 func defaultClientConfig() ClientConfig {
 	return ClientConfig{
 		ProtocolType:                          "SOCKS5",
