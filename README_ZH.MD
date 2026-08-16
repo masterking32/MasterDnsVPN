@@ -604,12 +604,12 @@ Copy-Item client_resolvers.simple client_resolvers.txt
 
 | 参数 | 示例值 | 允许的值 / 实际行为 | 完整说明 |
 | :--- | :--- | :--- | :--- |
-| `RESOLVER_BALANCING_STRATEGY` | `2` | `0..8` | 选择解析器的方式。<br>`0/2` = 轮询（Round Robin）、`1` = 随机、`3` = 最小丢包、`4` = 最低延迟、`5` = 混合评分、`6` = 先丢包后延迟、`7` = 最小丢包前列随机、`8` = 最小丢包前列轮询。<br>混合模式使用加权综合评分。先丢包后延迟模式先按丢包筛选出候选名单，然后在该层中优先选择更低延迟，并在几乎相当的前列候选之间轮换。前列随机模式从最佳丢包层中随机挑选，以免负载固定在单个解析器上。前列轮询模式以确定性的轮换方式循环遍历同一最佳丢包层。 |
+| `RESOLVER_BALANCING_STRATEGY` | `6` | `0..8` | 选择解析器的方式。<br>`0/2` = 轮询（Round Robin）、`1` = 随机、`3` = 最小丢包、`4` = 最低延迟、`5` = 混合评分、`6` = 先丢包后延迟（默认）、`7` = 最小丢包前列随机、`8` = 最小丢包前列轮询。<br>混合模式使用加权综合评分。先丢包后延迟模式先按丢包筛选出候选名单，然后在该层中优先选择更低延迟，并在几乎相当的前列候选之间轮换。前列随机模式从最佳丢包层中随机挑选，以免负载固定在单个解析器上。前列轮询模式以确定性的轮换方式循环遍历同一最佳丢包层。 |
 | `PACKET_DUPLICATION_COUNT` | `2` | 代码中会钳制到有效范围 | 常规出站数据包的冗余复制次数。<br>较高的值会增加流量成本，但能提升弱链路上的生存能力。 |
 | `SETUP_PACKET_DUPLICATION_COUNT` | `2` | 代码中会钳制到有效范围 | 与 `PACKET_DUPLICATION_COUNT` 类似，但用于对建立过程敏感的数据包，例如流创建及其他关键控制事件。 |
 | `STREAM_RESOLVER_FAILOVER_RESEND_THRESHOLD` | `2` | 若 `<1` 则使用回退值 | 如果某条流在同一首选解析器上累积了反复的重发压力，客户端可能会将该流故障切换到另一个解析器。<br>此阈值控制切换发生的速度。 |
 | `STREAM_RESOLVER_FAILOVER_COOLDOWN` | `2.5` | 若 `<=0` 则使用回退值 | 同一条流两次故障切换之间的最小延迟。<br>这可防止在解析器之间发生不稳定的来回振荡。 |
-| `RECHECK_INACTIVE_SERVERS_ENABLED` | `true` | `true/false` | 为当前被禁用或不健康的解析器启用后台重新检查。<br>如果禁用，一旦解析器变得不可用，它将一直保持禁用状态，直到重启或手动重建。 |
+| `RECHECK_INACTIVE_SERVERS_ENABLED` | `true` | `true/false` | 为当前被禁用或不健康的解析器启用后台重新检查。<br>同时激活 **FastStart**：验证 `RX_TX_WORKERS` 个可用解析器后立即连接，并在后台扫描其余解析器。<br>如果禁用，一旦解析器变得不可用，它将一直保持禁用状态，直到重启。 |
 | `AUTO_DISABLE_TIMEOUT_SERVERS` | `true` | `true/false` | 启用对持续超时且无任何成功活动的解析器的自动禁用。 |
 | `AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS` | `30.0` | 若 `<=0` 则使用回退值 | 用于判断某解析器是否仅有超时的时间窗口。<br>如果此窗口内的所有观察结果都是超时，该解析器可能会被禁用。 |
 | `FD_CONTROL_UNIX_SOCKET` | `""` | 留空，或填写 Unix 套接字路径 | 仅用于基于 VpnService 的 Android 宿主。<br>设置后，客户端会在 connect/bind 之前把每个上游 UDP 套接字（解析器连接池、MTU 探测、健康检查、隧道 worker）的 fd 发送到此 Unix 套接字，以便宿主调用 `VpnService.protect(fd)`，让发往解析器的流量不进入隧道。<br>本地监听器（SOCKS5/TCP、SOCKS5 UDP 中继、本地 DNS）不会被发送。如果 protect 服务不可达或拒绝该 fd，套接字创建将失败。<br>桌面和服务器环境请留空。 |
@@ -642,7 +642,20 @@ Copy-Item client_resolvers.simple client_resolvers.txt
 | `MTU_ADDED_SERVER_LOG_FORMAT` | `"Resolver {IP} ({DOMAIN}) added back at {TIME} (UP {UP_MTU}, DOWN {DOWN_MTU})"` | 字符串 | 当解析器被恢复时的日志/输出格式。 |
 | `MTU_REACTIVE_ADDED_SERVER_LOG_FORMAT` | `"Resolver {IP} ({DOMAIN}) added back at {TIME} after reactive recheck (UP {UP_MTU}, DOWN {DOWN_MTU})"` | 字符串 | 当解析器经后台健康检查被恢复时的日志/输出格式。 |
 
-### 3.4.7) 🧵 运行时工作线程、队列与计时器
+### 3.4.7) ⚡ 微突发吞吐量测试与速率资格审查
+
+| 参数 | 示例值 | 允许的值 / 实际行为 | 完整说明 |
+| :--- | :--- | :--- | :--- |
+| `MICRO_BURST_TEST_ENABLED` | `true` | `true/false` | 若启用，在 MTU 测试后运行流水线微突发测试，以检测限速（rate-limiting）并测量实际突发吞吐量。 |
+| `MICRO_BURST_PACKET_COUNT` | `6` | `2..32` | 突发测试期间发送给每个候选解析器的连续查询数量。 |
+| `MICRO_BURST_PARALLELISM` | `8` | `1..128` | 微突发测试的并发度。建议 Android/移动设备设为 `6-8`，桌面/服务器设为 `16-32`。 |
+| `MAX_ACTIVE_RESOLVERS` | `15` | `>=0` | 激活进主池的最高评分解析器最大数量（`0` = 不限）。其余解析器转入备用（standby）状态。 |
+| `MAX_BURST_LOSS_RATIO` | `0.20` | `0.0..1.0` | 突发测试中允许的最大丢包率（`0.20` = 20% 丢包），超出将被拒绝。 |
+| `MIN_BURST_THROUGHPUT_KBPS` | `0.0` | `>=0.0` | 可选的最低吞吐量截断阈值（KB/s，`0.0` 表示不设阈值）。 |
+| `RECHECK_BURST_TEST_ENABLED` | `true` | `true/false` | 若启用，后台健康检查在重新激活非活跃解析器前会进行微突发测试验证。 |
+| `RECHECK_BURST_PACKET_COUNT` | `4` | `2..32` | 后台健康重新检查时微突发测试发送的查询包数量。 |
+
+### 3.4.8) 🧵 运行时工作线程、队列与计时器
 
 | 参数 | 示例值 | 允许的值 / 实际行为 | 完整说明 |
 | :--- | :--- | :--- | :--- |

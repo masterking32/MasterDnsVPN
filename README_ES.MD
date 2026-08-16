@@ -604,12 +604,12 @@ Estos ajustes son críticos en el servidor:
 
 | Parámetro | Valor de ejemplo | Valores permitidos / Comportamiento real | Explicación completa |
 | :--- | :--- | :--- | :--- |
-| `RESOLVER_BALANCING_STRATEGY` | `2` | `0..8` | Elige cómo se seleccionan los resolutores.<br>`0/2` = Round Robin, `1` = Aleatorio, `3` = Menor pérdida, `4` = Menor latencia, `5` = Puntuación híbrida, `6` = Pérdida y luego latencia, `7` = Menor pérdida superior aleatorio, `8` = Menor pérdida superior Round Robin.<br>El modo híbrido usa una puntuación combinada ponderada. El modo de pérdida y luego latencia primero preselecciona por pérdida, luego prefiere menor latencia dentro de ese nivel y rota entre los candidatos principales casi iguales. El modo superior aleatorio elige al azar entre el mejor nivel de pérdida para que la carga no se quede en un solo resolutor. El modo superior Round Robin recorre el mismo nivel superior de pérdida con rotación determinista. |
+| `RESOLVER_BALANCING_STRATEGY` | `6` | `0..8` | Elige cómo se seleccionan los resolutores.<br>`0/2` = Round Robin, `1` = Aleatorio, `3` = Menor pérdida, `4` = Menor latencia, `5` = Puntuación híbrida, `6` = Pérdida y luego latencia (Por defecto), `7` = Menor pérdida superior aleatorio, `8` = Menor pérdida superior Round Robin.<br>El modo híbrido usa una puntuación combinada ponderada. El modo de pérdida y luego latencia primero preselecciona por pérdida, luego prefiere menor latencia dentro de ese nivel y rota entre los candidatos principales casi iguales. El modo superior aleatorio elige al azar entre el mejor nivel de pérdida para que la carga no se quede en un solo resolutor. El modo superior Round Robin recorre el mismo nivel superior de pérdida con rotación determinista. |
 | `PACKET_DUPLICATION_COUNT` | `2` | se limita al rango válido en el código | Número de duplicaciones de paquetes salientes normales.<br>Valores más altos aumentan el coste de tráfico pero mejoran la supervivencia en enlaces débiles. |
 | `SETUP_PACKET_DUPLICATION_COUNT` | `2` | se limita al rango válido en el código | Similar a `PACKET_DUPLICATION_COUNT`, pero usado para paquetes sensibles a la configuración, como la creación de streams y otros eventos de control críticos. |
 | `STREAM_RESOLVER_FAILOVER_RESEND_THRESHOLD` | `2` | Si es `<1`, se aplica el valor de reserva | Si un stream acumula presión de reenvío repetida sobre el mismo resolutor preferido, el cliente puede hacer failover de ese stream a otro resolutor.<br>Este umbral controla la rapidez con que ocurre. |
 | `STREAM_RESOLVER_FAILOVER_COOLDOWN` | `2.5` | Si es `<=0`, se aplica el valor de reserva | Retardo mínimo entre dos failovers para el mismo stream.<br>Esto evita una oscilación inestable entre resolutores. |
-| `RECHECK_INACTIVE_SERVERS_ENABLED` | `true` | `true/false` | Activa las revisiones en segundo plano de los resolutores actualmente desactivados o no saludables.<br>Si se desactiva, una vez que un resolutor queda inutilizable, permanecerá desactivado hasta el reinicio o la reconstrucción manual. |
+| `RECHECK_INACTIVE_SERVERS_ENABLED` | `true` | `true/false` | Activa las revisiones en segundo plano de los resolutores actualmente desactivados o no saludables.<br>También activa **FastStart**: el cliente se conecta inmediatamente tras validar `RX_TX_WORKERS` resolutores y descubre el resto en segundo plano.<br>Si se desactiva, una vez que un resolutor queda inutilizable, permanecerá desactivado hasta el reinicio. |
 | `AUTO_DISABLE_TIMEOUT_SERVERS` | `true` | `true/false` | Activa la desactivación automática de resolutores que siguen agotando el tiempo de espera y no muestran actividad exitosa. |
 | `AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS` | `30.0` | Si es `<=0`, se aplica el valor de reserva | Ventana de tiempo usada para decidir si un resolutor solo presenta timeouts.<br>Si todas las observaciones en esta ventana son timeouts, puede desactivarse. |
 | `FD_CONTROL_UNIX_SOCKET` | `""` | Vacío, o la ruta de un socket Unix | Solo para hosts Android con VpnService.<br>Si se define, el cliente envía el fd de cada socket UDP de salida (pool de resolutores, sondas MTU, comprobaciones de salud, workers del túnel) a este socket Unix antes de connect/bind, para que el host pueda llamar a `VpnService.protect(fd)` y mantener el tráfico hacia los resolutores fuera del túnel.<br>Los listeners locales (SOCKS5/TCP, relay UDP de SOCKS5, DNS local) nunca se envían. Si el servidor de protección no responde o rechaza el fd, la creación del socket falla.<br>Déjalo vacío en equipos de escritorio y servidores. |
@@ -642,7 +642,20 @@ Estos ajustes son críticos en el servidor:
 | `MTU_ADDED_SERVER_LOG_FORMAT` | `"Resolver {IP} ({DOMAIN}) added back at {TIME} (UP {UP_MTU}, DOWN {DOWN_MTU})"` | cadena | Formato de registro/salida cuando un resolutor se restaura. |
 | `MTU_REACTIVE_ADDED_SERVER_LOG_FORMAT` | `"Resolver {IP} ({DOMAIN}) added back at {TIME} after reactive recheck (UP {UP_MTU}, DOWN {DOWN_MTU})"` | cadena | Formato de registro/salida cuando un resolutor se restaura mediante las comprobaciones de salud en segundo plano. |
 
-### 3.4.7) 🧵 Workers, Colas y Temporizadores de Runtime
+### 3.4.7) ⚡ Pruebas de Rendimiento Micro-Burst y Calificación de Velocidad
+
+| Parámetro | Valor de ejemplo | Valores permitidos / Comportamiento real | Explicación completa |
+| :--- | :--- | :--- | :--- |
+| `MICRO_BURST_TEST_ENABLED` | `true` | `true/false` | Si está activado, ejecuta la prueba de ráfaga tras el MTU para medir el rendimiento en ráfaga y detectar limitaciones de velocidad (rate-limits). |
+| `MICRO_BURST_PACKET_COUNT` | `6` | `2..32` | Número de consultas en ráfaga enviadas a cada resolutor candidato durante la prueba. |
+| `MICRO_BURST_PARALLELISM` | `8` | `1..128` | Concurrencia de la prueba de ráfaga. Recomendado `6-8` para móviles/Android, `16-32` para ordenadores de sobremesa o servidores. |
+| `MAX_ACTIVE_RESOLVERS` | `15` | `>=0` | Número máximo de resolutores con mayor puntuación activados en el grupo principal (`0` = sin límite). Los demás quedan en reserva (standby). |
+| `MAX_BURST_LOSS_RATIO` | `0.20` | `0.0..1.0` | Proporción máxima de pérdida tolerada durante la prueba de ráfaga antes de descartar el resolutor (`0.20` = 20% de pérdida). |
+| `MIN_BURST_THROUGHPUT_KBPS` | `0.0` | `>=0.0` | Límite mínimo de rendimiento opcional en KB/s (`0.0` desactiva el límite). |
+| `RECHECK_BURST_TEST_ENABLED` | `true` | `true/false` | Si está activado, las revisiones en segundo plano prueban los resolutores inactivos con una micro-ráfaga antes de reactivarlos. |
+| `RECHECK_BURST_PACKET_COUNT` | `4` | `2..32` | Número de consultas enviadas durante la comprobación de salud en segundo plano. |
+
+### 3.4.8) 🧵 Workers, Colas y Temporizadores de Runtime
 
 | Parámetro | Valor de ejemplo | Valores permitidos / Comportamiento real | Explicación completa |
 | :--- | :--- | :--- | :--- |

@@ -603,7 +603,7 @@ These settings are critical on the server:
 
 | Parameter | Sample Value | Allowed Values / Real Behavior | Full Explanation |
 | :--- | :--- | :--- | :--- |
-| `RESOLVER_BALANCING_STRATEGY` | `2` | `0..8` | Chooses how resolvers are selected.<br>`0/2` = Round Robin, `1` = Random, `3` = Least Loss, `4` = Lowest Latency, `5` = Hybrid Score, `6` = Loss Then Latency, `7` = Least Loss Top Random, `8` = Least Loss Top Round Robin.<br>The hybrid mode uses a weighted combined score. The loss-then-latency mode first shortlists by loss, then prefers lower latency inside that tier, and rotates among near-equal top candidates. The top-random mode picks randomly from the best loss tier so load does not stick to one resolver. The top-round-robin mode cycles through the same top loss tier with deterministic rotation. |
+| `RESOLVER_BALANCING_STRATEGY` | `6` | `0..8` | Chooses how resolvers are selected.<br>`0/2` = Round Robin, `1` = Random, `3` = Least Loss, `4` = Lowest Latency, `5` = Hybrid Score, `6` = Loss Then Latency (Default), `7` = Least Loss Top Random, `8` = Least Loss Top Round Robin.<br>The hybrid mode uses a weighted combined score. The loss-then-latency mode first shortlists by loss, then prefers lower latency inside that tier, and rotates among near-equal top candidates. The top-random mode picks randomly from the best loss tier so load does not stick to one resolver. The top-round-robin mode cycles through the same top loss tier with deterministic rotation. |
 | `PACKET_DUPLICATION_COUNT` | `2` | clamp to valid range in code | Normal outgoing packet duplication count.<br>Higher values increase traffic cost but improve survivability on weak links. |
 | `SETUP_PACKET_DUPLICATION_COUNT` | `2` | clamp to valid range in code | Similar to `PACKET_DUPLICATION_COUNT`, but used for setup-sensitive packets such as stream creation and other critical control events. |
 | `STREAM_RESOLVER_FAILOVER_RESEND_THRESHOLD` | `2` | If `<1`, fallback applies | If a stream accumulates repeated resend pressure on the same preferred resolver, the client may fail over that stream to another resolver.<br>This threshold controls how quickly that happens. |
@@ -641,7 +641,20 @@ These settings are critical on the server:
 | `MTU_ADDED_SERVER_LOG_FORMAT` | `"Resolver {IP} ({DOMAIN}) added back at {TIME} (UP {UP_MTU}, DOWN {DOWN_MTU})"` | string | Log/output format when a resolver is restored. |
 | `MTU_REACTIVE_ADDED_SERVER_LOG_FORMAT` | `"Resolver {IP} ({DOMAIN}) added back at {TIME} after reactive recheck (UP {UP_MTU}, DOWN {DOWN_MTU})"` | string | Log/output format when a resolver is restored by background health checks. |
 
-### 3.4.7) 🧵 Runtime Workers, Queues, and Timers
+### 3.4.7) ⚡ Micro-Burst Throughput Testing and Speed Qualification
+
+| Parameter | Sample Value | Allowed Values / Real Behavior | Full Explanation |
+| :--- | :--- | :--- | :--- |
+| `MICRO_BURST_TEST_ENABLED` | `true` | `true/false` | If enabled, runs pipelined micro-burst qualification after MTU testing to measure burst throughput, packet loss under load, and rate-limiting behavior. |
+| `MICRO_BURST_PACKET_COUNT` | `6` | `2..32` | Number of pipelined queries sent to each candidate resolver during the burst test. |
+| `MICRO_BURST_PARALLELISM` | `8` | `1..128` | Concurrency for micro-burst qualification. Recommended `6-8` for Android/mobile, `16-32` for desktop/server. |
+| `MAX_ACTIVE_RESOLVERS` | `15` | `>=0` | Maximum number of highest-scoring resolvers activated in the primary pool (`0` = no limit). Remaining passing servers are placed on standby. |
+| `MAX_BURST_LOSS_RATIO` | `0.20` | `0.0..1.0` | Maximum tolerated packet loss ratio during burst testing before a resolver is rejected (`0.20` = 20% loss). |
+| `MIN_BURST_THROUGHPUT_KBPS` | `0.0` | `>=0.0` | Optional minimum throughput cutoff in KB/s (`0.0` disables cutoff). |
+| `RECHECK_BURST_TEST_ENABLED` | `true` | `true/false` | If enabled, background health rechecks test inactive resolvers with a micro-burst before reactivating them. |
+| `RECHECK_BURST_PACKET_COUNT` | `4` | `2..32` | Number of pipelined queries sent during background health recheck burst tests. |
+
+### 3.4.8) 🧵 Runtime Workers, Queues, and Timers
 
 | Parameter | Sample Value | Allowed Values / Real Behavior | Full Explanation |
 | :--- | :--- | :--- | :--- |

@@ -412,6 +412,17 @@ func (c *Client) RunInitialMTUTests(ctx context.Context) error {
 	c.appendMTUUsageSeparatorOnce()
 	c.logMTUCompletion(validConns)
 
+	if c.cfg.MicroBurstTestEnabled {
+		qualifiedConns, _ := c.runMicroBurstQualification(ctx, validConns)
+		if len(qualifiedConns) == 0 {
+			if c.log != nil {
+				c.log.Errorf("<red>No valid connections remaining after micro-burst qualification!</red>")
+			}
+			return ErrNoValidConnections
+		}
+		validConns = qualifiedConns
+	}
+
 	if fastStart && len(validConns) < len(scanConnections) {
 		remaining := len(scanConnections) - len(validConns)
 		if c.log != nil {
@@ -680,11 +691,32 @@ func (c *Client) recheckInactiveResolver(ctx context.Context, conn Connection) {
 		return
 	}
 
+	if c.cfg.RecheckBurstTestEnabled {
+		probeTimeout := c.resolverHealthProbeTimeout()
+		burstCount := c.cfg.RecheckBurstPacketCount
+		if burstCount < 2 {
+			burstCount = 4
+		}
+		burstResult := c.sendPipelinedMicroBurst(
+			ctx,
+			conn,
+			transport,
+			burstCount,
+			c.syncedDownloadMTU,
+			c.syncedUploadMTU,
+			probeTimeout,
+		)
+		if !burstResult.Qualified {
+			return
+		}
+		c.balancer.SeedBurstStats(conn.Key, burstResult.SentCount, burstResult.ReceivedCount, burstResult.AverageRTT)
+	} else {
+		c.balancer.SeedConservativeStats(conn.Key)
+	}
+
 	if !c.balancer.SetConnectionValidityWithLog(conn.Key, true, true) {
 		return
 	}
-
-	c.balancer.SeedConservativeStats(conn.Key)
 
 	conn.IsValid = true
 

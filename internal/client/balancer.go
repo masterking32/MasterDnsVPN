@@ -773,6 +773,35 @@ func (b *Balancer) SeedConservativeStats(serverKey string) {
 	stats.rttCount.Store(0)
 }
 
+func (b *Balancer) SeedBurstStats(serverKey string, sentCount int, ackedCount int, avgRTT time.Duration) {
+	stats := b.statsForKey(serverKey)
+	if stats == nil {
+		return
+	}
+
+	if sentCount < 1 {
+		sentCount = 1
+	}
+	if ackedCount < 0 {
+		ackedCount = 0
+	}
+	lost := sentCount - ackedCount
+	if lost < 0 {
+		lost = 0
+	}
+
+	stats.sent.Store(uint64(sentCount))
+	stats.acked.Store(uint64(ackedCount))
+	stats.lost.Store(uint64(lost))
+	if avgRTT > 0 && ackedCount > 0 {
+		stats.rttMicrosSum.Store(uint64(avgRTT/time.Microsecond) * uint64(ackedCount))
+		stats.rttCount.Store(uint64(ackedCount))
+	} else {
+		stats.rttMicrosSum.Store(0)
+		stats.rttCount.Store(0)
+	}
+}
+
 func (b *Balancer) GetBestConnection() (Connection, bool) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()

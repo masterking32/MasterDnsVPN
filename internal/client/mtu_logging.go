@@ -10,6 +10,7 @@
 package client
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -390,4 +391,58 @@ func (c *Client) appendMTUReactiveAddedServerLine(conn *Connection) {
 		return
 	}
 	c.appendMTULogLine(c.mtuReactiveAddedServerLogFormat, conn, "")
+}
+
+func (c *Client) logMicroBurstCompletion(results []QualifiedResolver, activeCount int) {
+	if !c.mtuInfoEnabled() || len(results) == 0 {
+		return
+	}
+
+	c.log.Infof("%s", strings.Repeat("=", 80))
+	c.log.Infof("<green>⚡ Micro-Burst Throughput Qualification Results:</green>")
+	c.log.Infof("%s", strings.Repeat("=", 80))
+	c.log.Infof(
+		"%-4s %-20s %-12s %-10s %-12s %-10s %-16s",
+		"Rank",
+		"Resolver",
+		"Burst Speed",
+		"Loss %",
+		"Avg RTT",
+		"Score",
+		"Status",
+	)
+	c.log.Infof("%s", strings.Repeat("-", 80))
+
+	for i, r := range results {
+		status := "<yellow>STANDBY</yellow>"
+		if i < activeCount {
+			status = "<green>ACTIVE (Tier 1)</green>"
+		} else if !r.BurstResult.Qualified {
+			status = "<red>REJECTED</red>"
+		}
+
+		speedStr := fmt.Sprintf("%.1f KB/s", r.BurstResult.ThroughputKBps)
+		lossStr := fmt.Sprintf("%.1f%%", r.BurstResult.LossRatio*100)
+		rttStr := formatResolverRTT(r.BurstResult.AverageRTT)
+		scoreStr := fmt.Sprintf("%.1f", r.Score)
+
+		c.log.Infof(
+			"%-4d <cyan>%-20s</cyan> <green>%-12s</green> <yellow>%-10s</yellow> <yellow>%-12s</yellow> <magenta>%-10s</magenta> %s",
+			r.Rank,
+			r.Connection.ResolverLabel,
+			speedStr,
+			lossStr,
+			rttStr,
+			scoreStr,
+			status,
+		)
+	}
+
+	c.log.Infof("%s", strings.Repeat("=", 80))
+	c.log.Infof(
+		"<blue>Active high-speed resolvers selected: <cyan>%d</cyan> of <cyan>%d</cyan> tested</blue>",
+		activeCount,
+		len(results),
+	)
+	c.log.Infof("%s", strings.Repeat("=", 80))
 }

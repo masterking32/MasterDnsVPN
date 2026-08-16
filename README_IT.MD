@@ -604,12 +604,12 @@ Queste impostazioni sono critiche sul server:
 
 | Parametro | Valore di Esempio | Valori Consentiti / Comportamento Reale | Spiegazione Completa |
 | :--- | :--- | :--- | :--- |
-| `RESOLVER_BALANCING_STRATEGY` | `2` | `0..8` | Sceglie come vengono selezionati i resolver.<br>`0/2` = Round Robin, `1` = Random, `3` = Least Loss, `4` = Lowest Latency, `5` = Hybrid Score, `6` = Loss Then Latency, `7` = Least Loss Top Random, `8` = Least Loss Top Round Robin.<br>La modalità ibrida usa un punteggio combinato ponderato. La modalità loss-then-latency seleziona prima una rosa in base alla perdita, poi predilige la latenza inferiore all'interno di quella fascia e ruota tra i migliori candidati quasi equivalenti. La modalità top-random sceglie casualmente tra la migliore fascia di perdita affinché il carico non si concentri su un unico resolver. La modalità top-round-robin scorre la stessa migliore fascia di perdita con una rotazione deterministica. |
+| `RESOLVER_BALANCING_STRATEGY` | `6` | `0..8` | Sceglie come vengono selezionati i resolver.<br>`0/2` = Round Robin, `1` = Random, `3` = Least Loss, `4` = Lowest Latency, `5` = Hybrid Score, `6` = Loss Then Latency (Predefinito), `7` = Least Loss Top Random, `8` = Least Loss Top Round Robin.<br>La modalità ibrida usa un punteggio combinato ponderato. La modalità loss-then-latency seleziona prima una rosa in base alla perdita, poi predilige la latenza inferiore all'interno di quella fascia e ruota tra i migliori candidati quasi equivalenti. La modalità top-random sceglie casualmente tra la migliore fascia di perdita affinché il carico non si concentri su un unico resolver. La modalità top-round-robin scorre la stessa migliore fascia di perdita con una rotazione deterministica. |
 | `PACKET_DUPLICATION_COUNT` | `2` | limitato all'intervallo valido nel codice | Conteggio normale di duplicazione dei pacchetti in uscita.<br>Valori più alti aumentano il costo di traffico ma migliorano la sopravvivenza su collegamenti deboli. |
-| `SETUP_PACKET_DUPLICATION_COUNT` | `2` | limitato all'intervallo valido nel codice | Simile a `PACKET_DUPLICATION_COUNT`, ma usato per i pacchetti sensibili al setup come la creazione degli stream e altri eventi di controllo critici. |
+| `SETUP_PACKET_DUPLICATION_COUNT` | `2` | limitato all'intervallo valido nel codice | Simile a `PACKET_DUPLICATION_COUNT`, mas usato per i pacchetti sensibili al setup come la creazione degli stream e altri eventi di controllo critici. |
 | `STREAM_RESOLVER_FAILOVER_RESEND_THRESHOLD` | `2` | Se `<1`, si applica il fallback | Se uno stream accumula ripetuta pressione di reinvio sullo stesso resolver preferito, il client può eseguire il failover di quello stream su un altro resolver.<br>Questa soglia controlla la rapidità con cui ciò avviene. |
 | `STREAM_RESOLVER_FAILOVER_COOLDOWN` | `2.5` | Se `<=0`, si applica il fallback | Ritardo minimo tra due failover per lo stesso stream.<br>Questo previene oscillazioni instabili tra i resolver. |
-| `RECHECK_INACTIVE_SERVERS_ENABLED` | `true` | `true/false` | Abilita i ricontrolli in background per i resolver attualmente disabilitati o non sani.<br>Se disabilitato, una volta che un resolver diventa inutilizzabile, rimarrà disabilitato fino al riavvio o alla ricostruzione manuale. |
+| `RECHECK_INACTIVE_SERVERS_ENABLED` | `true` | `true/false` | Abilita i ricontrolli in background per i resolver attualmente disabilitati o non sani.<br>Attiva anche **FastStart**: connessione immediata dopo la validazione di `RX_TX_WORKERS` resolver con scoperta del resto in background.<br>Se disabilitato, un resolver inutilizzabile rimarrà disabilitato fino al riavvio. |
 | `AUTO_DISABLE_TIMEOUT_SERVERS` | `true` | `true/false` | Abilita la disabilitazione automatica dei resolver che continuano ad andare in timeout e non mostrano alcuna attività riuscita. |
 | `AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS` | `30.0` | Se `<=0`, si applica il fallback | Finestra temporale usata per decidere se un resolver presenta solo timeout.<br>Se tutte le osservazioni in questa finestra sono timeout, può essere disabilitato. |
 | `FD_CONTROL_UNIX_SOCKET` | `""` | Vuoto, oppure il percorso di un socket Unix | Solo per host Android con VpnService.<br>Se impostato, il client invia l'fd di ogni socket UDP in uscita (pool dei resolver, sonde MTU, controlli di salute, worker del tunnel) a questo socket Unix prima di connect/bind, così l'host può chiamare `VpnService.protect(fd)` e tenere il traffico verso i resolver fuori dal tunnel.<br>I listener locali (SOCKS5/TCP, relay UDP di SOCKS5, DNS locale) non vengono mai inviati. Se il server di protezione non è raggiungibile o rifiuta l'fd, la creazione del socket fallisce.<br>Lascialo vuoto su desktop e server. |
@@ -642,7 +642,20 @@ Queste impostazioni sono critiche sul server:
 | `MTU_ADDED_SERVER_LOG_FORMAT` | `"Resolver {IP} ({DOMAIN}) added back at {TIME} (UP {UP_MTU}, DOWN {DOWN_MTU})"` | stringa | Formato di log/output quando un resolver viene ripristinato. |
 | `MTU_REACTIVE_ADDED_SERVER_LOG_FORMAT` | `"Resolver {IP} ({DOMAIN}) added back at {TIME} after reactive recheck (UP {UP_MTU}, DOWN {DOWN_MTU})"` | stringa | Formato di log/output quando un resolver viene ripristinato dai controlli di salute in background. |
 
-### 3.4.7) 🧵 Worker, Code e Timer di Runtime
+### 3.4.7) ⚡ Test di Throughput Micro-Burst e Qualificazione della Velocità
+
+| Parametro | Valore di Esempio | Valori Consentiti / Comportamento Reale | Spiegazione Completa |
+| :--- | :--- | :--- | :--- |
+| `MICRO_BURST_TEST_ENABLED` | `true` | `true/false` | Se abilitato, esegue il test micro-burst pipelined dopo i test MTU per misurare il throughput a raffica e identificare rate-limit. |
+| `MICRO_BURST_PACKET_COUNT` | `6` | `2..32` | Numero di query in pipelining inviate a ciascun resolver candidato durante il test. |
+| `MICRO_BURST_PARALLELISM` | `8` | `1..128` | Concorrenza del test micro-burst. Consigliato `6-8` per Android/mobile, `16-32` per desktop/server. |
+| `MAX_ACTIVE_RESOLVERS` | `15` | `>=0` | Numero massimo di resolver con punteggio più alto attivati nel pool primario (`0` = nessun limite). Gli altri rimangono in standby. |
+| `MAX_BURST_LOSS_RATIO` | `0.20` | `0.0..1.0` | Rapporto massimo di perdita tollerato durante il burst prima del rifiuto del resolver (`0.20` = 20% di perdita). |
+| `MIN_BURST_THROUGHPUT_KBPS` | `0.0` | `>=0.0` | Soglia minima di throughput opzionale in KB/s (`0.0` disabilita la soglia). |
+| `RECHECK_BURST_TEST_ENABLED` | `true` | `true/false` | Se abilitato, i controlli di salute in background testano i resolver inattivi con un micro-burst prima di riattivarli. |
+| `RECHECK_BURST_PACKET_COUNT` | `4` | `2..32` | Numero di query inviate durante i test di ricontrollo in background. |
+
+### 3.4.8) 🧵 Worker, Code e Timer di Runtime
 
 | Parametro | Valore di Esempio | Valori Consentiti / Comportamento Reale | Spiegazione Completa |
 | :--- | :--- | :--- | :--- |

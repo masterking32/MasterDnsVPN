@@ -233,6 +233,44 @@ MTU_ADDED_SERVER_LOG_FORMAT = "Resolver {IP} ({DOMAIN}) added back at {TIME} (UP
 MTU_REACTIVE_ADDED_SERVER_LOG_FORMAT = "Resolver {IP} ({DOMAIN}) added back at {TIME} after reactive recheck (UP {UP_MTU}, DOWN {DOWN_MTU})"
 
 # ------------------------------------------------------------------------------
+# 6.1) Micro-Burst & Throughput Qualification
+# What this section does:
+# - Runs automated pipelined micro-burst speed testing on MTU-qualified resolvers.
+# - Filters out rate-limited/throttled servers and ranks candidates by throughput.
+# - Limits the active resolver pool to the top-N fastest servers.
+# ------------------------------------------------------------------------------
+
+# If true, runs pipelined micro-burst qualification after MTU testing to measure
+# burst throughput, packet loss under load, and rate-limiting behavior.
+MICRO_BURST_TEST_ENABLED = true
+
+# Number of pipelined queries sent to each candidate resolver during the burst test.
+# Clamped to [2, 32].
+MICRO_BURST_PACKET_COUNT = 6
+
+# Concurrency for micro-burst qualification.
+# Recommended: 6-8 for Android/mobile devices to protect radio/NAT sockets,
+# 16-32 for high-performance desktop or server links.
+MICRO_BURST_PARALLELISM = 8
+
+# Maximum number of highest-scoring resolvers to activate in the primary pool.
+# Remaining passing servers are placed on standby.
+# 0 = activate all passing resolvers without limit.
+MAX_ACTIVE_RESOLVERS = 15
+
+# Maximum tolerated packet loss ratio during burst testing before a resolver is rejected.
+# 0.20 = allow up to 20% loss under burst.
+MAX_BURST_LOSS_RATIO = 0.20
+
+# Optional minimum throughput cutoff in KB/s (0.0 disables cutoff).
+MIN_BURST_THROUGHPUT_KBPS = 0.0
+
+# If true, background recheck of inactive resolvers verifies throughput with
+# a micro-burst before returning them to the active pool.
+RECHECK_BURST_TEST_ENABLED = true
+RECHECK_BURST_PACKET_COUNT = 4
+
+# ------------------------------------------------------------------------------
 # 7) Runtime Workers, Queues, and Timers
 # What this section does:
 # - Controls async reader/writer/processor worker counts.
