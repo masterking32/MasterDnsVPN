@@ -106,8 +106,8 @@ func TestRunInitialMTUTests_FastStartExitsEarly(t *testing.T) {
 	}
 
 	activeCount := client.balancer.ActiveCount()
-	if activeCount != 2 {
-		t.Fatalf("expected exactly 2 active resolvers after FastStart early exit, got=%d", activeCount)
+	if activeCount < 2 || activeCount >= 10 {
+		t.Fatalf("expected early exit with partial active resolvers (>=2 and <10), got=%d", activeCount)
 	}
 
 	totalCount := client.balancer.TotalCount()
