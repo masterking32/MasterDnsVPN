@@ -722,13 +722,17 @@ func (c *Client) recheckInactiveResolver(ctx context.Context, conn Connection) {
 		return
 	}
 
-	conn.IsValid = true
+	actualConn, ok := c.balancer.GetConnectionByKey(conn.Key)
+	if !ok {
+		return
+	}
 
 	activeCount := c.balancer.ActiveCount()
 	totalCount := c.balancer.TotalCount()
-	c.logResolverReactivated(conn, resolveTime, burstPtr, activeCount, totalCount)
-
-	c.appendMTUReactiveAddedServerLine(&conn)
+	if actualConn.IsValid {
+		c.logResolverReactivated(actualConn, resolveTime, burstPtr, activeCount, totalCount)
+		c.appendMTUReactiveAddedServerLine(&actualConn)
+	}
 }
 
 // syncedMTUs returns the synced upload and download MTUs. The resolver health

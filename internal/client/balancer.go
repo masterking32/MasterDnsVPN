@@ -11,6 +11,7 @@ package client
 
 import (
 	"encoding/binary"
+	"math"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -87,14 +88,15 @@ type Balancer struct {
 	pendingSize      atomic.Int32
 	pendingEvictRR   atomic.Uint32
 
-	mu           sync.RWMutex
-	log          *logger.Logger
-	connections  []Connection
-	indexByKey   map[string]int
-	activeIDs    []int
-	inactiveIDs  []int
-	stats        []*connectionStats
-	streamRoutes map[uint16]*balancerStreamRouteState
+	mu                  sync.RWMutex
+	log                 *logger.Logger
+	maxActiveResolvers  int
+	connections         []Connection
+	indexByKey          map[string]int
+	activeIDs           []int
+	inactiveIDs         []int
+	stats               []*connectionStats
+	streamRoutes        map[uint16]*balancerStreamRouteState
 
 	pendingShards [resolverPendingShardCount]balancerPendingShard
 
@@ -135,6 +137,18 @@ func NewBalancer(strategy int, log *logger.Logger) *Balancer {
 	}
 	b.rngState.Store(seedRNG())
 	return b
+}
+
+func (b *Balancer) SetMaxActiveResolvers(maxActive int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.maxActiveResolvers = maxActive
+}
+
+func (b *Balancer) MaxActiveResolvers() int {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.maxActiveResolvers
 }
 
 func (b *Balancer) SetStreamFailoverConfig(threshold int, cooldown time.Duration) {
@@ -1209,15 +1223,186 @@ func (b *Balancer) clearPreferredResolverReferencesLocked(serverKey string) {
 	}
 }
 
+// calculateConnectionScoreLocked computes a composite performance score for any resolver.
+// Higher score = better resolver (more throughput, lower loss, lower RTT).
+func (b *Balancer) calculateConnectionScoreLocked(idx int) float64 {
+	if idx < 0 || idx >= len(b.connections) {
+		return 0.0
+	}
+	conn := &b.connections[idx]
+	downloadMTU := conn.DownloadMTUBytes
+	if downloadMTU <= 0 {
+		downloadMTU = 500
+	}
+
+	var sent, lost, rttSum, rttCount uint64
+	if idx < len(b.stats) && b.stats[idx] != nil {
+		sent, _, lost, rttSum, rttCount = b.stats[idx].snapshot()
+	}
+
+	lossRatio := 0.0
+	if sent > 0 {
+		lossRatio = float64(lost) / float64(sent)
+	}
+
+	var avgRTT time.Duration
+	if rttCount > 0 {
+		avgRTT = time.Duration(rttSum/rttCount) * time.Microsecond
+	} else if conn.MTUResolveTime > 0 {
+		avgRTT = conn.MTUResolveTime
+	}
+
+	if avgRTT <= 0 {
+		return 1.0 // Unprobed default neutral low score
+	}
+
+	rttSec := avgRTT.Seconds()
+	if rttSec <= 0 {
+		return 1.0
+	}
+
+	speedKBps := (float64(downloadMTU) / 1024.0) / rttSec
+	rttMillis := float64(avgRTT.Milliseconds())
+	latencyPenalty := 1.0 + (rttMillis / 500.0)
+	effectiveThroughput := speedKBps * (1.0 - lossRatio)
+	if effectiveThroughput < 0 {
+		effectiveThroughput = 0
+	}
+	return effectiveThroughput / latencyPenalty
+}
+
 func (b *Balancer) moveConnectionStateLocked(idx int, valid bool) {
-	if valid {
-		b.removeInactiveIndexLocked(idx)
-		b.addActiveIndexLocked(idx)
+	if !valid {
+		b.connections[idx].IsValid = false
+		b.removeActiveIndexLocked(idx)
+		b.addInactiveIndexLocked(idx)
+		b.clearPreferredResolverReferencesLocked(b.connections[idx].Key)
 		return
 	}
 
-	b.removeActiveIndexLocked(idx)
-	b.addInactiveIndexLocked(idx)
+	// If already in activeIDs, make sure marked valid
+	for _, activeIdx := range b.activeIDs {
+		if activeIdx == idx {
+			b.connections[idx].IsValid = true
+			return
+		}
+	}
+
+	// If maxActiveResolvers is configured (> 0) and the active pool is full:
+	if b.maxActiveResolvers > 0 && len(b.activeIDs) >= b.maxActiveResolvers {
+		candScore := b.calculateConnectionScoreLocked(idx)
+
+		// Find lowest scoring resolver currently in activeIDs
+		worstActiveIdx := -1
+		worstActiveScore := math.MaxFloat64
+		worstActivePos := -1
+
+		for pos, activeIdx := range b.activeIDs {
+			score := b.calculateConnectionScoreLocked(activeIdx)
+			if score < worstActiveScore {
+				worstActiveScore = score
+				worstActiveIdx = activeIdx
+				worstActivePos = pos
+			}
+		}
+
+		// Only displace if the incoming candidate is strictly higher scoring
+		if worstActiveIdx >= 0 && candScore > worstActiveScore {
+			demotedConn := &b.connections[worstActiveIdx]
+			demotedConn.IsValid = false
+			b.activeIDs[worstActivePos] = idx // Replace in activeIDs slice
+			b.addInactiveIndexLocked(worstActiveIdx)
+			b.clearPreferredResolverReferencesLocked(demotedConn.Key)
+
+			b.removeInactiveIndexLocked(idx)
+			b.connections[idx].IsValid = true
+
+			if b.log != nil {
+				candConn := &b.connections[idx]
+				b.log.Infof("<green>🔄 DNS Resolver Promoted to Active Pool: %s (%s, score: %.1f) [Demoted: %s, score: %.1f] | Active Pool: %d/%d</green>",
+					candConn.ResolverLabel, candConn.Domain, candScore,
+					demotedConn.ResolverLabel, worstActiveScore,
+					len(b.activeIDs), len(b.connections))
+			}
+			return
+		}
+
+		// Candidate does not beat active resolvers -> Place in Standby pool
+		b.connections[idx].IsValid = false
+		b.addInactiveIndexLocked(idx)
+		b.removeActiveIndexLocked(idx)
+		if b.log != nil {
+			candConn := &b.connections[idx]
+			b.log.Debugf("<cyan>⏸ DNS Resolver Added to Standby Pool (Pool Full): %s (%s, score: %.1f) | Active: %d</cyan>",
+				candConn.ResolverLabel, candConn.Domain, candScore, len(b.activeIDs))
+		}
+		return
+	}
+
+	// Active pool has available capacity -> Add to activeIDs
+	b.connections[idx].IsValid = true
+	b.removeInactiveIndexLocked(idx)
+	b.addActiveIndexLocked(idx)
+}
+
+// OptimizeActivePool scans active resolvers and replaces degraded ones with better standby candidates.
+func (b *Balancer) OptimizeActivePool() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.optimizeActivePoolLocked()
+}
+
+func (b *Balancer) optimizeActivePoolLocked() bool {
+	if b.maxActiveResolvers <= 0 || len(b.activeIDs) == 0 || len(b.inactiveIDs) == 0 {
+		return false
+	}
+
+	swapped := false
+
+	for i := 0; i < len(b.activeIDs); i++ {
+		activeIdx := b.activeIDs[i]
+		activeScore := b.calculateConnectionScoreLocked(activeIdx)
+
+		// Find best qualified candidate in inactiveIDs
+		bestInactiveIdx := -1
+		bestInactiveScore := -1.0
+		for _, inactIdx := range b.inactiveIDs {
+			conn := &b.connections[inactIdx]
+			if conn.UploadMTUBytes <= 0 || conn.DownloadMTUBytes <= 0 {
+				continue
+			}
+			score := b.calculateConnectionScoreLocked(inactIdx)
+			if score > bestInactiveScore {
+				bestInactiveScore = score
+				bestInactiveIdx = inactIdx
+			}
+		}
+
+		// Swap if the best standby candidate is meaningfully better (>1.25x active score)
+		if bestInactiveIdx >= 0 && bestInactiveScore > (activeScore*1.25) {
+			demotedConn := &b.connections[activeIdx]
+			promotedConn := &b.connections[bestInactiveIdx]
+
+			demotedConn.IsValid = false
+			b.clearPreferredResolverReferencesLocked(demotedConn.Key)
+
+			promotedConn.IsValid = true
+
+			// Swap IDs
+			b.activeIDs[i] = bestInactiveIdx
+			b.removeInactiveIndexLocked(bestInactiveIdx)
+			b.addInactiveIndexLocked(activeIdx)
+
+			if b.log != nil {
+				b.log.Infof("<yellow>⚡ Active Resolver Swapped (Performance Degradation): %s (Score: %.1f) ➔ Replaced by %s (Score: %.1f)</yellow>",
+					demotedConn.ResolverLabel, activeScore,
+					promotedConn.ResolverLabel, bestInactiveScore)
+			}
+			swapped = true
+		}
+	}
+
+	return swapped
 }
 
 func (b *Balancer) selectInitialPreferredConnectionLocked() (Connection, bool) {

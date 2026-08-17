@@ -310,6 +310,7 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		c.streamResolverFailoverCooldown = time.Second
 	}
 
+	c.balancer.SetMaxActiveResolvers(cfg.MaxActiveResolvers)
 	c.balancer.SetStreamFailoverConfig(c.streamResolverFailoverResendThreshold, c.streamResolverFailoverCooldown)
 	c.balancer.SetAutoDisableConfig(
 		cfg.AutoDisableTimeoutServers,

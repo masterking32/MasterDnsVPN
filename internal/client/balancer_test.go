@@ -727,3 +727,124 @@ func TestBalancerLimitConnectionPool_EdgeCases(t *testing.T) {
 		t.Fatalf("expected len=2 and cap=2 for count=2, got len=%d cap=%d", len(res2), cap(res2))
 	}
 }
+func TestBalancerMaxActiveResolversEnforced(t *testing.T) {
+	b := NewBalancer(BalancingRoundRobinDefault, nil)
+	b.SetMaxActiveResolvers(3)
+
+	connections := []*Connection{
+		{Key: "c1"}, {Key: "c2"}, {Key: "c3"}, {Key: "c4"}, {Key: "c5"},
+	}
+	b.SetConnections(connections)
+
+	for _, c := range connections {
+		b.SetConnectionValidity(c.Key, true)
+	}
+
+	if b.ActiveCount() != 3 {
+		t.Fatalf("expected ActiveCount to be strictly bounded to 3, got=%d", b.ActiveCount())
+	}
+	if b.TotalCount() != 5 {
+		t.Fatalf("expected TotalCount=5, got=%d", b.TotalCount())
+	}
+}
+
+func TestBalancerDynamicPromotionDemotion(t *testing.T) {
+	b := NewBalancer(BalancingLossThenLatency, nil)
+	b.SetMaxActiveResolvers(2)
+
+	connections := []*Connection{
+		{Key: "slow1", DownloadMTUBytes: 1000, UploadMTUBytes: 100},
+		{Key: "slow2", DownloadMTUBytes: 1000, UploadMTUBytes: 100},
+		{Key: "fast1", DownloadMTUBytes: 1000, UploadMTUBytes: 100},
+	}
+	b.SetConnections(connections)
+
+	// Activate slow1 (500ms) and slow2 (600ms)
+	b.SeedBurstStats("slow1", 4, 4, 500*time.Millisecond)
+	b.SetConnectionValidity("slow1", true)
+
+	b.SeedBurstStats("slow2", 4, 4, 600*time.Millisecond)
+	b.SetConnectionValidity("slow2", true)
+
+	if b.ActiveCount() != 2 {
+		t.Fatalf("expected 2 active resolvers initially, got=%d", b.ActiveCount())
+	}
+
+	// Now activate fast1 (45ms) - should displace slow2
+	b.SeedBurstStats("fast1", 4, 4, 45*time.Millisecond)
+	b.SetConnectionValidity("fast1", true)
+
+	if b.ActiveCount() != 2 {
+		t.Fatalf("expected ActiveCount to stay strictly 2, got=%d", b.ActiveCount())
+	}
+
+	fast1Conn, ok := b.GetConnectionByKey("fast1")
+	if !ok || !fast1Conn.IsValid {
+		t.Fatal("expected fast1 to be promoted to active")
+	}
+
+	slow2Conn, ok := b.GetConnectionByKey("slow2")
+	if !ok || slow2Conn.IsValid {
+		t.Fatal("expected slow2 to be demoted to standby (IsValid=false)")
+	}
+
+	slow1Conn, ok := b.GetConnectionByKey("slow1")
+	if !ok || !slow1Conn.IsValid {
+		t.Fatal("expected slow1 to remain active")
+	}
+}
+
+func TestBalancerOptimizeActivePool(t *testing.T) {
+	b := NewBalancer(BalancingLossThenLatency, nil)
+	b.SetMaxActiveResolvers(2)
+
+	connections := []*Connection{
+		{Key: "a"},
+		{Key: "b"},
+		{Key: "standby1"},
+	}
+	b.SetConnections(connections)
+	b.SetConnectionMTU("a", 100, 150, 1000)
+	b.SetConnectionMTU("b", 100, 150, 1000)
+	b.SetConnectionMTU("standby1", 100, 150, 1000)
+
+	// Activate a and b with good initial latencies
+	b.SeedBurstStats("a", 10, 10, 30*time.Millisecond)
+	b.SetConnectionValidity("a", true)
+
+	b.SeedBurstStats("b", 10, 10, 35*time.Millisecond)
+	b.SetConnectionValidity("b", true)
+
+	// Standby resolver has verified MTU and 55ms RTT (scores lower than a and b, so stays in standby)
+	b.SeedBurstStats("standby1", 4, 4, 55*time.Millisecond)
+	b.SetConnectionValidity("standby1", true)
+
+	standbyConn, _ := b.GetConnectionByKey("standby1")
+	if standbyConn.IsValid {
+		t.Fatal("expected standby1 to start in standby pool")
+	}
+
+	// Simulate heavy degradation on "a": RTT spikes to 800ms with 30% loss
+	b.SeedBurstStats("a", 20, 14, 800*time.Millisecond)
+
+	// Run optimization
+	swapped := b.OptimizeActivePool()
+	if !swapped {
+		t.Fatal("expected OptimizeActivePool to swap degraded active resolver")
+	}
+
+	// Verify standby1 is now active and "a" is now standby
+	standbyConnAfter, _ := b.GetConnectionByKey("standby1")
+	if !standbyConnAfter.IsValid {
+		t.Fatal("expected standby1 to be promoted to active")
+	}
+
+	aConnAfter, _ := b.GetConnectionByKey("a")
+	if aConnAfter.IsValid {
+		t.Fatal("expected degraded resolver a to be demoted to standby")
+	}
+
+	if b.ActiveCount() != 2 {
+		t.Fatalf("expected ActiveCount to remain strictly 2, got=%d", b.ActiveCount())
+	}
+}

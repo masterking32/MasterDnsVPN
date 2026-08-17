@@ -239,6 +239,11 @@ func (c *Client) runRuntimeStatsLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// Periodically evaluate and optimize the active pool (swap degraded resolvers with better standbys)
+			if c.balancer != nil {
+				c.balancer.OptimizeActivePool()
+			}
+
 			currentSentTotal := c.calculateTotalSentPackets()
 			if currentSentTotal > lastSentTotal {
 				lastSentTotal = currentSentTotal
