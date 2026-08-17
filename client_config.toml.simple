@@ -271,6 +271,19 @@ RECHECK_BURST_TEST_ENABLED = true
 RECHECK_BURST_PACKET_COUNT = 4
 
 # ------------------------------------------------------------------------------
+# 6.2) Live Runtime Resolver Performance Monitoring
+# What this section does:
+# - Monitors real-time traffic (sent/acked/lost), loss %, and latency per resolver.
+# - Periodically logs a formatted summary table when traffic is active.
+# - Allows interactive on-demand inspection: press 's' + Enter at any time in the console.
+# ------------------------------------------------------------------------------
+
+# Interval in seconds between periodic runtime performance table logs.
+# Only prints when tunnel traffic has been processed during the interval.
+# Set to 0 to disable periodic logs while keeping keypress inspection enabled.
+RUNTIME_STATS_INTERVAL_SECONDS = 60.0
+
+# ------------------------------------------------------------------------------
 # 7) Runtime Workers, Queues, and Timers
 # What this section does:
 # - Controls async reader/writer/processor worker counts.

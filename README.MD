@@ -654,7 +654,13 @@ These settings are critical on the server:
 | `RECHECK_BURST_TEST_ENABLED` | `true` | `true/false` | If enabled, background health rechecks test inactive resolvers with a micro-burst before reactivating them. |
 | `RECHECK_BURST_PACKET_COUNT` | `4` | `2..32` | Number of pipelined queries sent during background health recheck burst tests. |
 
-### 3.4.8) 🧵 Runtime Workers, Queues, and Timers
+### 3.4.8) 📊 Live Runtime Resolver Performance Monitoring
+
+| Parameter | Sample Value | Allowed Values / Real Behavior | Full Explanation |
+| :--- | :--- | :--- | :--- |
+| `RUNTIME_STATS_INTERVAL_SECONDS` | `60.0` | `1.0..86400.0` (or `0` = disabled) | Interval in seconds between periodic console performance table logs when tunnel traffic is active.<br>Setting to `0` disables periodic logging.<br>Pressing `'s'` + Enter (or Enter) in the console always triggers an immediate live stats dump on demand regardless of the timer. |
+
+### 3.4.9) 🧵 Runtime Workers, Queues, and Timers
 
 | Parameter | Sample Value | Allowed Values / Real Behavior | Full Explanation |
 | :--- | :--- | :--- | :--- |
@@ -672,7 +678,7 @@ These settings are critical on the server:
 | `SESSION_INIT_RETRY_MAX_SECONDS` | `60.0` | if invalid, fallback applies | Maximum retry delay for session initialization. |
 | `SESSION_INIT_BUSY_RETRY_INTERVAL_SECONDS` | `60.0` | if invalid, fallback applies | Retry delay when the server explicitly responds with `SESSION_BUSY`. |
 
-### 3.4.8) 📡 Ping / Keepalive
+### 3.4.10) 📡 Ping / Keepalive
 
 | Parameter | Sample Value | Allowed Values / Real Behavior | Full Explanation |
 | :--- | :--- | :--- | :--- |
@@ -684,7 +690,7 @@ These settings are critical on the server:
 | `PING_COOL_THRESHOLD_SECONDS` | `20.0` | positive number | Threshold after which the session is treated as cooling down. |
 | `PING_COLD_THRESHOLD_SECONDS` | `30.0` | positive number | Threshold after which the session is treated as cold. |
 
-### 3.4.9) 🔄 ARQ and Packet Packing
+### 3.4.11) 🔄 ARQ and Packet Packing
 
 | Parameter | Sample Value | Allowed Values / Real Behavior | Full Explanation |
 | :--- | :--- | :--- | :--- |
@@ -705,7 +711,7 @@ These settings are critical on the server:
 | `ARQ_TERMINAL_DRAIN_TIMEOUT_SECONDS` | `120.0` | clamped in code | After a stream becomes terminal, how long the client waits for queue drain. |
 | `ARQ_TERMINAL_ACK_WAIT_TIMEOUT_SECONDS` | `90.0` | clamped in code | How long the client waits for the final terminal ACK. |
 
-### 3.4.10) 🪵 Logging
+### 3.4.12) 🪵 Logging
 
 | Parameter | Sample Value | Allowed Values / Real Behavior | Full Explanation |
 | :--- | :--- | :--- | :--- |

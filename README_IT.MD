@@ -655,7 +655,13 @@ Queste impostazioni sono critiche sul server:
 | `RECHECK_BURST_TEST_ENABLED` | `true` | `true/false` | Se abilitato, i controlli di salute in background testano i resolver inattivi con un micro-burst prima di riattivarli. |
 | `RECHECK_BURST_PACKET_COUNT` | `4` | `2..32` | Numero di query inviate durante i test di ricontrollo in background. |
 
-### 3.4.8) 🧵 Worker, Code e Timer di Runtime
+### 3.4.8) 📊 Monitoraggio delle Prestazioni dei Resolver in Tempo Reale
+
+| Parametro | Valore di Esempio | Valori Consentiti / Comportamento Reale | Spiegazione Completa |
+| :--- | :--- | :--- | :--- |
+| `RUNTIME_STATS_INTERVAL_SECONDS` | `60.0` | `1.0..86400.0` (o `0` = disabilitato) | Intervallo in secondi tra i log periodici della tabella di performance in console quando c'è traffico.<br>`0` disabilita il log periodico.<br>Premendo `'s'` + Invio (o Invio) in console in qualsiasi momento la tabella viene mostrata istantaneamente. |
+
+### 3.4.9) 🧵 Worker, Code e Timer di Runtime
 
 | Parametro | Valore di Esempio | Valori Consentiti / Comportamento Reale | Spiegazione Completa |
 | :--- | :--- | :--- | :--- |
@@ -673,7 +679,7 @@ Queste impostazioni sono critiche sul server:
 | `SESSION_INIT_RETRY_MAX_SECONDS` | `60.0` | se non valido, si applica il fallback | Ritardo massimo dei tentativi per l'inizializzazione della sessione. |
 | `SESSION_INIT_BUSY_RETRY_INTERVAL_SECONDS` | `60.0` | se non valido, si applica il fallback | Ritardo dei tentativi quando il server risponde esplicitamente con `SESSION_BUSY`. |
 
-### 3.4.8) 📡 Ping / Keepalive
+### 3.4.10) 📡 Ping / Keepalive
 
 | Parametro | Valore di Esempio | Valori Consentiti / Comportamento Reale | Spiegazione Completa |
 | :--- | :--- | :--- | :--- |
@@ -685,7 +691,7 @@ Queste impostazioni sono critiche sul server:
 | `PING_COOL_THRESHOLD_SECONDS` | `20.0` | numero positivo | Soglia dopo la quale la sessione è considerata in raffreddamento. |
 | `PING_COLD_THRESHOLD_SECONDS` | `30.0` | numero positivo | Soglia dopo la quale la sessione è considerata fredda. |
 
-### 3.4.9) 🔄 ARQ e Impacchettamento dei Pacchetti
+### 3.4.11) 🔄 ARQ e Impacchettamento dei Pacchetti
 
 | Parametro | Valore di Esempio | Valori Consentiti / Comportamento Reale | Spiegazione Completa |
 | :--- | :--- | :--- | :--- |
@@ -706,7 +712,7 @@ Queste impostazioni sono critiche sul server:
 | `ARQ_TERMINAL_DRAIN_TIMEOUT_SECONDS` | `120.0` | limitato nel codice | Dopo che uno stream diventa terminale, per quanto tempo il client attende lo svuotamento della coda. |
 | `ARQ_TERMINAL_ACK_WAIT_TIMEOUT_SECONDS` | `90.0` | limitato nel codice | Per quanto tempo il client attende l'ACK terminale finale. |
 
-### 3.4.10) 🪵 Logging
+### 3.4.12) 🪵 Logging
 
 | Parametro | Valore di Esempio | Valori Consentiti / Comportamento Reale | Spiegazione Completa |
 | :--- | :--- | :--- | :--- |

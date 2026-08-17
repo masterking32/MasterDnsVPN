@@ -670,7 +670,8 @@ func (c *Client) recheckInactiveResolver(ctx context.Context, conn Connection) {
 	}
 	defer transport.conn.Close()
 
-	if !c.recheckResolverUploadMTU(ctx, conn, transport) {
+	ok, resolveTime := c.recheckResolverUploadMTU(ctx, conn, transport)
+	if !ok {
 		return
 	}
 	if !c.recheckResolverDownloadMTU(ctx, conn, transport) {
@@ -681,6 +682,7 @@ func (c *Client) recheckInactiveResolver(ctx context.Context, conn Connection) {
 	conn.UploadMTUBytes = uploadMTU
 	conn.UploadMTUChars = c.encodedCharsForPayload(uploadMTU)
 	conn.DownloadMTUBytes = downloadMTU
+	conn.MTUResolveTime = resolveTime
 
 	if !c.balancer.SetConnectionMTU(
 		conn.Key,
@@ -691,6 +693,7 @@ func (c *Client) recheckInactiveResolver(ctx context.Context, conn Connection) {
 		return
 	}
 
+	var burstPtr *BurstProbeResult
 	if c.cfg.RecheckBurstTestEnabled {
 		probeTimeout := c.resolverHealthProbeTimeout()
 		burstCount := c.cfg.RecheckBurstPacketCount
@@ -702,23 +705,28 @@ func (c *Client) recheckInactiveResolver(ctx context.Context, conn Connection) {
 			conn,
 			transport,
 			burstCount,
-			c.syncedDownloadMTU,
-			c.syncedUploadMTU,
+			downloadMTU,
+			uploadMTU,
 			probeTimeout,
 		)
 		if !burstResult.Qualified {
 			return
 		}
 		c.balancer.SeedBurstStats(conn.Key, burstResult.SentCount, burstResult.ReceivedCount, burstResult.AverageRTT)
+		burstPtr = &burstResult
 	} else {
 		c.balancer.SeedConservativeStats(conn.Key)
 	}
 
-	if !c.balancer.SetConnectionValidityWithLog(conn.Key, true, true) {
+	if !c.balancer.SetConnectionValidity(conn.Key, true) {
 		return
 	}
 
 	conn.IsValid = true
+
+	activeCount := c.balancer.ActiveCount()
+	totalCount := c.balancer.TotalCount()
+	c.logResolverReactivated(conn, resolveTime, burstPtr, activeCount, totalCount)
 
 	c.appendMTUReactiveAddedServerLine(&conn)
 }
@@ -732,22 +740,22 @@ func (c *Client) syncedMTUs() (upload int, download int) {
 	return c.syncedUploadMTU, c.syncedDownloadMTU
 }
 
-func (c *Client) recheckResolverUploadMTU(ctx context.Context, conn Connection, transport *udpQueryTransport) bool {
+func (c *Client) recheckResolverUploadMTU(ctx context.Context, conn Connection, transport *udpQueryTransport) (bool, time.Duration) {
 	timeout := c.resolverHealthProbeTimeout()
 	for attempt := 0; attempt < c.mtuTestRetries; attempt++ {
 		if ctx.Err() != nil {
-			return false
+			return false, 0
 		}
 		uploadMTU, _ := c.syncedMTUs()
-		passed, _, err := c.sendUploadMTUProbe(ctx, conn, transport, uploadMTU, timeout, mtuProbeOptions{
+		passed, rtt, err := c.sendUploadMTUProbe(ctx, conn, transport, uploadMTU, timeout, mtuProbeOptions{
 			Quiet:   true,
 			IsRetry: attempt > 0,
 		})
 		if err == nil && passed {
-			return true
+			return true, rtt
 		}
 	}
-	return false
+	return false, 0
 }
 
 func (c *Client) recheckResolverDownloadMTU(ctx context.Context, conn Connection, transport *udpQueryTransport) bool {

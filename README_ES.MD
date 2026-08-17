@@ -655,7 +655,13 @@ Estos ajustes son críticos en el servidor:
 | `RECHECK_BURST_TEST_ENABLED` | `true` | `true/false` | Si está activado, las revisiones en segundo plano prueban los resolutores inactivos con una micro-ráfaga antes de reactivarlos. |
 | `RECHECK_BURST_PACKET_COUNT` | `4` | `2..32` | Número de consultas enviadas durante la comprobación de salud en segundo plano. |
 
-### 3.4.8) 🧵 Workers, Colas y Temporizadores de Runtime
+### 3.4.8) 📊 Monitorización del Rendimiento de Resolutores en Tiempo Real
+
+| Parámetro | Valor de ejemplo | Valores permitidos / Comportamiento real | Explicación completa |
+| :--- | :--- | :--- | :--- |
+| `RUNTIME_STATS_INTERVAL_SECONDS` | `60.0` | `1.0..86400.0` (o `0` = desactivado) | Intervalo en segundos de registro de la tabla de rendimiento en consola cuando hay tráfico.<br>`0` desactiva el registro periódico.<br>Pulsar `'s'` + Enter (o Enter) en la consola en cualquier momento muestra la tabla instantáneamente. |
+
+### 3.4.9) 🧵 Workers, Colas y Temporizadores de Runtime
 
 | Parámetro | Valor de ejemplo | Valores permitidos / Comportamiento real | Explicación completa |
 | :--- | :--- | :--- | :--- |
@@ -673,7 +679,7 @@ Estos ajustes son críticos en el servidor:
 | `SESSION_INIT_RETRY_MAX_SECONDS` | `60.0` | si no es válido, se aplica el valor de reserva | Retardo máximo de reintento para la inicialización de sesión. |
 | `SESSION_INIT_BUSY_RETRY_INTERVAL_SECONDS` | `60.0` | si no es válido, se aplica el valor de reserva | Retardo de reintento cuando el servidor responde explícitamente con `SESSION_BUSY`. |
 
-### 3.4.8) 📡 Ping / Keepalive
+### 3.4.10) 📡 Ping / Keepalive
 
 | Parámetro | Valor de ejemplo | Valores permitidos / Comportamiento real | Explicación completa |
 | :--- | :--- | :--- | :--- |
@@ -685,7 +691,7 @@ Estos ajustes son críticos en el servidor:
 | `PING_COOL_THRESHOLD_SECONDS` | `20.0` | número positivo | Umbral tras el cual la sesión se trata como en enfriamiento. |
 | `PING_COLD_THRESHOLD_SECONDS` | `30.0` | número positivo | Umbral tras el cual la sesión se trata como fría. |
 
-### 3.4.9) 🔄 ARQ y Empaquetado de Paquetes
+### 3.4.11) 🔄 ARQ y Empaquetado de Paquetes
 
 | Parámetro | Valor de ejemplo | Valores permitidos / Comportamiento real | Explicación completa |
 | :--- | :--- | :--- | :--- |
@@ -706,7 +712,7 @@ Estos ajustes son críticos en el servidor:
 | `ARQ_TERMINAL_DRAIN_TIMEOUT_SECONDS` | `120.0` | limitado en el código | Tras volverse terminal un stream, cuánto tiempo espera el cliente al vaciado de la cola. |
 | `ARQ_TERMINAL_ACK_WAIT_TIMEOUT_SECONDS` | `90.0` | limitado en el código | Cuánto tiempo espera el cliente el ACK terminal final. |
 
-### 3.4.10) 🪵 Registro
+### 3.4.12) 🪵 Registro
 
 | Parámetro | Valor de ejemplo | Valores permitidos / Comportamiento real | Explicación completa |
 | :--- | :--- | :--- | :--- |

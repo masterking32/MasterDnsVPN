@@ -446,3 +446,51 @@ func (c *Client) logMicroBurstCompletion(results []QualifiedResolver, activeCoun
 	)
 	c.log.Infof("%s", strings.Repeat("=", 80))
 }
+
+func (c *Client) logResolverReactivated(
+	conn Connection,
+	resolveTime time.Duration,
+	burstResult *BurstProbeResult,
+	activeCount int,
+	totalCount int,
+) {
+	if c == nil || c.log == nil {
+		return
+	}
+
+	resolveStr := "n/a"
+	if resolveTime > 0 {
+		resolveStr = formatResolverRTT(resolveTime)
+	}
+
+	rttStr := "n/a"
+	speedStr := "n/a"
+	lossStr := "0.0%"
+	scoreStr := "n/a"
+
+	if burstResult != nil {
+		if burstResult.AverageRTT > 0 {
+			rttStr = formatResolverRTT(burstResult.AverageRTT)
+		}
+		if burstResult.ThroughputKBps > 0 {
+			speedStr = fmt.Sprintf("%.1f KB/s", burstResult.ThroughputKBps)
+		}
+		lossStr = fmt.Sprintf("%.1f%%", burstResult.LossRatio*100)
+		scoreStr = fmt.Sprintf("%.1f", calculateBurstScore(*burstResult))
+	}
+
+	c.log.Infof(
+		"<green>\U0001F504 DNS Resolver Reactivated:</green> <cyan>%s</cyan> (<blue>%s</blue>) | MTU: UP <green>%dB</green> / DOWN <green>%dB</green> | Resolve: <yellow>%s</yellow> | RTT: <yellow>%s</yellow> | Speed: <green>%s</green> | Loss: <yellow>%s</yellow> | Score: <magenta>%s</magenta> | Active Pool: <cyan>%d</cyan>/<cyan>%d</cyan>",
+		conn.ResolverLabel,
+		conn.Domain,
+		conn.UploadMTUBytes,
+		conn.DownloadMTUBytes,
+		resolveStr,
+		rttStr,
+		speedStr,
+		lossStr,
+		scoreStr,
+		activeCount,
+		totalCount,
+	)
+}

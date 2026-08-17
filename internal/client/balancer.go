@@ -280,13 +280,72 @@ func (b *Balancer) SetConnectionValidityWithLog(key string, valid bool, logReact
 	}
 	b.moveConnectionStateLocked(idx, valid)
 
-	if b.log != nil && valid && logReactivated {
-		conn := &b.connections[idx]
-		b.log.Infof("<green>\U0001F504 DNS Resolver Reactivated: <cyan>%s</cyan> <cyan>%s</cyan>) | <cyan>%s</cyan> | Total Active: <cyan>%d</cyan></green>",
-			conn.ResolverLabel, conn.Domain, conn.Resolver, len(b.activeIDs))
+	return true
+}
+
+// ResolverStatsSnapshot captures a point-in-time snapshot of resolver metrics.
+type ResolverStatsSnapshot struct {
+	Connection    Connection
+	Sent          uint64
+	Acked         uint64
+	Lost          uint64
+	LossRatio     float64
+	AverageRTT    time.Duration
+	ActiveStreams int
+	IsValid       bool
+}
+
+// GetStatsSnapshot thread-safely exports current metrics for all loaded resolvers.
+func (b *Balancer) GetStatsSnapshot() []ResolverStatsSnapshot {
+	if b == nil {
+		return nil
 	}
 
-	return true
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	// Count active streams assigned per resolver key
+	streamCounts := make(map[string]int)
+	for _, route := range b.streamRoutes {
+		if route != nil && route.PreferredResolverKey != "" {
+			streamCounts[route.PreferredResolverKey]++
+		}
+	}
+
+	snapshots := make([]ResolverStatsSnapshot, len(b.connections))
+	for i, conn := range b.connections {
+		var sent, acked, lost, rttSum, rttCount uint64
+		if i < len(b.stats) && b.stats[i] != nil {
+			sent = b.stats[i].sent.Load()
+			acked = b.stats[i].acked.Load()
+			lost = b.stats[i].lost.Load()
+			rttSum = b.stats[i].rttMicrosSum.Load()
+			rttCount = b.stats[i].rttCount.Load()
+		}
+
+		var avgRTT time.Duration
+		if rttCount > 0 {
+			avgRTT = time.Duration(rttSum/rttCount) * time.Microsecond
+		}
+
+		var lossRatio float64
+		if sent > 0 {
+			lossRatio = float64(lost) / float64(sent)
+		}
+
+		snapshots[i] = ResolverStatsSnapshot{
+			Connection:    conn,
+			Sent:          sent,
+			Acked:         acked,
+			Lost:          lost,
+			LossRatio:     lossRatio,
+			AverageRTT:    avgRTT,
+			ActiveStreams: streamCounts[conn.Key],
+			IsValid:       conn.IsValid,
+		}
+	}
+
+	return snapshots
 }
 
 func (b *Balancer) SetConnectionMTU(key string, uploadBytes int, uploadChars int, downloadBytes int) bool {

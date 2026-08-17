@@ -624,7 +624,13 @@ sudo journalctl -u masterdnsvpn-client -f
 | `RECHECK_BURST_TEST_ENABLED` | `true` | `true/false` | بررسی ریزولورهای غیرفعال با تست رگباری قبل از بازگرداندن به استخر فعال در چک‌های دوره‌ای پس‌زمینه. |
 | `RECHECK_BURST_PACKET_COUNT` | `4` | `2..32` | تعداد کوئری‌های ارسالی در چک‌های پس‌زمینه برای اعتبارسنجی مجدد ریزولورها. |
 
-### ۳.۴.۸) بخش ⚙️ Workerها، queueها و زمان‌بندی runtime
+### ۳.۴.۸) بخش 📊 مانیتورینگ زنده و آمار عملکرد ریزولورها
+
+| پارامتر | مقدار نمونه | مقادیر مجاز / رفتار واقعی | توضیح کامل |
+| :--- | :--- | :--- | :--- |
+| `RUNTIME_STATS_INTERVAL_SECONDS` | `60.0` | `1.0..86400.0` (یا `0` = خاموش) | فاصله زمانی (بر حسب ثانیه) بین چاپ خودکار جدول آمار در کنسول هنگام جریان داشتن ترافیک.<br>مقدار `0` چاپ دوره‌ای را غیرفعال می‌کند.<br>فشردن کلید `'s'` + Enter (یا فقط Enter) در ترمینال در هر لحظه جدول آمار زنده را بلافاصله نمایش می‌دهد. |
+
+### ۳.۴.۹) بخش ⚙️ Workerها، queueها و زمان‌بندی runtime
 
 | پارامتر | مقدار نمونه | مقادیر مجاز / رفتار واقعی | توضیح کامل |
 | :--- | :--- | :--- | :--- |
@@ -642,7 +648,7 @@ sudo journalctl -u masterdnsvpn-client -f
 | `SESSION_INIT_RETRY_MAX_SECONDS` | `60.0` | clamp به `[SESSION_INIT_RETRY_BASE_SECONDS, 3600]` | سقف delay بین retryهای session init. |
 | `SESSION_INIT_BUSY_RETRY_INTERVAL_SECONDS` | `60.0` | clamp به `1..3600` ثانیه | اگر سرور پاسخ `SESSION_BUSY` بدهد، کلاینت قبل از تلاش مجدد این‌قدر صبر می‌کند. |
 
-### ۳.۴.۸) بخش 🫀 Ping / Keepalive
+### ۳.۴.۱۰) بخش 🫀 Ping / Keepalive
 
 | پارامتر | مقدار نمونه | مقادیر مجاز / رفتار واقعی | توضیح کامل |
 | :--- | :--- | :--- | :--- |
@@ -654,7 +660,7 @@ sudo journalctl -u masterdnsvpn-client -f
 | `PING_COOL_THRESHOLD_SECONDS` | `20.0` | clamp به `[PING_WARM_THRESHOLD_SECONDS, 1800]` | مرز ورود به فاز cool. |
 | `PING_COLD_THRESHOLD_SECONDS` | `30.0` | clamp به `[PING_COOL_THRESHOLD_SECONDS, 3600]` | مرز ورود به فاز cold و ping بسیار کم‌فاصله. |
 
-### ۳.۴.۹) بخش 🔄 ARQ، NACK و packing
+### ۳.۴.۱۱) بخش 🔄 ARQ، NACK و packing
 
 | پارامتر | مقدار نمونه | مقادیر مجاز / رفتار واقعی | توضیح کامل |
 | :--- | :--- | :--- | :--- |
@@ -675,7 +681,7 @@ sudo journalctl -u masterdnsvpn-client -f
 | `ARQ_TERMINAL_DRAIN_TIMEOUT_SECONDS` | `120.0` | clamp به `10..3600` ثانیه | وقتی stream وارد حالت terminal شد، چقدر صبر کنیم تا bufferهای باقیمانده drain شوند. |
 | `ARQ_TERMINAL_ACK_WAIT_TIMEOUT_SECONDS` | `90.0` | clamp به `5..3600` ثانیه | بعد از closeهای terminal، چقدر برای ACK نهایی صبر کنیم. |
 
-### ۳.۴.۱۰) بخش 🪵 لاگ
+### ۳.۴.۱۲) بخش 🪵 لاگ
 
 | پارامتر | مقدار نمونه | مقادیر مجاز / رفتار واقعی | توضیح کامل |
 | :--- | :--- | :--- | :--- |

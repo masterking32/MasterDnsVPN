@@ -655,7 +655,13 @@ Copy-Item client_resolvers.simple client_resolvers.txt
 | `RECHECK_BURST_TEST_ENABLED` | `true` | `true/false` | 若启用，后台健康检查在重新激活非活跃解析器前会进行微突发测试验证。 |
 | `RECHECK_BURST_PACKET_COUNT` | `4` | `2..32` | 后台健康重新检查时微突发测试发送的查询包数量。 |
 
-### 3.4.8) 🧵 运行时工作线程、队列与计时器
+### 3.4.8) 📊 实时解析器性能监控与使用统计
+
+| 参数 | 示例值 | 允许的值 / 实际行为 | 完整说明 |
+| :--- | :--- | :--- | :--- |
+| `RUNTIME_STATS_INTERVAL_SECONDS` | `60.0` | `1.0..86400.0`（或 `0` = 禁用） | 隧道有流量流动时周期性输出性能统计表的时间间隔（秒）。<br>设为 `0` 可关闭周期性输出。<br>在终端随时按下 `'s'` + Enter（或 Enter）均可立即显示最新实时性能报表。 |
+
+### 3.4.9) 🧵 运行时工作线程、队列与计时器
 
 | 参数 | 示例值 | 允许的值 / 实际行为 | 完整说明 |
 | :--- | :--- | :--- | :--- |
@@ -673,7 +679,7 @@ Copy-Item client_resolvers.simple client_resolvers.txt
 | `SESSION_INIT_RETRY_MAX_SECONDS` | `60.0` | 若无效则使用回退值 | 会话初始化的最大重试延迟。 |
 | `SESSION_INIT_BUSY_RETRY_INTERVAL_SECONDS` | `60.0` | 若无效则使用回退值 | 当服务器明确以 `SESSION_BUSY` 响应时的重试延迟。 |
 
-### 3.4.8) 📡 Ping / 保活
+### 3.4.10) 📡 Ping / 保活
 
 | 参数 | 示例值 | 允许的值 / 实际行为 | 完整说明 |
 | :--- | :--- | :--- | :--- |
@@ -685,7 +691,7 @@ Copy-Item client_resolvers.simple client_resolvers.txt
 | `PING_COOL_THRESHOLD_SECONDS` | `20.0` | 正数 | 超过此阈值后会话被视为正在冷却。 |
 | `PING_COLD_THRESHOLD_SECONDS` | `30.0` | 正数 | 超过此阈值后会话被视为冷态（cold）。 |
 
-### 3.4.9) 🔄 ARQ 与数据包打包
+### 3.4.11) 🔄 ARQ 与数据包打包
 
 | 参数 | 示例值 | 允许的值 / 实际行为 | 完整说明 |
 | :--- | :--- | :--- | :--- |
@@ -706,7 +712,7 @@ Copy-Item client_resolvers.simple client_resolvers.txt
 | `ARQ_TERMINAL_DRAIN_TIMEOUT_SECONDS` | `120.0` | 代码中会钳制 | 流变为终结后，客户端等待队列清空的时长。 |
 | `ARQ_TERMINAL_ACK_WAIT_TIMEOUT_SECONDS` | `90.0` | 代码中会钳制 | 客户端等待最终终结 ACK 的时长。 |
 
-### 3.4.10) 🪵 日志
+### 3.4.12) 🪵 日志
 
 | 参数 | 示例值 | 允许的值 / 实际行为 | 完整说明 |
 | :--- | :--- | :--- | :--- |

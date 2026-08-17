@@ -433,6 +433,12 @@ func (c *Client) Run(ctx context.Context) error {
 				}
 
 				c.ensureLocalDNSCachePersistence(ctx)
+
+				if c.cfg.RuntimeStatsIntervalSeconds > 0 {
+					go c.runRuntimeStatsLoop(ctx)
+				}
+				c.startInteractiveConsoleListener(ctx)
+				c.printRuntimeStatsHint()
 			}
 
 			select {

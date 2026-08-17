@@ -75,6 +75,7 @@ type ClientConfig struct {
 	MaxBurstLossRatio                     float64           `toml:"MAX_BURST_LOSS_RATIO"`
 	RecheckBurstTestEnabled               bool              `toml:"RECHECK_BURST_TEST_ENABLED"`
 	RecheckBurstPacketCount               int               `toml:"RECHECK_BURST_PACKET_COUNT"`
+	RuntimeStatsIntervalSeconds           float64           `toml:"RUNTIME_STATS_INTERVAL_SECONDS"`
 	RX_TX_Workers                         int               `toml:"RX_TX_WORKERS"`
 	LegacyTunnelReaderWorkers             int               `toml:"TUNNEL_READER_WORKERS"`
 	LegacyTunnelWriterWorkers             int               `toml:"TUNNEL_WRITER_WORKERS"`
@@ -190,6 +191,7 @@ func defaultClientConfig() ClientConfig {
 		MaxBurstLossRatio:                     0.20,
 		RecheckBurstTestEnabled:               true,
 		RecheckBurstPacketCount:               4,
+		RuntimeStatsIntervalSeconds:           60.0,
 		RX_TX_Workers:                         4,
 		TunnelProcessWorkers:                  0,
 		TunnelPacketTimeoutSec:                10.0,
@@ -457,6 +459,11 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 	cfg.MaxBurstLossRatio = clampFloat(defaultFloatBelow(cfg.MaxBurstLossRatio, 0.0, 0.20), 0.0, 1.0)
 	cfg.MinBurstThroughputKBps = clampFloat(defaultFloatBelow(cfg.MinBurstThroughputKBps, 0.0, 0.0), 0.0, 100000.0)
 	cfg.RecheckBurstPacketCount = clampInt(defaultIntBelow(cfg.RecheckBurstPacketCount, 2, 4), 2, 16)
+	if cfg.RuntimeStatsIntervalSeconds < 0.0 {
+		cfg.RuntimeStatsIntervalSeconds = 0.0
+	} else if cfg.RuntimeStatsIntervalSeconds > 0.0 {
+		cfg.RuntimeStatsIntervalSeconds = clampFloat(cfg.RuntimeStatsIntervalSeconds, 1.0, 86400.0)
+	}
 	legacyRX_TX_Workers := max(cfg.LegacyTunnelReaderWorkers, cfg.LegacyTunnelWriterWorkers)
 	if !cfg.explicitRX_TX_Workers && legacyRX_TX_Workers > 0 {
 		cfg.RX_TX_Workers = legacyRX_TX_Workers

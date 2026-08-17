@@ -686,3 +686,31 @@ RECHECK_BURST_PACKET_COUNT = 5
 	}
 }
 
+func TestLoadClientConfigRuntimeStatsKnobs(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "client_config.toml")
+	resolversPath := filepath.Join(dir, "client_resolvers.txt")
+
+	if err := os.WriteFile(configPath, []byte(`
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["example.com"]
+DATA_ENCRYPTION_METHOD = 1
+ENCRYPTION_KEY = "test-secret"
+RUNTIME_STATS_INTERVAL_SECONDS = 45.0
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile config failed: %v", err)
+	}
+	if err := os.WriteFile(resolversPath, []byte("1.1.1.1\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile resolvers failed: %v", err)
+	}
+
+	cfg, err := LoadClientConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadClientConfig returned error: %v", err)
+	}
+
+	if cfg.RuntimeStatsIntervalSeconds != 45.0 {
+		t.Fatalf("unexpected RuntimeStatsIntervalSeconds: got=%v want=45.0", cfg.RuntimeStatsIntervalSeconds)
+	}
+}
+
