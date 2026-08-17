@@ -727,5 +727,3 @@ func TestBalancerLimitConnectionPool_EdgeCases(t *testing.T) {
 		t.Fatalf("expected len=2 and cap=2 for count=2, got len=%d cap=%d", len(res2), cap(res2))
 	}
 }
-
-
