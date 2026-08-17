@@ -145,6 +145,11 @@ STREAM_RESOLVER_FAILOVER_COOLDOWN = 2.5
 # Note: Key name retains 'SERVERS' for backwards compatibility with existing configs.
 RECHECK_INACTIVE_SERVERS_ENABLED = true
 
+# If true, the client automatically persists the best-performing resolvers at
+# the top of the resolvers file (client_resolvers.txt) under a managed header block.
+# On subsequent runs, FastStart boots immediately using the proven fastest servers.
+AUTO_SAVE_RANKED_RESOLVERS = true
+
 # If true, a resolver is runtime-disabled when it stays timeout-only across the
 # configured window and enough observations have been collected.
 # Note: Key name retains 'SERVERS' for backwards compatibility.

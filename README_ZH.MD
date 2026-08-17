@@ -494,19 +494,23 @@ Copy-Item client_resolvers.simple client_resolvers.txt
 
 #### 命令行参数
 
-两个二进制文件都支持以下参数：
+客户端和服务端支持以下命令行标志（所有 `client_config.toml` 配置项也可以通过 CLI 标志覆盖）：
 
-| 参数 | 说明 |
-| :--- | :--- |
-| `-config` | 配置文件路径 |
-| `-log` | 可选的日志文件路径 |
-| `-version` | 打印版本并退出 |
+| 参数 | 别名 | 目标 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `-config` | `-c` | 双端 | 配置文件路径（默认：`client_config.toml` / `server_config.toml`） |
+| `-resolvers` | `-r` | 客户端 | 自定义解析器文件路径覆盖（默认：`client_resolvers.txt`） |
+| `-domains` | `-d` | 客户端 | 逗号分隔的隧道域名覆盖 |
+| `-encryption-key` | `-k` | 客户端 | 加密密钥覆盖 |
+| `-log` | `-l` | 双端 | 可选的日志文件路径 |
+| `-version` | `-v` | 双端 | 打印版本并退出 |
+| `-help` | `-h` | 双端 | 显示帮助信息及所有可用的标志覆盖项 |
 
 示例：
 
 ```bash
 ./masterdnsvpn-server -config server_config.toml -log server.log
-./masterdnsvpn-client -config client_config.toml -log client.log
+./masterdnsvpn-client -config client_config.toml -resolvers my_resolvers.txt -log client.log
 ```
 
 ---
@@ -526,19 +530,31 @@ Copy-Item client_resolvers.simple client_resolvers.txt
 
 `client_resolvers.txt` 中接受的格式：
 
-- `IP`
-- `IP:PORT`
-- `CIDR`
-- `CIDR:PORT`
+- `IP`（IPv4 或 `[IPv6]`）
+- `IP:PORT`（IPv4 或 `[IPv6]:PORT`）
+- `CIDR`（例如 `192.168.1.0/24`）
+- `CIDR:PORT`（例如 `192.168.1.0/24:5300`）
+- 注释（以 `#` 开头的行）
 
 示例：
 
 ```text
-8.8.8.8
-1.1.1.1:53
-9.9.9.0/24
-208.67.222.0/24:5353
+# >>> MASTERDNSVPN AUTO-RANKED BEST RESOLVERS (Do not edit this block) <<<
+# Last updated: 2026-08-17 18:00:00
+1.1.1.1
+8.8.8.8:53
+192.168.10.5:5300
+# <<< END MASTERDNSVPN AUTO-RANKED BEST RESOLVERS >>>
+
+# --- 自定义解析器与子网 ---
+# Cloudflare DNS
+1.1.1.1
+
+# 本地 ISP 子网
+192.168.10.0/24:5300
 ```
+
+> 💡 **智能热启动（Smart Warm-Start）：** 客户端严格保留 `client_resolvers.txt` 的行顺序。启用 `AUTO_SAVE_RANKED_RESOLVERS = true` 时，客户端会自动跟踪并在文件顶部的托管块中持久化已验证的最快解析器。该块下方的所有自定义注释、格式和子网均保持原样。FastStart 会在后续启动中直接使用这些排名前列的解析器，并在 150ms 内快速完成连接。
 
 ---
 
@@ -610,6 +626,7 @@ Copy-Item client_resolvers.simple client_resolvers.txt
 | `STREAM_RESOLVER_FAILOVER_RESEND_THRESHOLD` | `2` | 若 `<1` 则使用回退值 | 如果某条流在同一首选解析器上累积了反复的重发压力，客户端可能会将该流故障切换到另一个解析器。<br>此阈值控制切换发生的速度。 |
 | `STREAM_RESOLVER_FAILOVER_COOLDOWN` | `2.5` | 若 `<=0` 则使用回退值 | 同一条流两次故障切换之间的最小延迟。<br>这可防止在解析器之间发生不稳定的来回振荡。 |
 | `RECHECK_INACTIVE_SERVERS_ENABLED` | `true` | `true/false` | 为当前被禁用或不健康的解析器启用后台重新检查。<br>同时激活 **FastStart**：验证 `RX_TX_WORKERS` 个可用解析器后立即连接，并在后台扫描其余解析器。<br>如果禁用，一旦解析器变得不可用，它将一直保持禁用状态，直到重启。 |
+| `AUTO_SAVE_RANKED_RESOLVERS` | `true` | `true/false` | 自动将性能最佳的解析器保存到 `client_resolvers.txt` 文件头部的托管块中。<br>在下次启动时，FastStart 将直接使用这些已验证的最快解析器，无需从头扫描整个列表。<br>保留块下方的所有用户自定义注释和子网。 |
 | `AUTO_DISABLE_TIMEOUT_SERVERS` | `true` | `true/false` | 启用对持续超时且无任何成功活动的解析器的自动禁用。 |
 | `AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS` | `30.0` | 若 `<=0` 则使用回退值 | 用于判断某解析器是否仅有超时的时间窗口。<br>如果此窗口内的所有观察结果都是超时，该解析器可能会被禁用。 |
 | `FD_CONTROL_UNIX_SOCKET` | `""` | 留空，或填写 Unix 套接字路径 | 仅用于基于 VpnService 的 Android 宿主。<br>设置后，客户端会在 connect/bind 之前把每个上游 UDP 套接字（解析器连接池、MTU 探测、健康检查、隧道 worker）的 fd 发送到此 Unix 套接字，以便宿主调用 `VpnService.protect(fd)`，让发往解析器的流量不进入隧道。<br>本地监听器（SOCKS5/TCP、SOCKS5 UDP 中继、本地 DNS）不会被发送。如果 protect 服务不可达或拒绝该 fd，套接字创建将失败。<br>桌面和服务器环境请留空。 |

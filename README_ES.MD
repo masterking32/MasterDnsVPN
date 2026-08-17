@@ -494,19 +494,23 @@ En Windows:
 
 #### Parámetros de línea de comandos
 
-Ambos binarios admiten estos argumentos:
+El cliente y el servidor admiten las siguientes opciones por línea de comandos (todas las opciones de `client_config.toml` también se pueden sobrescribir mediante flags CLI):
 
-| Parámetro | Descripción |
-| :--- | :--- |
-| `-config` | Ruta al archivo de configuración |
-| `-log` | Ruta opcional a un archivo de registro |
-| `-version` | Imprime la versión y sale |
+| Parámetro | Alias | Destino | Descripción |
+| :--- | :--- | :--- | :--- |
+| `-config` | `-c` | Ambos | Ruta al archivo de configuración (predeterminado: `client_config.toml` / `server_config.toml`) |
+| `-resolvers` | `-r` | Cliente | Ruta al archivo de resolutores personalizado (predeterminado: `client_resolvers.txt`) |
+| `-domains` | `-d` | Cliente | Sobrescribir dominios de túnel separados por comas |
+| `-encryption-key` | `-k` | Cliente | Sobrescribir clave de cifrado |
+| `-log` | `-l` | Ambos | Ruta opcional a un archivo de registro |
+| `-version` | `-v` | Ambos | Imprime la versión y sale |
+| `-help` | `-h` | Ambos | Muestra la ayuda y todas las opciones de línea de comandos disponibles |
 
 Ejemplo:
 
 ```bash
 ./masterdnsvpn-server -config server_config.toml -log server.log
-./masterdnsvpn-client -config client_config.toml -log client.log
+./masterdnsvpn-client -config client_config.toml -resolvers my_resolvers.txt -log client.log
 ```
 
 ---
@@ -526,19 +530,31 @@ Ejemplo:
 
 Formatos aceptados en `client_resolvers.txt`:
 
-- `IP`
-- `IP:PORT`
-- `CIDR`
-- `CIDR:PORT`
+- `IP` (IPv4 o `[IPv6]`)
+- `IP:PORT` (IPv4 o `[IPv6]:PORT`)
+- `CIDR` (p. ej. `192.168.1.0/24`)
+- `CIDR:PORT` (p. ej. `192.168.1.0/24:5300`)
+- Comentarios (líneas que comienzan con `#`)
 
 Ejemplo:
 
 ```text
-8.8.8.8
-1.1.1.1:53
-9.9.9.0/24
-208.67.222.0/24:5353
+# >>> MASTERDNSVPN AUTO-RANKED BEST RESOLVERS (Do not edit this block) <<<
+# Last updated: 2026-08-17 18:00:00
+1.1.1.1
+8.8.8.8:53
+192.168.10.5:5300
+# <<< END MASTERDNSVPN AUTO-RANKED BEST RESOLVERS >>>
+
+# --- Mis resolutores y subredes personalizados ---
+# Cloudflare DNS
+1.1.1.1
+
+# Subred ISP Local
+192.168.10.0/24:5300
 ```
+
+> 💡 **Inicio rápido inteligente (Smart Warm-Start):** El cliente conserva el orden exacto de las líneas de `client_resolvers.txt`. Cuando `AUTO_SAVE_RANKED_RESOLVERS = true` está habilitado, el cliente rastrea y guarda automáticamente los resolutores más rápidos verificados en el encabezado gestionado. Todos los comentarios, formatos y subredes personalizados debajo del bloque permanecen intactos. FastStart utiliza estas entradas superiores para conectarse en menos de 150 ms en los siguientes inicios.
 
 ---
 
@@ -610,6 +626,7 @@ Estos ajustes son críticos en el servidor:
 | `STREAM_RESOLVER_FAILOVER_RESEND_THRESHOLD` | `2` | Si es `<1`, se aplica el valor de reserva | Si un stream acumula presión de reenvío repetida sobre el mismo resolutor preferido, el cliente puede hacer failover de ese stream a otro resolutor.<br>Este umbral controla la rapidez con que ocurre. |
 | `STREAM_RESOLVER_FAILOVER_COOLDOWN` | `2.5` | Si es `<=0`, se aplica el valor de reserva | Retardo mínimo entre dos failovers para el mismo stream.<br>Esto evita una oscilación inestable entre resolutores. |
 | `RECHECK_INACTIVE_SERVERS_ENABLED` | `true` | `true/false` | Activa las revisiones en segundo plano de los resolutores actualmente desactivados o no saludables.<br>También activa **FastStart**: el cliente se conecta inmediatamente tras validar `RX_TX_WORKERS` resolutores y descubre el resto en segundo plano.<br>Si se desactiva, una vez que un resolutor queda inutilizable, permanecerá desactivado hasta el reinicio. |
+| `AUTO_SAVE_RANKED_RESOLVERS` | `true` | `true/false` | Guarda automáticamente los mejores resolutores clasificados en el encabezado gestionado de `client_resolvers.txt`.<br>En el siguiente inicio, FastStart utiliza inmediatamente estos resolutores probados más rápidos sin tener que escanear toda la lista desde cero.<br>Preserva todos los comentarios y subredes personalizados debajo del bloque. |
 | `AUTO_DISABLE_TIMEOUT_SERVERS` | `true` | `true/false` | Activa la desactivación automática de resolutores que siguen agotando el tiempo de espera y no muestran actividad exitosa. |
 | `AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS` | `30.0` | Si es `<=0`, se aplica el valor de reserva | Ventana de tiempo usada para decidir si un resolutor solo presenta timeouts.<br>Si todas las observaciones en esta ventana son timeouts, puede desactivarse. |
 | `FD_CONTROL_UNIX_SOCKET` | `""` | Vacío, o la ruta de un socket Unix | Solo para hosts Android con VpnService.<br>Si se define, el cliente envía el fd de cada socket UDP de salida (pool de resolutores, sondas MTU, comprobaciones de salud, workers del túnel) a este socket Unix antes de connect/bind, para que el host pueda llamar a `VpnService.protect(fd)` y mantener el tráfico hacia los resolutores fuera del túnel.<br>Los listeners locales (SOCKS5/TCP, relay UDP de SOCKS5, DNS local) nunca se envían. Si el servidor de protección no responde o rechaza el fd, la creación del socket falla.<br>Déjalo vacío en equipos de escritorio y servidores. |

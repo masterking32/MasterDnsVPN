@@ -493,19 +493,23 @@ On Windows:
 
 #### Command-line parameters
 
-Both binaries support these arguments:
+Client and server support these command-line flags (all `client_config.toml` settings can also be overridden via CLI flags):
 
-| Parameter | Description |
-| :--- | :--- |
-| `-config` | Path to the configuration file |
-| `-log` | Optional path to a log file |
-| `-version` | Print version and exit |
+| Parameter | Alias | Target | Description |
+| :--- | :--- | :--- | :--- |
+| `-config` | `-c` | Both | Path to the configuration file (default: `client_config.toml` / `server_config.toml`) |
+| `-resolvers` | `-r` | Client | Path to custom resolvers file override (default: `client_resolvers.txt`) |
+| `-domains` | `-d` | Client | Comma-separated tunnel domains override |
+| `-encryption-key` | `-k` | Client | Encryption key override |
+| `-log` | `-l` | Both | Optional path to a log file |
+| `-version` | `-v` | Both | Print version and exit |
+| `-help` | `-h` | Both | Show help message and all available flag overrides |
 
 Example:
 
 ```bash
 ./masterdnsvpn-server -config server_config.toml -log server.log
-./masterdnsvpn-client -config client_config.toml -log client.log
+./masterdnsvpn-client -config client_config.toml -resolvers my_resolvers.txt -log client.log
 ```
 
 ---
@@ -525,19 +529,31 @@ Example:
 
 Accepted formats in `client_resolvers.txt`:
 
-- `IP`
-- `IP:PORT`
-- `CIDR`
-- `CIDR:PORT`
+- `IP` (IPv4 or `[IPv6]`)
+- `IP:PORT` (IPv4 or `[IPv6]:PORT`)
+- `CIDR` (e.g. `192.168.1.0/24`)
+- `CIDR:PORT` (e.g. `192.168.1.0/24:5300`)
+- Comments (lines starting with `#`)
 
 Example:
 
 ```text
-8.8.8.8
-1.1.1.1:53
-9.9.9.0/24
-208.67.222.0/24:5353
+# >>> MASTERDNSVPN AUTO-RANKED BEST RESOLVERS (Do not edit this block) <<<
+# Last updated: 2026-08-17 18:00:00
+1.1.1.1
+8.8.8.8:53
+192.168.10.5:5300
+# <<< END MASTERDNSVPN AUTO-RANKED BEST RESOLVERS >>>
+
+# --- My Custom Resolvers & Subnets ---
+# Cloudflare DNS
+1.1.1.1
+
+# Local ISP Subnet
+192.168.10.0/24:5300
 ```
+
+> 💡 **Smart Warm-Start:** The client preserves the exact line order of `client_resolvers.txt`. When `AUTO_SAVE_RANKED_RESOLVERS = true`, the client automatically tracks and persists the proven fastest resolvers at the top inside a managed header block. All custom comments, formatting, and subnets below the block remain untouched. FastStart uses these top entries to connect in <150ms on subsequent launches.
 
 ---
 
@@ -609,6 +625,7 @@ These settings are critical on the server:
 | `STREAM_RESOLVER_FAILOVER_RESEND_THRESHOLD` | `2` | If `<1`, fallback applies | If a stream accumulates repeated resend pressure on the same preferred resolver, the client may fail over that stream to another resolver.<br>This threshold controls how quickly that happens. |
 | `STREAM_RESOLVER_FAILOVER_COOLDOWN` | `2.5` | If `<=0`, fallback applies | Minimum delay between two failovers for the same stream.<br>This prevents unstable oscillation between resolvers. |
 | `RECHECK_INACTIVE_SERVERS_ENABLED` | `true` | `true/false` | Enables background rechecks for currently disabled or unhealthy resolvers.<br>Also activates **FastStart**: client connects immediately once `RX_TX_WORKERS` working resolvers are validated, then discovers remaining resolvers in the background.<br>If disabled, once a resolver becomes unusable, it will stay disabled until restart, and initial startup will synchronously scan 100% of resolvers. |
+| `AUTO_SAVE_RANKED_RESOLVERS` | `true` | `true/false` | Automatically saves the top-performing resolvers to the managed header of `client_resolvers.txt`.<br>On next startup, FastStart uses these proven fastest resolvers immediately without scanning the entire pool from scratch.<br>Preserves all user comments, formatting, and custom CIDRs below the managed block. |
 | `AUTO_DISABLE_TIMEOUT_SERVERS` | `true` | `true/false` | Enables automatic disabling of resolvers that keep timing out and show no successful activity. |
 | `AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS` | `30.0` | If `<=0`, fallback applies | Time window used to decide whether a resolver is timeout-only.<br>If all observations in this window are timeouts, it may be disabled. |
 | `FD_CONTROL_UNIX_SOCKET` | `""` | Empty, or a Unix socket path | Android VpnService hosts only.<br>When set, the client sends the fd of every upstream UDP socket (resolver pool, MTU probes, health checks, tunnel workers) to this Unix socket before connect/bind, so the host can call `VpnService.protect(fd)` and keep resolver traffic out of the tunnel.<br>The client never sends local listeners (SOCKS5/TCP, SOCKS5 UDP relay, local DNS). If the protect server is unreachable or rejects the fd, socket creation fails.<br>Leave empty on desktop and server setups. |

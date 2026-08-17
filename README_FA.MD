@@ -481,19 +481,23 @@ sudo journalctl -u masterdnsvpn-client -f
 
 #### بخش ۲.۶: 🐈‍⬛ پارامترهای خط فرمان (Command-line) برای کلاینت و سرور
 
-هر دو باینری از این پارامترها پشتیبانی می‌کنند:
+کلاینت و سرور از فلگ‌های خط فرمان زیر پشتیبانی می‌کنند (تمامی گزینه‌های `client_config.toml` نیز از طریق فلگ‌های CLI قابل بازنویسی هستند):
 
-| پارامتر | توضیح |
-| :--- | :--- |
-| `-config` | مسیر فایل تنظیمات |
-| `-log` | مسیر فایل لاگ اختیاری |
-| `-version` | نمایش نسخه و خروج |
+| پارامتر | نام مستعار | هدف | توضیح |
+| :--- | :--- | :--- | :--- |
+| `-config` | `-c` | هر دو | مسیر فایل تنظیمات (پیش‌فرض: `client_config.toml` / `server_config.toml`) |
+| `-resolvers` | `-r` | کلاینت | مسیر دلخواه فایل ریزالورها (پیش‌فرض: `client_resolvers.txt`) |
+| `-domains` | `-d` | کلاینت | بازنویسی دامنه‌های تونل با کاما |
+| `-encryption-key` | `-k` | کلاینت | بازنویسی کلید رمزنگاری |
+| `-log` | `-l` | هر دو | مسیر فایل لاگ اختیاری |
+| `-version` | `-v` | هر دو | نمایش نسخه و خروج |
+| `-help` | `-h` | هر دو | نمایش راهنما و تمامی فلگ‌های موجود |
 
 نمونه:
 
 ```bash
 ./masterdnsvpn-server -config server_config.toml -log server.log
-./masterdnsvpn-client -config client_config.toml -log client.log
+./masterdnsvpn-client -config client_config.toml -resolvers my_resolvers.txt -log client.log
 ```
 
 ---
@@ -515,19 +519,31 @@ sudo journalctl -u masterdnsvpn-client -f
 ## بخش ۳.۲: 🧾 فایل لیست رزولورها (`client_resolvers.txt`) 
 فرمت قابل قبول در `client_resolvers.txt`:
 
-- `IP`
-- `IP:PORT`
-- `CIDR`
-- `CIDR:PORT`
+- `IP` (IPv4 یا `[IPv6]`)
+- `IP:PORT` (IPv4 یا `[IPv6]:PORT`)
+- `CIDR` (مثلاً `192.168.1.0/24`)
+- `CIDR:PORT` (مثلاً `192.168.1.0/24:5300`)
+- کامنت‌ها (خطوطی که با `#` شروع می‌شوند)
 
 نمونه:
 
 ```text
-8.8.8.8
-1.1.1.1:53
-9.9.9.0/24
-208.67.222.0/24:5353
+# >>> MASTERDNSVPN AUTO-RANKED BEST RESOLVERS (Do not edit this block) <<<
+# Last updated: 2026-08-17 18:00:00
+1.1.1.1
+8.8.8.8:53
+192.168.10.5:5300
+# <<< END MASTERDNSVPN AUTO-RANKED BEST RESOLVERS >>>
+
+# --- ریزالورها و ساب‌نت‌های سفارشی کاربر ---
+# Cloudflare DNS
+1.1.1.1
+
+# ساب‌نت شبکه محلی / ارائه‌دهنده
+192.168.10.0/24:5300
 ```
+
+> 💡 **راه‌اندازی گرم و هوشمند (Smart Warm-Start):** کلاینت ترتیب دقیق خطوط فایل `client_resolvers.txt` را حفظ می‌کند. در صورت فعال بودن `AUTO_SAVE_RANKED_RESOLVERS = true`، سریع‌ترین و بهترین ریزالورهای شناسایی‌شده به‌صورت خودکار در بالای فایل و درون یک بلاک مشخص ذخیره می‌شوند. کامنت‌ها، قالب‌بندی و ساب‌نت‌های شما در زیر این بلاک کاملاً دست‌نخورده باقی می‌مانند. کلاینت با کمک FastStart در دفعات بعدی در کمتر از ۱۵۰ میلی‌ثانیه متصل می‌شود.
 
 ---
 
@@ -579,6 +595,7 @@ sudo journalctl -u masterdnsvpn-client -f
 | `STREAM_RESOLVER_FAILOVER_RESEND_THRESHOLD` | `3` | clamp به `1..128` | اگر یک stream روی resolver ترجیحی خودش پشت سر هم resend بخورد، بعد از این آستانه کلاینت resolver ترجیحی آن stream را عوض می‌کند.<br>این مکانیزم باعث می‌شود یک stream روی resolver بد گیر نکند. |
 | `STREAM_RESOLVER_FAILOVER_COOLDOWN` | `2.5` | clamp به `0.1..120` ثانیه | حداقل فاصله بین دو بار failover برای یک stream است.<br>اگر خیلی کم باشد stream مدام resolver عوض می‌کند و سیستم ناپایدار می‌شود.<br>اگر خیلی زیاد باشد stream دیرتر از resolver بد جدا می‌شود. |
 | `RECHECK_INACTIVE_SERVERS_ENABLED` | `true` | `true/false` | resolverهایی که در تست MTU اولیه یا در runtime غیرفعال شده‌اند، در پس‌زمینه دوباره امتحان شوند یا نه.<br>همچنین **FastStart** را فعال می‌کند: کلاینت پس از تایید `RX_TX_WORKERS` ريزولور سالم بلافاصله متصل شده و بقیه را در پس‌زمینه اسکن می‌کند. |
+| `AUTO_SAVE_RANKED_RESOLVERS` | `true` | `true/false` | بهترین و سریع‌ترین resolverها را به‌طور خودکار در بالای فایل `client_resolvers.txt` ذخیره می‌کند.<br>در اجراهای بعدی، قابلیت FastStart بدون اسکن کل لیست از ابتدا، فوراً از این resolverهای برتر استفاده می‌کند.<br>کامنت‌ها و ساب‌نت‌های کاربر در زیر بلاک دست‌نخورده باقی می‌مانند. |
 | `AUTO_DISABLE_TIMEOUT_SERVERS` | `true` | `true/false` | اگر یک resolver در runtime فقط timeout تولید کند و هیچ success نداشته باشد، کلاینت می‌تواند موقتاً آن را از لیست فعال خارج کند.<br>این قابلیت برای جلوگیری از هدر رفتن packet روی resolver مرده است. |
 | `AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS` | `30.0` | clamp به `1..86400` ثانیه | پنجره‌ای که در آن history timeout-only بررسی می‌شود.<br>اگر در این بازه فقط timeout ببینیم و شرط observation هم برقرار باشد، resolver غیرفعال می‌شود. |
 | `FD_CONTROL_UNIX_SOCKET` | `""` | خالی، یا مسیر یک Unix socket | فقط برای هاست‌های اندرویدی مبتنی بر VpnService.<br>اگر مقدار داشته باشد، کلاینت fd هر socket خروجی UDP (pool resolverها، تست‌های MTU، بررسی سلامت، workerهای تونل) را قبل از connect/bind به این Unix socket می‌فرستد تا هاست بتواند `VpnService.protect(fd)` را صدا بزند و ترافیک resolverها را بیرون از تونل نگه دارد.<br>listenerهای محلی (SOCKS5/TCP، relay UDP مربوط به SOCKS5، DNS محلی) هرگز فرستاده نمی‌شوند. اگر سرور protect در دسترس نباشد یا fd را رد کند، ساخت socket با خطا متوقف می‌شود.<br>روی دسکتاپ و سرور خالی بگذارید. |

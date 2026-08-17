@@ -13,10 +13,12 @@ import (
 	"encoding/binary"
 	"math"
 	"net"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"masterdnsvpn-go/internal/config"
 	Enums "masterdnsvpn-go/internal/enums"
 	"masterdnsvpn-go/internal/logger"
 )
@@ -360,6 +362,83 @@ func (b *Balancer) GetStatsSnapshot() []ResolverStatsSnapshot {
 	}
 
 	return snapshots
+}
+
+// GetRankedEndpoints returns unique ResolverAddress endpoints sorted in descending
+// performance order based on composite scores, active status, and MTU validity.
+func (b *Balancer) GetRankedEndpoints(maxCount int) []config.ResolverAddress {
+	if b == nil {
+		return nil
+	}
+
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	if len(b.connections) == 0 {
+		return nil
+	}
+
+	type scoredEndpoint struct {
+		addr  config.ResolverAddress
+		score float64
+	}
+
+	seenEndpoints := make(map[string]int) // endpointKey -> index in scored
+	scored := make([]scoredEndpoint, 0, len(b.connections))
+
+	for i, conn := range b.connections {
+		// Only consider connections that have passed MTU discovery or are active or have stats
+		hasStats := false
+		if i < len(b.stats) && b.stats[i] != nil {
+			sent, _, _, _, rttCount := b.stats[i].snapshot()
+			if sent > 0 || rttCount > 0 {
+				hasStats = true
+			}
+		}
+		if !conn.IsValid && conn.UploadMTUBytes <= 0 && conn.DownloadMTUBytes <= 0 && !hasStats {
+			continue
+		}
+
+		score := b.calculateConnectionScoreLocked(i)
+		if conn.IsValid {
+			score += 1000.0 // Active pool members boosted above standbys
+		}
+
+		epKey := formatResolverEndpoint(conn.Resolver, conn.ResolverPort)
+		if existingIdx, exists := seenEndpoints[epKey]; exists {
+			if score > scored[existingIdx].score {
+				scored[existingIdx].score = score
+			}
+			continue
+		}
+
+		seenEndpoints[epKey] = len(scored)
+		scored = append(scored, scoredEndpoint{
+			addr: config.ResolverAddress{
+				IP:   conn.Resolver,
+				Port: conn.ResolverPort,
+			},
+			score: score,
+		})
+	}
+
+	if len(scored) == 0 {
+		return nil
+	}
+
+	sort.Slice(scored, func(i, j int) bool {
+		return scored[i].score > scored[j].score
+	})
+
+	if maxCount > 0 && len(scored) > maxCount {
+		scored = scored[:maxCount]
+	}
+
+	result := make([]config.ResolverAddress, len(scored))
+	for i, s := range scored {
+		result[i] = s.addr
+	}
+	return result
 }
 
 func (b *Balancer) SetConnectionMTU(key string, uploadBytes int, uploadChars int, downloadBytes int) bool {

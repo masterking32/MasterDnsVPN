@@ -848,3 +848,54 @@ func TestBalancerOptimizeActivePool(t *testing.T) {
 		t.Fatalf("expected ActiveCount to remain strictly 2, got=%d", b.ActiveCount())
 	}
 }
+
+func TestBalancerGetRankedEndpoints(t *testing.T) {
+	b := NewBalancer(BalancingLowestLatency, nil)
+	b.SetMaxActiveResolvers(2)
+
+	connections := []*Connection{
+		{Key: "1.1.1.1|53|domain.com", Resolver: "1.1.1.1", ResolverPort: 53, Domain: "domain.com", UploadMTUBytes: 120, DownloadMTUBytes: 1500},
+		{Key: "8.8.8.8|53|domain.com", Resolver: "8.8.8.8", ResolverPort: 53, Domain: "domain.com", UploadMTUBytes: 120, DownloadMTUBytes: 1500},
+		{Key: "9.9.9.9|53|domain.com", Resolver: "9.9.9.9", ResolverPort: 53, Domain: "domain.com", UploadMTUBytes: 120, DownloadMTUBytes: 1500},
+		{Key: "1.1.1.1|53|domain2.com", Resolver: "1.1.1.1", ResolverPort: 53, Domain: "domain2.com", UploadMTUBytes: 120, DownloadMTUBytes: 1500},
+	}
+	b.SetConnections(connections)
+
+	// 1.1.1.1: fast 15ms
+	b.SeedBurstStats("1.1.1.1|53|domain.com", 20, 20, 15*time.Millisecond)
+	b.SetConnectionValidity("1.1.1.1|53|domain.com", true)
+
+	// 8.8.8.8: medium 30ms
+	b.SeedBurstStats("8.8.8.8|53|domain.com", 20, 20, 30*time.Millisecond)
+	b.SetConnectionValidity("8.8.8.8|53|domain.com", true)
+
+	// 9.9.9.9: slow 120ms
+	b.SeedBurstStats("9.9.9.9|53|domain.com", 20, 20, 120*time.Millisecond)
+	b.SetConnectionValidity("9.9.9.9|53|domain.com", true)
+
+	ranked := b.GetRankedEndpoints(10)
+	if len(ranked) != 3 {
+		t.Fatalf("expected 3 unique endpoints, got %d", len(ranked))
+	}
+
+	// First should be 1.1.1.1 (lowest RTT/highest score)
+	if ranked[0].IP != "1.1.1.1" {
+		t.Errorf("expected 1st ranked resolver to be 1.1.1.1, got %s", ranked[0].IP)
+	}
+	// Second should be 8.8.8.8
+	if ranked[1].IP != "8.8.8.8" {
+		t.Errorf("expected 2nd ranked resolver to be 8.8.8.8, got %s", ranked[1].IP)
+	}
+	// Third should be 9.9.9.9
+	if ranked[2].IP != "9.9.9.9" {
+		t.Errorf("expected 3rd ranked resolver to be 9.9.9.9, got %s", ranked[2].IP)
+	}
+
+	// Test maxCount clamp
+	limited := b.GetRankedEndpoints(2)
+	if len(limited) != 2 {
+		t.Fatalf("expected 2 endpoints when limited, got %d", len(limited))
+	}
+}
+
+

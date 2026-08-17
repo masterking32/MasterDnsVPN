@@ -8,6 +8,9 @@ package client
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -150,3 +153,58 @@ func TestRuntimeStatsLoopTerminatesOnContextDone(t *testing.T) {
 		t.Fatal("runRuntimeStatsLoop did not terminate within deadline")
 	}
 }
+
+func TestClientSaveRankedResolversToFile(t *testing.T) {
+	dir := t.TempDir()
+	resolversPath := filepath.Join(dir, "client_resolvers.txt")
+	_ = os.WriteFile(resolversPath, []byte("# User custom\n10.0.0.1\n"), 0o644)
+
+	cfg := config.DefaultClientConfig()
+	cfg.ResolversFilePath = resolversPath
+	cfg.AutoSaveRankedResolvers = true
+	cfg.MaxActiveResolvers = 2
+
+	c := New(cfg, nil, nil)
+	conns := []*Connection{
+		{Key: "1.1.1.1|53|example.com", Resolver: "1.1.1.1", ResolverPort: 53, Domain: "example.com", UploadMTUBytes: 120, DownloadMTUBytes: 1500},
+		{Key: "8.8.8.8|53|example.com", Resolver: "8.8.8.8", ResolverPort: 53, Domain: "example.com", UploadMTUBytes: 120, DownloadMTUBytes: 1500},
+	}
+	c.balancer.SetConnections(conns)
+	c.balancer.SeedBurstStats("1.1.1.1|53|example.com", 20, 20, 15*time.Millisecond)
+	c.balancer.SetConnectionValidity("1.1.1.1|53|example.com", true)
+	c.balancer.SeedBurstStats("8.8.8.8|53|example.com", 20, 20, 30*time.Millisecond)
+	c.balancer.SetConnectionValidity("8.8.8.8|53|example.com", true)
+
+	c.SaveRankedResolversToFile()
+
+	data, err := os.ReadFile(resolversPath)
+	if err != nil {
+		t.Fatalf("ReadFile failed: %v", err)
+	}
+
+	content := string(data)
+	if len(content) == 0 {
+		t.Fatal("expected content in resolvers file")
+	}
+
+	// Verify header marker and preserved user line
+	if !strings.Contains(content, config.AutoRankedHeaderMarker) {
+		t.Fatalf("unexpected content, missing header marker: %s", content)
+	}
+
+	loaded, _, err := config.LoadClientResolvers(resolversPath)
+	if err != nil {
+		t.Fatalf("LoadClientResolvers failed: %v", err)
+	}
+
+	if len(loaded) < 2 {
+		t.Fatalf("expected at least 2 loaded resolvers, got %d", len(loaded))
+	}
+	if loaded[0].IP != "1.1.1.1" {
+		t.Errorf("expected 1.1.1.1 to be top ranked, got %s", loaded[0].IP)
+	}
+	if loaded[1].IP != "8.8.8.8" {
+		t.Errorf("expected 8.8.8.8 to be second, got %s", loaded[1].IP)
+	}
+}
+

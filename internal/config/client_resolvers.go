@@ -13,14 +13,16 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
-	defaultResolverPort = 53
-	maxResolverHosts    = 65536
+	defaultResolverPort    = 53
+	maxResolverHosts       = 65536
+	AutoRankedHeaderMarker = "# >>> MASTERDNSVPN AUTO-RANKED BEST RESOLVERS (Do not edit this block) <<<"
+	AutoRankedFooterMarker = "# <<< END MASTERDNSVPN AUTO-RANKED BEST RESOLVERS >>>"
 )
 
 type ResolverAddress struct {
@@ -84,15 +86,98 @@ func LoadClientResolvers(filename string) ([]ResolverAddress, map[string]int, er
 		return nil, nil, fmt.Errorf("no valid resolvers found in %s", path)
 	}
 
-	sort.Slice(endpoints, func(i, j int) bool {
-		if endpoints[i].IP == endpoints[j].IP {
-			return endpoints[i].Port < endpoints[j].Port
-		}
-		return endpoints[i].IP < endpoints[j].IP
-	})
-
 	return endpoints, resolverMap, nil
 }
+
+// FormatResolverAddressForFile formats a ResolverAddress for standard text configuration.
+func FormatResolverAddressForFile(addr ResolverAddress) string {
+	if addr.IP == "" {
+		return ""
+	}
+	isIPv6 := strings.IndexByte(addr.IP, ':') >= 0
+	if addr.Port == 0 || addr.Port == defaultResolverPort {
+		if isIPv6 {
+			return fmt.Sprintf("[%s]:%d", addr.IP, defaultResolverPort)
+		}
+		return addr.IP
+	}
+	if isIPv6 {
+		return fmt.Sprintf("[%s]:%d", addr.IP, addr.Port)
+	}
+	return fmt.Sprintf("%s:%d", addr.IP, addr.Port)
+}
+
+// UpdateResolversFileWithRanked updates or prepends the auto-ranked best resolvers block
+// at the top of the resolvers file while preserving all custom lines, comments, and subnets below.
+func UpdateResolversFileWithRanked(filePath string, ranked []ResolverAddress) error {
+	if filePath == "" || len(ranked) == 0 {
+		return nil
+	}
+
+	path, err := filepath.Abs(filePath)
+	if err != nil {
+		return err
+	}
+
+	var userLines []string
+	if data, err := os.ReadFile(path); err == nil {
+		lines := strings.Split(string(data), "\n")
+		inAutoBlock := false
+		for _, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			if trimmed == AutoRankedHeaderMarker {
+				inAutoBlock = true
+				continue
+			}
+			if trimmed == AutoRankedFooterMarker {
+				inAutoBlock = false
+				continue
+			}
+			if inAutoBlock {
+				continue
+			}
+			userLines = append(userLines, line)
+		}
+	}
+
+	// Trim leading and trailing empty lines from userLines for clean formatting
+	for len(userLines) > 0 && strings.TrimSpace(userLines[0]) == "" {
+		userLines = userLines[1:]
+	}
+	for len(userLines) > 0 && strings.TrimSpace(userLines[len(userLines)-1]) == "" {
+		userLines = userLines[:len(userLines)-1]
+	}
+
+	var buf strings.Builder
+	buf.WriteString(AutoRankedHeaderMarker + "\n")
+	buf.WriteString("# Last updated: " + time.Now().Format("2006-01-02 15:04:05") + "\n")
+	for _, r := range ranked {
+		formatted := FormatResolverAddressForFile(r)
+		if formatted != "" {
+			buf.WriteString(formatted + "\n")
+		}
+	}
+	buf.WriteString(AutoRankedFooterMarker + "\n")
+
+	if len(userLines) > 0 {
+		buf.WriteString("\n")
+		for _, line := range userLines {
+			buf.WriteString(line + "\n")
+		}
+	}
+
+	// Atomic file write via temporary file
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmpFile := path + fmt.Sprintf(".tmp_%d", time.Now().UnixNano())
+	if err := os.WriteFile(tmpFile, []byte(buf.String()), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmpFile, path)
+}
+
+
 
 func addResolver(endpoints *[]ResolverAddress, resolverMap map[string]int, seenIPs map[string]struct{}, ip string, port int) {
 	if _, exists := seenIPs[ip]; exists {

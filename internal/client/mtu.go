@@ -430,6 +430,7 @@ func (c *Client) RunInitialMTUTests(ctx context.Context) error {
 		}
 	}
 
+	c.SaveRankedResolversToFile()
 	return nil
 }
 
