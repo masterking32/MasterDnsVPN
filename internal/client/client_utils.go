@@ -595,10 +595,7 @@ func (c *Client) PrintBanner() {
 
 	c.log.Infof("⚖  <cyan>Resolver Balancing, Strategy:</cyan> <yellow>%s (%d)</yellow>", strategyName, c.cfg.ResolverBalancingStrategy)
 
-	domainList := ""
-	if len(c.cfg.Domains) > 0 {
-		domainList = c.cfg.Domains[0]
-	}
+	domainList := strings.Join(c.cfg.Domains, ", ")
 	c.log.Infof("🌐 <cyan>Configured Domains:</cyan> <yellow>%d (%s)</yellow>", len(c.cfg.Domains), domainList)
 	c.log.Infof("📡 <cyan>Loaded Resolvers:</cyan> <yellow>%d endpoints.</yellow>", len(c.cfg.Resolvers))
 }
