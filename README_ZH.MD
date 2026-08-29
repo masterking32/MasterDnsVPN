@@ -9,7 +9,7 @@
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/masterking32/MasterDnsVPN)
 
 <a href="https://trendshift.io/repositories/23688" target="_blank"><img src="https://trendshift.io/api/badge/repositories/23688" alt="masterking32%2FMasterDnsVPN | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a> <a href="https://trendshift.io/repositories/23688?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-23688" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/23688/daily?language=Go" alt="masterking32%2FMasterDnsVPN | Trendshift" width="250" height="55"/></a> <a href="https://trendshift.io/repositories/23688?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-23688" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/23688/weekly?language=Go" alt="masterking32%2FMasterDnsVPN | Trendshift" width="250" height="55"/></a> <a href="https://trendshift.io/repositories/23688?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-23688" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/23688/monthly?language=Go" alt="masterking32%2FMasterDnsVPN | Trendshift" width="250" height="55"/></a>
-
+<a href="https://sourceforge.net/projects/masterdnsvpn/" target="_blank" rel="noopener noreferrer"><img src="https://a.fsdn.com/con/app/syndication/badge_img_direct/oss-rising-star/oss-rising-star/?variant_id=sf" alt="MasterDnsVPN | SourceForge" width="55" height="55"/></a>
 
 ### 📊 MasterDnsVPN 与同类项目的对比
 
@@ -716,7 +716,7 @@ Copy-Item client_resolvers.simple client_resolvers.txt
 
 | 参数 | 示例值 | 允许的值 / 实际行为 | 完整说明 |
 | :--- | :--- | :--- | :--- |
-| `UDP_HOST` | `"0.0.0.0"` | 若为空则使用此值 | DNS 服务器绑定的地址。<br>`0.0.0.0` 表示监听所有网络接口。 |
+| `UDP_HOST` | `""` | 留空表示与地址族无关的通配地址，或填写不带方括号的 IP 字面量 | DNS 服务器绑定的地址。<br>默认空值让 Go 选择通用 UDP 通配地址。在支持 IPv4 映射 IPv6 的系统上，一个套接字可同时接收 IPv4 和 IPv6；否则 Go 会选择可用的地址族。当映射双栈套接字不可用时，显式通配地址 `0.0.0.0` 和 `::` 会保留各自的 IPv4 或 IPv6 地址族。指定具体地址会将监听器限制为该地址族。 |
 | `UDP_PORT` | `53` | `1..65535` | 服务器使用的 UDP 端口。<br>在大多数部署中应保持为 `53`，以便解析器能直接查询它。 |
 | `FALLBACK` | 未设置 | 留空/关闭，或 `HOST:PORT`；IPv6 地址使用方括号 | 可选的原始 UDP 代理，用于转发 DNS 监听器收到的非 DNS 数据报。路由按来源分别维护，只有结构完整的 DNS 数据报才会建立或重置 DNS 分类。未知来源的首个非 DNS 数据包会立即转发并固定使用 fallback；已归类为 DNS 的来源会在连续收到 16 个非 DNS 数据包后切换。来源仍归类为 DNS 时，每个保留在 DNS 路径上的数据包都会刷新 180 秒空闲计时器；DNS 包会重置连续非 DNS 计数，非 DNS 包会递增该计数。若空闲超过 180 秒，下一个非 DNS 包会按新来源处理并立即转发。活动 fallback 会话在双向均无流量 180 秒后也会过期。Fallback 模式使用单个入站读取器来保持顺序，并使用完整的 65,535 字节缓冲区；启动时会拒绝解析回该监听器自身的目标地址。会话数量没有硬上限，因此不可信或伪造的流量可能消耗文件描述符和 CPU；在公网监听器上请使用网络过滤或速率限制。 |
 | `UDP_READERS` | `4` | 若 `<=0` 则使用自动默认值 | 直接从 UDP 套接字读取的 goroutine 数量。<br>较大的数值在非常繁忙的服务器上可能有帮助，但超过某个点后只会增加上下文切换。 |

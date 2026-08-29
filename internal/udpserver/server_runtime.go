@@ -10,6 +10,7 @@ package udpserver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -29,8 +30,15 @@ func (s *Server) configureSocketBuffers(conn *net.UDPConn) {
 }
 
 func (s *Server) openUDPListeners(readerCount int) ([]*net.UDPConn, error) {
+	var ip net.IP
+	if s.cfg.UDPHost != "" {
+		ip = net.ParseIP(s.cfg.UDPHost)
+		if ip == nil {
+			return nil, fmt.Errorf("invalid UDP_HOST %q: must be an unbracketed IP literal", s.cfg.UDPHost)
+		}
+	}
 	addr := &net.UDPAddr{
-		IP:   net.ParseIP(s.cfg.UDPHost),
+		IP:   ip,
 		Port: s.cfg.UDPPort,
 	}
 	desired := readerCount

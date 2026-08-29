@@ -116,7 +116,7 @@ type ServerConfigFlagBinder struct {
 func defaultServerConfig() ServerConfig {
 	return ServerConfig{
 		ProtocolType:                      "SOCKS5",
-		UDPHost:                           "0.0.0.0",
+		UDPHost:                           "",
 		UDPPort:                           53,
 		FallbackAddress:                   "",
 		UDPReaders:                        4,
@@ -284,8 +284,8 @@ func finalizeServerConfig(cfg ServerConfig) (ServerConfig, error) {
 		return cfg, fmt.Errorf("invalid PROTOCOL_TYPE: %q", cfg.ProtocolType)
 	}
 
-	if cfg.UDPHost == "" {
-		cfg.UDPHost = "0.0.0.0"
+	if cfg.UDPHost != "" && net.ParseIP(cfg.UDPHost) == nil {
+		return cfg, fmt.Errorf("invalid UDP_HOST %q: must be an unbracketed IP literal", cfg.UDPHost)
 	}
 
 	if cfg.UDPPort <= 0 || cfg.UDPPort > 65535 {
@@ -500,7 +500,7 @@ func finalizeServerConfig(cfg ServerConfig) (ServerConfig, error) {
 }
 
 func (c ServerConfig) Address() string {
-	return fmt.Sprintf("%s:%d", c.UDPHost, c.UDPPort)
+	return net.JoinHostPort(c.UDPHost, strconv.Itoa(c.UDPPort))
 }
 
 func (c ServerConfig) DropLogInterval() time.Duration {
