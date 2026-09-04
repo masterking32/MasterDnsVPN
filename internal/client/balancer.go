@@ -1335,19 +1335,11 @@ func (b *Balancer) calculateConnectionScoreLocked(idx int) float64 {
 		return 1.0 // Unprobed default neutral low score
 	}
 
-	rttSec := avgRTT.Seconds()
-	if rttSec <= 0 {
+	_, score := CalculateResolverScore(downloadMTU, avgRTT, lossRatio)
+	if score <= 0 {
 		return 1.0
 	}
-
-	speedKBps := (float64(downloadMTU) / 1024.0) / rttSec
-	rttMillis := float64(avgRTT.Milliseconds())
-	latencyPenalty := 1.0 + (rttMillis / 500.0)
-	effectiveThroughput := speedKBps * (1.0 - lossRatio)
-	if effectiveThroughput < 0 {
-		effectiveThroughput = 0
-	}
-	return effectiveThroughput / latencyPenalty
+	return score
 }
 
 func (b *Balancer) moveConnectionStateLocked(idx int, valid bool) {

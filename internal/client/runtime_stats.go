@@ -113,8 +113,15 @@ func (c *Client) DumpRuntimeStats(reason string) {
 		}
 		speedStr, scoreStr := calculateResolverRuntimeSpeedAndScore(s)
 
+		scoreVal := 0.0
+		if scoreStr != "n/a" {
+			_, _ = fmt.Sscanf(scoreStr, "%f", &scoreVal)
+		}
+		tier, _ := ResolverQualityTier(scoreVal)
+		statusStr := fmt.Sprintf("ACTIVE (%s)", tier)
+
 		c.log.Infof(
-			"<cyan>%-20s</cyan> <blue>%-16s</blue> %-8d %-8d <yellow>%-8s</yellow> <yellow>%-9s</yellow> <green>%-11s</green> <cyan>%-8s</cyan> <cyan>%-8d</cyan> <green>ACTIVE (Tier 1)</green>",
+			"<cyan>%-20s</cyan> <blue>%-16s</blue> %-8d %-8d <yellow>%-8s</yellow> <yellow>%-9s</yellow> <green>%-11s</green> <cyan>%-8s</cyan> <cyan>%-8d</cyan> <green>%-16s</green>",
 			s.Connection.ResolverLabel,
 			s.Connection.Domain,
 			s.Sent,
@@ -124,6 +131,7 @@ func (c *Client) DumpRuntimeStats(reason string) {
 			speedStr,
 			scoreStr,
 			s.ActiveStreams,
+			statusStr,
 		)
 	}
 
@@ -148,8 +156,16 @@ func (c *Client) DumpRuntimeStats(reason string) {
 				rttStr = formatResolverRTT(s.AverageRTT)
 			}
 			speedStr, scoreStr := calculateResolverRuntimeSpeedAndScore(s)
+
+			scoreVal := 0.0
+			if scoreStr != "n/a" {
+				_, _ = fmt.Sscanf(scoreStr, "%f", &scoreVal)
+			}
+			tier, _ := ResolverQualityTier(scoreVal)
+			statusStr := fmt.Sprintf("STANDBY (%s)", tier)
+
 			c.log.Infof(
-				"<cyan>%-20s</cyan> <blue>%-16s</blue> %-8d %-8d <yellow>%-8s</yellow> <yellow>%-9s</yellow> <green>%-11s</green> <cyan>%-8s</cyan> <cyan>%-8d</cyan> <yellow>STANDBY</yellow>",
+				"<cyan>%-20s</cyan> <blue>%-16s</blue> %-8d %-8d <yellow>%-8s</yellow> <yellow>%-9s</yellow> <green>%-11s</green> <cyan>%-8s</cyan> <cyan>%-8d</cyan> <yellow>%-16s</yellow>",
 				s.Connection.ResolverLabel,
 				s.Connection.Domain,
 				s.Sent,
@@ -159,6 +175,7 @@ func (c *Client) DumpRuntimeStats(reason string) {
 				speedStr,
 				scoreStr,
 				s.ActiveStreams,
+				statusStr,
 			)
 		}
 	}
@@ -176,18 +193,6 @@ func (c *Client) DumpRuntimeStats(reason string) {
 }
 
 func calculateResolverRuntimeSpeedAndScore(s ResolverStatsSnapshot) (string, string) {
-	downloadMTU := s.Connection.DownloadMTUBytes
-	if downloadMTU <= 0 {
-		downloadMTU = 500
-	}
-
-	lossRatio := s.LossRatio
-	if lossRatio < 0 {
-		lossRatio = 0
-	} else if lossRatio > 1.0 {
-		lossRatio = 1.0
-	}
-
 	rtt := s.AverageRTT
 	if rtt <= 0 {
 		rtt = s.Connection.MTUResolveTime
@@ -197,21 +202,8 @@ func calculateResolverRuntimeSpeedAndScore(s ResolverStatsSnapshot) (string, str
 		return "n/a", "n/a"
 	}
 
-	rttSec := rtt.Seconds()
-	if rttSec <= 0 {
-		return "n/a", "n/a"
-	}
-
-	speedKBps := (float64(downloadMTU) / 1024.0) / rttSec
-	rttMillis := float64(rtt.Milliseconds())
-	latencyPenalty := 1.0 + (rttMillis / 500.0)
-	effectiveThroughput := speedKBps * (1.0 - lossRatio)
-	score := effectiveThroughput / latencyPenalty
-
-	speedStr := fmt.Sprintf("%.1f KB/s", speedKBps)
-	if speedKBps >= 1000.0 {
-		speedStr = fmt.Sprintf("%.2f MB/s", speedKBps/1024.0)
-	}
+	speedKBps, score := CalculateResolverScore(s.Connection.DownloadMTUBytes, rtt, s.LossRatio)
+	speedStr := FormatResolverSpeed(speedKBps)
 	scoreStr := fmt.Sprintf("%.1f", score)
 
 	return speedStr, scoreStr

@@ -416,7 +416,8 @@ func (c *Client) logMicroBurstCompletion(results []QualifiedResolver, activeCoun
 	for i, r := range results {
 		status := "<yellow>STANDBY</yellow>"
 		if i < activeCount {
-			status = "<green>ACTIVE (Tier 1)</green>"
+			tier, _ := ResolverQualityTier(r.Score)
+			status = fmt.Sprintf("<green>ACTIVE (%s)</green>", tier)
 		} else if !r.BurstResult.Qualified {
 			status = "<red>REJECTED</red>"
 		}
@@ -468,15 +469,30 @@ func (c *Client) logResolverReactivated(
 	lossStr := "0.0%"
 	scoreStr := "n/a"
 
+	downloadMTU := conn.DownloadMTUBytes
+	if downloadMTU <= 0 {
+		downloadMTU = 500
+	}
+
+	rtt := resolveTime
+	lossRatio := 0.0
+
 	if burstResult != nil {
 		if burstResult.AverageRTT > 0 {
+			rtt = burstResult.AverageRTT
 			rttStr = formatResolverRTT(burstResult.AverageRTT)
 		}
-		if burstResult.ThroughputKBps > 0 {
-			speedStr = fmt.Sprintf("%.1f KB/s", burstResult.ThroughputKBps)
+		lossRatio = burstResult.LossRatio
+		lossStr = fmt.Sprintf("%.1f%%", lossRatio*100)
+	}
+
+	if rtt > 0 {
+		if rttStr == "n/a" {
+			rttStr = formatResolverRTT(rtt)
 		}
-		lossStr = fmt.Sprintf("%.1f%%", burstResult.LossRatio*100)
-		scoreStr = fmt.Sprintf("%.1f", calculateBurstScore(*burstResult))
+		speedKBps, score := CalculateResolverScore(downloadMTU, rtt, lossRatio)
+		speedStr = FormatResolverSpeed(speedKBps)
+		scoreStr = fmt.Sprintf("%.1f", score)
 	}
 
 	c.log.Infof(

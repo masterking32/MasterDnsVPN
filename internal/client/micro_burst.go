@@ -26,17 +26,19 @@ import (
 
 // BurstProbeResult holds the measured metrics from a pipelined micro-burst test.
 type BurstProbeResult struct {
-	SentCount       int
-	ReceivedCount   int
-	LossRatio       float64
-	TotalBytesRx    int
-	ElapsedDuration time.Duration
-	ThroughputKBps  float64
-	AverageRTT      time.Duration
-	MinRTT          time.Duration
-	MaxRTT          time.Duration
-	Qualified       bool
-	RejectReason    string
+	SentCount           int
+	ReceivedCount       int
+	LossRatio           float64
+	TotalBytesRx        int
+	ElapsedDuration     time.Duration
+	ThroughputKBps      float64
+	BurstThroughputKBps float64
+	AverageRTT          time.Duration
+	MinRTT              time.Duration
+	MaxRTT              time.Duration
+	DownloadMTUBytes    int
+	Qualified           bool
+	RejectReason        string
 }
 
 // QualifiedResolver represents a resolver with its qualification score and rank.
@@ -74,18 +76,19 @@ func (c *Client) sendPipelinedMicroBurst(
 		timeout = 3 * time.Second
 	}
 
+	effectiveDownloadSize := effectiveDownloadMTUProbeSize(downloadMTU)
+	if effectiveDownloadSize < minDownloadMTUFloor {
+		effectiveDownloadSize = minDownloadMTUFloor
+	}
+
 	result := BurstProbeResult{
-		SentCount: packetCount,
+		SentCount:        packetCount,
+		DownloadMTUBytes: effectiveDownloadSize,
 	}
 
 	if transport == nil || transport.conn == nil {
 		result.RejectReason = "transport unavailable"
 		return result
-	}
-
-	effectiveDownloadSize := effectiveDownloadMTUProbeSize(downloadMTU)
-	if effectiveDownloadSize < minDownloadMTUFloor {
-		effectiveDownloadSize = minDownloadMTUFloor
 	}
 
 	requestLen := max(1+mtuProbeCodeLength+2, uploadMTU)
@@ -215,8 +218,10 @@ func (c *Client) sendPipelinedMicroBurst(
 
 		seconds := result.ElapsedDuration.Seconds()
 		if seconds > 0 {
-			result.ThroughputKBps = (float64(result.TotalBytesRx) / 1024.0) / seconds
+			result.BurstThroughputKBps = (float64(result.TotalBytesRx) / 1024.0) / seconds
 		}
+		baseSpeed, _ := CalculateResolverScore(effectiveDownloadSize, result.AverageRTT, result.LossRatio)
+		result.ThroughputKBps = baseSpeed
 	} else {
 		result.ElapsedDuration = time.Since(firstSentAt)
 		result.RejectReason = "100% loss during burst"
@@ -251,21 +256,16 @@ func calculateBurstScore(result BurstProbeResult) float64 {
 		return 0.0
 	}
 
-	// Base score is throughput adjusted for loss
-	deliveryRatio := 1.0 - result.LossRatio
-	if deliveryRatio < 0 {
-		deliveryRatio = 0
+	downloadMTU := result.DownloadMTUBytes
+	if downloadMTU <= 0 && result.ReceivedCount > 0 && result.TotalBytesRx > 0 {
+		downloadMTU = result.TotalBytesRx / result.ReceivedCount
+	}
+	if downloadMTU <= 0 {
+		downloadMTU = 500
 	}
 
-	speedComponent := result.ThroughputKBps * deliveryRatio
-
-	// Penalize high latency: score / (1 + rtt_seconds)
-	latencyPenalty := 1.0 + float64(result.AverageRTT.Milliseconds())/500.0
-	if latencyPenalty <= 0 {
-		latencyPenalty = 1.0
-	}
-
-	return speedComponent / latencyPenalty
+	_, score := CalculateResolverScore(downloadMTU, result.AverageRTT, result.LossRatio)
+	return score
 }
 
 // runMicroBurstQualification runs parallel pipelined bursts across all MTU-tested resolvers,
