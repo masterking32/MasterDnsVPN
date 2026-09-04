@@ -492,19 +492,23 @@ Copy-Item client_resolvers.simple client_resolvers.txt
 
 #### 命令行参数
 
-两个二进制文件都支持以下参数：
+客户端和服务端支持以下命令行标志（所有 `client_config.toml` 配置项也可以通过 CLI 标志覆盖）：
 
-| 参数 | 说明 |
-| :--- | :--- |
-| `-config` | 配置文件路径 |
-| `-log` | 可选的日志文件路径 |
-| `-version` | 打印版本并退出 |
+| 参数 | 别名 | 目标 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `-config` | `-c` | 双端 | 配置文件路径（默认：`client_config.toml` / `server_config.toml`） |
+| `-resolvers` | `-r` | 客户端 | 自定义解析器文件路径覆盖（默认：`client_resolvers.txt`） |
+| `-domains` | `-d` | 客户端 | 逗号分隔的隧道域名覆盖 |
+| `-encryption-key` | `-k` | 客户端 | 加密密钥覆盖 |
+| `-log` | `-l` | 双端 | 可选的日志文件路径 |
+| `-version` | `-v` | 双端 | 打印版本并退出 |
+| `-help` | `-h` | 双端 | 显示帮助信息及所有可用的标志覆盖项 |
 
 示例：
 
 ```bash
 ./masterdnsvpn-server -config server_config.toml -log server.log
-./masterdnsvpn-client -config client_config.toml -log client.log
+./masterdnsvpn-client -config client_config.toml -resolvers my_resolvers.txt -log client.log
 ```
 
 ---
@@ -524,19 +528,31 @@ Copy-Item client_resolvers.simple client_resolvers.txt
 
 `client_resolvers.txt` 中接受的格式：
 
-- `IP`
-- `IP:PORT`
-- `CIDR`
-- `CIDR:PORT`
+- `IP`（IPv4 或 `[IPv6]`）
+- `IP:PORT`（IPv4 或 `[IPv6]:PORT`）
+- `CIDR`（例如 `192.168.1.0/24`）
+- `CIDR:PORT`（例如 `192.168.1.0/24:5300`）
+- 注释（以 `#` 开头的行）
 
 示例：
 
 ```text
-8.8.8.8
-1.1.1.1:53
-9.9.9.0/24
-208.67.222.0/24:5353
+# >>> MASTERDNSVPN AUTO-RANKED BEST RESOLVERS (Do not edit this block) <<<
+# Last updated: 2026-08-17 18:00:00
+1.1.1.1
+8.8.8.8:53
+192.168.10.5:5300
+# <<< END MASTERDNSVPN AUTO-RANKED BEST RESOLVERS >>>
+
+# --- 自定义解析器与子网 ---
+# Cloudflare DNS
+1.1.1.1
+
+# 本地 ISP 子网
+192.168.10.0/24:5300
 ```
+
+> 💡 **智能热启动（Smart Warm-Start）：** 客户端严格保留 `client_resolvers.txt` 的行顺序。启用 `AUTO_SAVE_RANKED_RESOLVERS = true` 时，客户端会自动跟踪并在文件顶部的托管块中持久化已验证的最快解析器。该块下方的所有自定义注释、格式和子网均保持原样。FastStart 会在后续启动中直接使用这些排名前列的解析器，并在 150ms 内快速完成连接。
 
 ---
 
@@ -602,12 +618,13 @@ Copy-Item client_resolvers.simple client_resolvers.txt
 
 | 参数 | 示例值 | 允许的值 / 实际行为 | 完整说明 |
 | :--- | :--- | :--- | :--- |
-| `RESOLVER_BALANCING_STRATEGY` | `2` | `0..8` | 选择解析器的方式。<br>`0/2` = 轮询（Round Robin）、`1` = 随机、`3` = 最小丢包、`4` = 最低延迟、`5` = 混合评分、`6` = 先丢包后延迟、`7` = 最小丢包前列随机、`8` = 最小丢包前列轮询。<br>混合模式使用加权综合评分。先丢包后延迟模式先按丢包筛选出候选名单，然后在该层中优先选择更低延迟，并在几乎相当的前列候选之间轮换。前列随机模式从最佳丢包层中随机挑选，以免负载固定在单个解析器上。前列轮询模式以确定性的轮换方式循环遍历同一最佳丢包层。 |
+| `RESOLVER_BALANCING_STRATEGY` | `6` | `0..8` | 选择解析器的方式。<br>`0/2` = 轮询（Round Robin）、`1` = 随机、`3` = 最小丢包、`4` = 最低延迟、`5` = 混合评分、`6` = 先丢包后延迟（默认）、`7` = 最小丢包前列随机、`8` = 最小丢包前列轮询。<br>混合模式使用加权综合评分。先丢包后延迟模式先按丢包筛选出候选名单，然后在该层中优先选择更低延迟，并在几乎相当的前列候选之间轮换。前列随机模式从最佳丢包层中随机挑选，以免负载固定在单个解析器上。前列轮询模式以确定性的轮换方式循环遍历同一最佳丢包层。 |
 | `PACKET_DUPLICATION_COUNT` | `2` | 代码中会钳制到有效范围 | 常规出站数据包的冗余复制次数。<br>较高的值会增加流量成本，但能提升弱链路上的生存能力。 |
 | `SETUP_PACKET_DUPLICATION_COUNT` | `2` | 代码中会钳制到有效范围 | 与 `PACKET_DUPLICATION_COUNT` 类似，但用于对建立过程敏感的数据包，例如流创建及其他关键控制事件。 |
 | `STREAM_RESOLVER_FAILOVER_RESEND_THRESHOLD` | `2` | 若 `<1` 则使用回退值 | 如果某条流在同一首选解析器上累积了反复的重发压力，客户端可能会将该流故障切换到另一个解析器。<br>此阈值控制切换发生的速度。 |
 | `STREAM_RESOLVER_FAILOVER_COOLDOWN` | `2.5` | 若 `<=0` 则使用回退值 | 同一条流两次故障切换之间的最小延迟。<br>这可防止在解析器之间发生不稳定的来回振荡。 |
-| `RECHECK_INACTIVE_SERVERS_ENABLED` | `true` | `true/false` | 为当前被禁用或不健康的解析器启用后台重新检查。<br>如果禁用，一旦解析器变得不可用，它将一直保持禁用状态，直到重启或手动重建。 |
+| `RECHECK_INACTIVE_SERVERS_ENABLED` | `true` | `true/false` | 为当前被禁用或不健康的解析器启用后台重新检查。<br>同时激活 **FastStart**：验证 `RX_TX_WORKERS` 个可用解析器后立即连接，并在后台扫描其余解析器。<br>如果禁用，一旦解析器变得不可用，它将一直保持禁用状态，直到重启。 |
+| `AUTO_SAVE_RANKED_RESOLVERS` | `true` | `true/false` | 自动将性能最佳的解析器保存到 `client_resolvers.txt` 文件头部的托管块中。<br>在下次启动时，FastStart 将直接使用这些已验证的最快解析器，无需从头扫描整个列表。<br>保留块下方的所有用户自定义注释和子网。 |
 | `AUTO_DISABLE_TIMEOUT_SERVERS` | `true` | `true/false` | 启用对持续超时且无任何成功活动的解析器的自动禁用。 |
 | `AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS` | `30.0` | 若 `<=0` 则使用回退值 | 用于判断某解析器是否仅有超时的时间窗口。<br>如果此窗口内的所有观察结果都是超时，该解析器可能会被禁用。 |
 | `BASE_ENCODE_DATA` | `false` | `true/false` | 如果启用，载荷会在隧道传输前以基于安全字符集的格式编码。<br>这通常会降低载荷效率，但在严格的解析器环境中可能有所帮助。 |
@@ -639,7 +656,26 @@ Copy-Item client_resolvers.simple client_resolvers.txt
 | `MTU_ADDED_SERVER_LOG_FORMAT` | `"Resolver {IP} ({DOMAIN}) added back at {TIME} (UP {UP_MTU}, DOWN {DOWN_MTU})"` | 字符串 | 当解析器被恢复时的日志/输出格式。 |
 | `MTU_REACTIVE_ADDED_SERVER_LOG_FORMAT` | `"Resolver {IP} ({DOMAIN}) added back at {TIME} after reactive recheck (UP {UP_MTU}, DOWN {DOWN_MTU})"` | 字符串 | 当解析器经后台健康检查被恢复时的日志/输出格式。 |
 
-### 3.4.7) 🧵 运行时工作线程、队列与计时器
+### 3.4.7) ⚡ 微突发吞吐量测试与速率资格审查
+
+| 参数 | 示例值 | 允许的值 / 实际行为 | 完整说明 |
+| :--- | :--- | :--- | :--- |
+| `MICRO_BURST_TEST_ENABLED` | `true` | `true/false` | 若启用，在 MTU 测试后运行流水线微突发测试，以检测限速（rate-limiting）并测量实际突发吞吐量。 |
+| `MICRO_BURST_PACKET_COUNT` | `6` | `2..32` | 突发测试期间发送给每个候选解析器的连续查询数量。 |
+| `MICRO_BURST_PARALLELISM` | `8` | `1..128` | 微突发测试的并发度。建议 Android/移动设备设为 `6-8`，桌面/服务器设为 `16-32`。 |
+| `MAX_ACTIVE_RESOLVERS` | `15` | `>=0` | 激活进主池的最高评分解析器最大数量（`0` = 不限）。其余解析器转入备用（standby）状态。 |
+| `MAX_BURST_LOSS_RATIO` | `0.20` | `0.0..1.0` | 突发测试中允许的最大丢包率（`0.20` = 20% 丢包），超出将被拒绝。 |
+| `MIN_BURST_THROUGHPUT_KBPS` | `0.0` | `>=0.0` | 可选的最低吞吐量截断阈值（KB/s，`0.0` 表示不设阈值）。 |
+| `RECHECK_BURST_TEST_ENABLED` | `true` | `true/false` | 若启用，后台健康检查在重新激活非活跃解析器前会进行微突发测试验证。 |
+| `RECHECK_BURST_PACKET_COUNT` | `4` | `2..32` | 后台健康重新检查时微突发测试发送的查询包数量。 |
+
+### 3.4.8) 📊 实时解析器性能监控与使用统计
+
+| 参数 | 示例值 | 允许的值 / 实际行为 | 完整说明 |
+| :--- | :--- | :--- | :--- |
+| `RUNTIME_STATS_INTERVAL_SECONDS` | `60.0` | `1.0..86400.0`（或 `0` = 禁用） | 隧道有流量流动时周期性输出性能统计表的时间间隔（秒）。<br>设为 `0` 可关闭周期性输出。<br>在终端随时按下 `'s'` + Enter（或 Enter）均可立即显示最新实时性能报表。 |
+
+### 3.4.9) 🧵 运行时工作线程、队列与计时器
 
 | 参数 | 示例值 | 允许的值 / 实际行为 | 完整说明 |
 | :--- | :--- | :--- | :--- |
@@ -657,7 +693,7 @@ Copy-Item client_resolvers.simple client_resolvers.txt
 | `SESSION_INIT_RETRY_MAX_SECONDS` | `60.0` | 若无效则使用回退值 | 会话初始化的最大重试延迟。 |
 | `SESSION_INIT_BUSY_RETRY_INTERVAL_SECONDS` | `60.0` | 若无效则使用回退值 | 当服务器明确以 `SESSION_BUSY` 响应时的重试延迟。 |
 
-### 3.4.8) 📡 Ping / 保活
+### 3.4.10) 📡 Ping / 保活
 
 | 参数 | 示例值 | 允许的值 / 实际行为 | 完整说明 |
 | :--- | :--- | :--- | :--- |
@@ -669,7 +705,7 @@ Copy-Item client_resolvers.simple client_resolvers.txt
 | `PING_COOL_THRESHOLD_SECONDS` | `20.0` | 正数 | 超过此阈值后会话被视为正在冷却。 |
 | `PING_COLD_THRESHOLD_SECONDS` | `30.0` | 正数 | 超过此阈值后会话被视为冷态（cold）。 |
 
-### 3.4.9) 🔄 ARQ 与数据包打包
+### 3.4.11) 🔄 ARQ 与数据包打包
 
 | 参数 | 示例值 | 允许的值 / 实际行为 | 完整说明 |
 | :--- | :--- | :--- | :--- |
@@ -690,7 +726,7 @@ Copy-Item client_resolvers.simple client_resolvers.txt
 | `ARQ_TERMINAL_DRAIN_TIMEOUT_SECONDS` | `120.0` | 代码中会钳制 | 流变为终结后，客户端等待队列清空的时长。 |
 | `ARQ_TERMINAL_ACK_WAIT_TIMEOUT_SECONDS` | `90.0` | 代码中会钳制 | 客户端等待最终终结 ACK 的时长。 |
 
-### 3.4.10) 🪵 日志
+### 3.4.12) 🪵 日志
 
 | 参数 | 示例值 | 允许的值 / 实际行为 | 完整说明 |
 | :--- | :--- | :--- | :--- |

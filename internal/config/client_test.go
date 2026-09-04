@@ -553,3 +553,89 @@ func TestLoadClientConfigFromJSONBase64WithOverridesAppliesBeforeFinalize(t *tes
 		t.Fatalf("expected override resolvers to be loaded, got=%d", cfg.ResolverMap["9.9.9.9"])
 	}
 }
+
+func TestLoadClientConfigMicroBurstKnobs(t *testing.T) {
+	dir := t.TempDir()
+
+	configPath := filepath.Join(dir, "client_config.toml")
+	resolversPath := filepath.Join(dir, "client_resolvers.txt")
+
+	if err := os.WriteFile(configPath, []byte(`
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["v.domain.com"]
+DATA_ENCRYPTION_METHOD = 1
+ENCRYPTION_KEY = "secret"
+MICRO_BURST_TEST_ENABLED = true
+MICRO_BURST_PACKET_COUNT = 8
+MICRO_BURST_PARALLELISM = 12
+MAX_ACTIVE_RESOLVERS = 20
+MIN_BURST_THROUGHPUT_KBPS = 50.0
+MAX_BURST_LOSS_RATIO = 0.15
+RECHECK_BURST_TEST_ENABLED = true
+RECHECK_BURST_PACKET_COUNT = 5
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile config failed: %v", err)
+	}
+	if err := os.WriteFile(resolversPath, []byte("8.8.8.8\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile resolvers failed: %v", err)
+	}
+
+	cfg, err := LoadClientConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadClientConfig returned error: %v", err)
+	}
+
+	if !cfg.MicroBurstTestEnabled {
+		t.Fatal("expected MicroBurstTestEnabled to be true")
+	}
+	if cfg.MicroBurstPacketCount != 8 {
+		t.Fatalf("unexpected MicroBurstPacketCount: got=%d want=8", cfg.MicroBurstPacketCount)
+	}
+	if cfg.MicroBurstParallelism != 12 {
+		t.Fatalf("unexpected MicroBurstParallelism: got=%d want=12", cfg.MicroBurstParallelism)
+	}
+	if cfg.MaxActiveResolvers != 20 {
+		t.Fatalf("unexpected MaxActiveResolvers: got=%d want=20", cfg.MaxActiveResolvers)
+	}
+	if cfg.MinBurstThroughputKBps != 50.0 {
+		t.Fatalf("unexpected MinBurstThroughputKBps: got=%v want=50.0", cfg.MinBurstThroughputKBps)
+	}
+	if cfg.MaxBurstLossRatio != 0.15 {
+		t.Fatalf("unexpected MaxBurstLossRatio: got=%v want=0.15", cfg.MaxBurstLossRatio)
+	}
+	if !cfg.RecheckBurstTestEnabled {
+		t.Fatal("expected RecheckBurstTestEnabled to be true")
+	}
+	if cfg.RecheckBurstPacketCount != 5 {
+		t.Fatalf("unexpected RecheckBurstPacketCount: got=%d want=5", cfg.RecheckBurstPacketCount)
+	}
+}
+
+func TestLoadClientConfigRuntimeStatsKnobs(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "client_config.toml")
+	resolversPath := filepath.Join(dir, "client_resolvers.txt")
+
+	if err := os.WriteFile(configPath, []byte(`
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["example.com"]
+DATA_ENCRYPTION_METHOD = 1
+ENCRYPTION_KEY = "test-secret"
+RUNTIME_STATS_INTERVAL_SECONDS = 45.0
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile config failed: %v", err)
+	}
+	if err := os.WriteFile(resolversPath, []byte("1.1.1.1\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile resolvers failed: %v", err)
+	}
+
+	cfg, err := LoadClientConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadClientConfig returned error: %v", err)
+	}
+
+	if cfg.RuntimeStatsIntervalSeconds != 45.0 {
+		t.Fatalf("unexpected RuntimeStatsIntervalSeconds: got=%v want=45.0", cfg.RuntimeStatsIntervalSeconds)
+	}
+}
+

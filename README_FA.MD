@@ -479,19 +479,23 @@ sudo journalctl -u masterdnsvpn-client -f
 
 #### بخش ۲.۶: 🐈‍⬛ پارامترهای خط فرمان (Command-line) برای کلاینت و سرور
 
-هر دو باینری از این پارامترها پشتیبانی می‌کنند:
+کلاینت و سرور از فلگ‌های خط فرمان زیر پشتیبانی می‌کنند (تمامی گزینه‌های `client_config.toml` نیز از طریق فلگ‌های CLI قابل بازنویسی هستند):
 
-| پارامتر | توضیح |
-| :--- | :--- |
-| `-config` | مسیر فایل تنظیمات |
-| `-log` | مسیر فایل لاگ اختیاری |
-| `-version` | نمایش نسخه و خروج |
+| پارامتر | نام مستعار | هدف | توضیح |
+| :--- | :--- | :--- | :--- |
+| `-config` | `-c` | هر دو | مسیر فایل تنظیمات (پیش‌فرض: `client_config.toml` / `server_config.toml`) |
+| `-resolvers` | `-r` | کلاینت | مسیر دلخواه فایل ریزالورها (پیش‌فرض: `client_resolvers.txt`) |
+| `-domains` | `-d` | کلاینت | بازنویسی دامنه‌های تونل با کاما |
+| `-encryption-key` | `-k` | کلاینت | بازنویسی کلید رمزنگاری |
+| `-log` | `-l` | هر دو | مسیر فایل لاگ اختیاری |
+| `-version` | `-v` | هر دو | نمایش نسخه و خروج |
+| `-help` | `-h` | هر دو | نمایش راهنما و تمامی فلگ‌های موجود |
 
 نمونه:
 
 ```bash
 ./masterdnsvpn-server -config server_config.toml -log server.log
-./masterdnsvpn-client -config client_config.toml -log client.log
+./masterdnsvpn-client -config client_config.toml -resolvers my_resolvers.txt -log client.log
 ```
 
 ---
@@ -513,19 +517,31 @@ sudo journalctl -u masterdnsvpn-client -f
 ## بخش ۳.۲: 🧾 فایل لیست رزولورها (`client_resolvers.txt`) 
 فرمت قابل قبول در `client_resolvers.txt`:
 
-- `IP`
-- `IP:PORT`
-- `CIDR`
-- `CIDR:PORT`
+- `IP` (IPv4 یا `[IPv6]`)
+- `IP:PORT` (IPv4 یا `[IPv6]:PORT`)
+- `CIDR` (مثلاً `192.168.1.0/24`)
+- `CIDR:PORT` (مثلاً `192.168.1.0/24:5300`)
+- کامنت‌ها (خطوطی که با `#` شروع می‌شوند)
 
 نمونه:
 
 ```text
-8.8.8.8
-1.1.1.1:53
-9.9.9.0/24
-208.67.222.0/24:5353
+# >>> MASTERDNSVPN AUTO-RANKED BEST RESOLVERS (Do not edit this block) <<<
+# Last updated: 2026-08-17 18:00:00
+1.1.1.1
+8.8.8.8:53
+192.168.10.5:5300
+# <<< END MASTERDNSVPN AUTO-RANKED BEST RESOLVERS >>>
+
+# --- ریزالورها و ساب‌نت‌های سفارشی کاربر ---
+# Cloudflare DNS
+1.1.1.1
+
+# ساب‌نت شبکه محلی / ارائه‌دهنده
+192.168.10.0/24:5300
 ```
+
+> 💡 **راه‌اندازی گرم و هوشمند (Smart Warm-Start):** کلاینت ترتیب دقیق خطوط فایل `client_resolvers.txt` را حفظ می‌کند. در صورت فعال بودن `AUTO_SAVE_RANKED_RESOLVERS = true`، سریع‌ترین و بهترین ریزالورهای شناسایی‌شده به‌صورت خودکار در بالای فایل و درون یک بلاک مشخص ذخیره می‌شوند. کامنت‌ها، قالب‌بندی و ساب‌نت‌های شما در زیر این بلاک کاملاً دست‌نخورده باقی می‌مانند. کلاینت با کمک FastStart در دفعات بعدی در کمتر از ۱۵۰ میلی‌ثانیه متصل می‌شود.
 
 ---
 
@@ -571,12 +587,13 @@ sudo journalctl -u masterdnsvpn-client -f
 
 | پارامتر | مقدار نمونه | مقادیر مجاز / رفتار واقعی | توضیح کامل |
 | :--- | :--- | :--- | :--- |
-| `RESOLVER_BALANCING_STRATEGY` | `2` | فقط `0..8` | تعیین می‌کند کلاینت پکت‌هایش را روی resolverها چطور پخش کند.<br>`0` و `2` هر دو round-robin هستند.<br>`1` انتخاب تصادفی است.<br>`3` سعی می‌کند روی resolverهایی برود که loss کمتری داشته‌اند.<br>`4` بیشتر به resolverهای سریع‌تر گرایش دارد.<br>`5` از یک امتیاز ترکیبی استفاده می‌کند که loss در آن وزن بیشتری از latency دارد.<br>`6` اول resolverهای کم‌loss را shortlist می‌کند، بعد داخل همان tier سراغ latency می‌رود و بین candidateهای خیلی نزدیک به‌صورت چرخشی انتخاب می‌کند.<br>`7` بین بهترین resolverهای کم‌loss به‌صورت تصادفی انتخاب می‌کند تا بار روی یک resolver قفل نشود.<br>`8` بین بهترین resolverهای کم‌loss به‌صورت round-robin می‌چرخد تا پخش بار منظم‌تر شود.<br>برای شرایط خیلی ناپایدار، معمولاً `3`، `5`، `6`، `7` یا `8` بهتر از `0` هستند. |
+| `RESOLVER_BALANCING_STRATEGY` | `6` | فقط `0..8` | تعیین می‌کند کلاینت پکت‌هایش را روی resolverها چطور پخش کند.<br>`0` و `2` هر دو round-robin هستند.<br>`1` انتخاب تصادفی است.<br>`3` سعی می‌کند روی resolverهایی برود که loss کمتری داشته‌اند.<br>`4` بیشتر به resolverهای سریع‌تر گرایش دارد.<br>`5` از یک امتیاز ترکیبی استفاده می‌کند که loss در آن وزن بیشتری از latency دارد.<br>`6` اول resolverهای کم‌loss را shortlist می‌کند، بعد داخل همان tier سراغ latency می‌رود و بین candidateهای خیلی نزدیک به‌صورت چرخشی انتخاب می‌کند (پیش‌فرض).<br>`7` بین بهترین resolverهای کم‌loss به‌صورت تصادفی انتخاب می‌کند تا بار روی یک resolver قفل نشود.<br>`8` بین بهترین resolverهای کم‌loss به‌صورت round-robin می‌چرخد تا پخش بار منظم‌تر شود.<br>برای شرایط خیلی ناپایدار، معمولاً `3`، `5`، `6`، `7` یا `8` بهتر از `0` هستند. |
 | `PACKET_DUPLICATION_COUNT` | `2` | clamp به `1..8` | هر پکت عادی تونل چند بار روی resolverهای مختلف/مسیرهای مختلف ارسال شود.<br>عدد بالاتر شانس رسیدن پکت را بیشتر می‌کند، اما ترافیک و فشار CPU را هم بالا می‌برد.<br>در شبکه خوب، `1` یا `2` کافی است؛ در شبکه خیلی بد، `3` تا `6` می‌تواند مفید باشد. |
 | `SETUP_PACKET_DUPLICATION_COUNT` | `2` | clamp به `[PACKET_DUPLICATION_COUNT, 8]` | فقط برای پکت‌های شروع اتصال مثل `STREAM_SYN` و `SOCKS5_SYN` است.<br>از آن‌جا که از دست رفتن setup خیلی آزاردهنده است، معمولاً این عدد را کمی بالاتر از duplication عادی می‌گذارند.<br>اگر کمتر از duplication عادی بدهید، کد آن را بالا می‌کشد. |
 | `STREAM_RESOLVER_FAILOVER_RESEND_THRESHOLD` | `3` | clamp به `1..128` | اگر یک stream روی resolver ترجیحی خودش پشت سر هم resend بخورد، بعد از این آستانه کلاینت resolver ترجیحی آن stream را عوض می‌کند.<br>این مکانیزم باعث می‌شود یک stream روی resolver بد گیر نکند. |
 | `STREAM_RESOLVER_FAILOVER_COOLDOWN` | `2.5` | clamp به `0.1..120` ثانیه | حداقل فاصله بین دو بار failover برای یک stream است.<br>اگر خیلی کم باشد stream مدام resolver عوض می‌کند و سیستم ناپایدار می‌شود.<br>اگر خیلی زیاد باشد stream دیرتر از resolver بد جدا می‌شود. |
-| `RECHECK_INACTIVE_SERVERS_ENABLED` | `true` | `true/false` | resolverهایی که در تست MTU اولیه یا در runtime غیرفعال شده‌اند، در پس‌زمینه دوباره امتحان شوند یا نه.<br>اگر خاموش باشد، resolverهای بد تا restart بعدی کمتر شانس بازگشت دارند. |
+| `RECHECK_INACTIVE_SERVERS_ENABLED` | `true` | `true/false` | resolverهایی که در تست MTU اولیه یا در runtime غیرفعال شده‌اند، در پس‌زمینه دوباره امتحان شوند یا نه.<br>همچنین **FastStart** را فعال می‌کند: کلاینت پس از تایید `RX_TX_WORKERS` ريزولور سالم بلافاصله متصل شده و بقیه را در پس‌زمینه اسکن می‌کند. |
+| `AUTO_SAVE_RANKED_RESOLVERS` | `true` | `true/false` | بهترین و سریع‌ترین resolverها را به‌طور خودکار در بالای فایل `client_resolvers.txt` ذخیره می‌کند.<br>در اجراهای بعدی، قابلیت FastStart بدون اسکن کل لیست از ابتدا، فوراً از این resolverهای برتر استفاده می‌کند.<br>کامنت‌ها و ساب‌نت‌های کاربر در زیر بلاک دست‌نخورده باقی می‌مانند. |
 | `AUTO_DISABLE_TIMEOUT_SERVERS` | `true` | `true/false` | اگر یک resolver در runtime فقط timeout تولید کند و هیچ success نداشته باشد، کلاینت می‌تواند موقتاً آن را از لیست فعال خارج کند.<br>این قابلیت برای جلوگیری از هدر رفتن packet روی resolver مرده است. |
 | `AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS` | `30.0` | clamp به `1..86400` ثانیه | پنجره‌ای که در آن history timeout-only بررسی می‌شود.<br>اگر در این بازه فقط timeout ببینیم و شرط observation هم برقرار باشد، resolver غیرفعال می‌شود. |
 | `BASE_ENCODE_DATA` | `false` | `true/false` | اگر `true` باشد، payload قبل از قرار گرفتن داخل labelهای DNS به شکل base-safe encode می‌شود.<br>معمولاً لازم نیست، ولی بعضی resolverها با این حالت سازگارترند.<br>عوض کردن این گزینه روی اندازه payload اثر می‌گذارد و می‌تواند throughput را تغییر دهد. |
@@ -608,7 +625,26 @@ sudo journalctl -u masterdnsvpn-client -f
 | `MTU_ADDED_SERVER_LOG_FORMAT` | `"Resolver {IP} ({DOMAIN}) added back at {TIME} (UP {UP_MTU}, DOWN {DOWN_MTU})"` | رشته | قالب متن لاگی که وقتی resolver بعداً دوباره سالم تشخیص داده می‌شود نوشته می‌شود. |
 | `MTU_REACTIVE_ADDED_SERVER_LOG_FORMAT` | `"Resolver {IP} ({DOMAIN}) added back at {TIME} after reactive recheck (UP {UP_MTU}, DOWN {DOWN_MTU})"` | رشته | قالب متن لاگی که وقتی resolver توسط بررسی سلامت پس‌زمینه دوباره فعال می‌شود نوشته می‌شود. |
 
-### ۳.۴.۷) بخش ⚙️ Workerها، queueها و زمان‌بندی runtime
+### ۳.۴.۷) بخش ⚡ تست سرعت و پهنای‌باند Micro-Burst و اعتبارسنجی رتبه
+
+| پارامتر | مقدار نمونه | مقادیر مجاز / رفتار واقعی | توضیح کامل |
+| :--- | :--- | :--- | :--- |
+| `MICRO_BURST_TEST_ENABLED` | `true` | `true/false` | در صورت فعال بودن، پس از تست MTU تست‌های رگباری ارسال می‌شود تا ریت‌لیمیت‌ها و پهنای‌باند واقعی محاسبه شوند. |
+| `MICRO_BURST_PACKET_COUNT` | `6` | `2..32` | تعداد کوئری‌های متوالی و سریع ارسالی به هر ریزولور کاندید در تست رگباری. |
+| `MICRO_BURST_PARALLELISM` | `8` | `1..128` | همزمانی تست رگباری. مقدار پیشنهادی برای اندروید/موبایل `6-8` و برای کامپیوتر/سرور `16-32` است. |
+| `MAX_ACTIVE_RESOLVERS` | `15` | `>=0` | حداکثر تعداد بهترین ریزولورهای پرسرعت فعال در استخر اصلی (`0` = بدون محدودیت). بقیه ریزولورها به عنوان رزرو (standby) نگهداری می‌شوند. |
+| `MAX_BURST_LOSS_RATIO` | `0.20` | `0.0..1.0` | حداکثر درصد افت پکت مجاز در تست رگباری (`0.20` = تا ۲۰ درصد پکت‌لاس). |
+| `MIN_BURST_THROUGHPUT_KBPS` | `0.0` | `>=0.0` | حداقل سرعت مجاز بر حسب کیلوبایت بر ثانیه (`0.0` فیلتر سرعت را خاموش می‌کند). |
+| `RECHECK_BURST_TEST_ENABLED` | `true` | `true/false` | بررسی ریزولورهای غیرفعال با تست رگباری قبل از بازگرداندن به استخر فعال در چک‌های دوره‌ای پس‌زمینه. |
+| `RECHECK_BURST_PACKET_COUNT` | `4` | `2..32` | تعداد کوئری‌های ارسالی در چک‌های پس‌زمینه برای اعتبارسنجی مجدد ریزولورها. |
+
+### ۳.۴.۸) بخش 📊 مانیتورینگ زنده و آمار عملکرد ریزولورها
+
+| پارامتر | مقدار نمونه | مقادیر مجاز / رفتار واقعی | توضیح کامل |
+| :--- | :--- | :--- | :--- |
+| `RUNTIME_STATS_INTERVAL_SECONDS` | `60.0` | `1.0..86400.0` (یا `0` = خاموش) | فاصله زمانی (بر حسب ثانیه) بین چاپ خودکار جدول آمار در کنسول هنگام جریان داشتن ترافیک.<br>مقدار `0` چاپ دوره‌ای را غیرفعال می‌کند.<br>فشردن کلید `'s'` + Enter (یا فقط Enter) در ترمینال در هر لحظه جدول آمار زنده را بلافاصله نمایش می‌دهد. |
+
+### ۳.۴.۹) بخش ⚙️ Workerها، queueها و زمان‌بندی runtime
 
 | پارامتر | مقدار نمونه | مقادیر مجاز / رفتار واقعی | توضیح کامل |
 | :--- | :--- | :--- | :--- |
@@ -626,7 +662,7 @@ sudo journalctl -u masterdnsvpn-client -f
 | `SESSION_INIT_RETRY_MAX_SECONDS` | `60.0` | clamp به `[SESSION_INIT_RETRY_BASE_SECONDS, 3600]` | سقف delay بین retryهای session init. |
 | `SESSION_INIT_BUSY_RETRY_INTERVAL_SECONDS` | `60.0` | clamp به `1..3600` ثانیه | اگر سرور پاسخ `SESSION_BUSY` بدهد، کلاینت قبل از تلاش مجدد این‌قدر صبر می‌کند. |
 
-### ۳.۴.۸) بخش 🫀 Ping / Keepalive
+### ۳.۴.۱۰) بخش 🫀 Ping / Keepalive
 
 | پارامتر | مقدار نمونه | مقادیر مجاز / رفتار واقعی | توضیح کامل |
 | :--- | :--- | :--- | :--- |
@@ -638,7 +674,7 @@ sudo journalctl -u masterdnsvpn-client -f
 | `PING_COOL_THRESHOLD_SECONDS` | `20.0` | clamp به `[PING_WARM_THRESHOLD_SECONDS, 1800]` | مرز ورود به فاز cool. |
 | `PING_COLD_THRESHOLD_SECONDS` | `30.0` | clamp به `[PING_COOL_THRESHOLD_SECONDS, 3600]` | مرز ورود به فاز cold و ping بسیار کم‌فاصله. |
 
-### ۳.۴.۹) بخش 🔄 ARQ، NACK و packing
+### ۳.۴.۱۱) بخش 🔄 ARQ، NACK و packing
 
 | پارامتر | مقدار نمونه | مقادیر مجاز / رفتار واقعی | توضیح کامل |
 | :--- | :--- | :--- | :--- |
@@ -659,7 +695,7 @@ sudo journalctl -u masterdnsvpn-client -f
 | `ARQ_TERMINAL_DRAIN_TIMEOUT_SECONDS` | `120.0` | clamp به `10..3600` ثانیه | وقتی stream وارد حالت terminal شد، چقدر صبر کنیم تا bufferهای باقیمانده drain شوند. |
 | `ARQ_TERMINAL_ACK_WAIT_TIMEOUT_SECONDS` | `90.0` | clamp به `5..3600` ثانیه | بعد از closeهای terminal، چقدر برای ACK نهایی صبر کنیم. |
 
-### ۳.۴.۱۰) بخش 🪵 لاگ
+### ۳.۴.۱۲) بخش 🪵 لاگ
 
 | پارامتر | مقدار نمونه | مقادیر مجاز / رفتار واقعی | توضیح کامل |
 | :--- | :--- | :--- | :--- |

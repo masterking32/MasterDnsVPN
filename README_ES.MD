@@ -492,19 +492,23 @@ En Windows:
 
 #### Parámetros de línea de comandos
 
-Ambos binarios admiten estos argumentos:
+El cliente y el servidor admiten las siguientes opciones por línea de comandos (todas las opciones de `client_config.toml` también se pueden sobrescribir mediante flags CLI):
 
-| Parámetro | Descripción |
-| :--- | :--- |
-| `-config` | Ruta al archivo de configuración |
-| `-log` | Ruta opcional a un archivo de registro |
-| `-version` | Imprime la versión y sale |
+| Parámetro | Alias | Destino | Descripción |
+| :--- | :--- | :--- | :--- |
+| `-config` | `-c` | Ambos | Ruta al archivo de configuración (predeterminado: `client_config.toml` / `server_config.toml`) |
+| `-resolvers` | `-r` | Cliente | Ruta al archivo de resolutores personalizado (predeterminado: `client_resolvers.txt`) |
+| `-domains` | `-d` | Cliente | Sobrescribir dominios de túnel separados por comas |
+| `-encryption-key` | `-k` | Cliente | Sobrescribir clave de cifrado |
+| `-log` | `-l` | Ambos | Ruta opcional a un archivo de registro |
+| `-version` | `-v` | Ambos | Imprime la versión y sale |
+| `-help` | `-h` | Ambos | Muestra la ayuda y todas las opciones de línea de comandos disponibles |
 
 Ejemplo:
 
 ```bash
 ./masterdnsvpn-server -config server_config.toml -log server.log
-./masterdnsvpn-client -config client_config.toml -log client.log
+./masterdnsvpn-client -config client_config.toml -resolvers my_resolvers.txt -log client.log
 ```
 
 ---
@@ -524,19 +528,31 @@ Ejemplo:
 
 Formatos aceptados en `client_resolvers.txt`:
 
-- `IP`
-- `IP:PORT`
-- `CIDR`
-- `CIDR:PORT`
+- `IP` (IPv4 o `[IPv6]`)
+- `IP:PORT` (IPv4 o `[IPv6]:PORT`)
+- `CIDR` (p. ej. `192.168.1.0/24`)
+- `CIDR:PORT` (p. ej. `192.168.1.0/24:5300`)
+- Comentarios (líneas que comienzan con `#`)
 
 Ejemplo:
 
 ```text
-8.8.8.8
-1.1.1.1:53
-9.9.9.0/24
-208.67.222.0/24:5353
+# >>> MASTERDNSVPN AUTO-RANKED BEST RESOLVERS (Do not edit this block) <<<
+# Last updated: 2026-08-17 18:00:00
+1.1.1.1
+8.8.8.8:53
+192.168.10.5:5300
+# <<< END MASTERDNSVPN AUTO-RANKED BEST RESOLVERS >>>
+
+# --- Mis resolutores y subredes personalizados ---
+# Cloudflare DNS
+1.1.1.1
+
+# Subred ISP Local
+192.168.10.0/24:5300
 ```
+
+> 💡 **Inicio rápido inteligente (Smart Warm-Start):** El cliente conserva el orden exacto de las líneas de `client_resolvers.txt`. Cuando `AUTO_SAVE_RANKED_RESOLVERS = true` está habilitado, el cliente rastrea y guarda automáticamente los resolutores más rápidos verificados en el encabezado gestionado. Todos los comentarios, formatos y subredes personalizados debajo del bloque permanecen intactos. FastStart utiliza estas entradas superiores para conectarse en menos de 150 ms en los siguientes inicios.
 
 ---
 
@@ -602,12 +618,13 @@ Estos ajustes son críticos en el servidor:
 
 | Parámetro | Valor de ejemplo | Valores permitidos / Comportamiento real | Explicación completa |
 | :--- | :--- | :--- | :--- |
-| `RESOLVER_BALANCING_STRATEGY` | `2` | `0..8` | Elige cómo se seleccionan los resolutores.<br>`0/2` = Round Robin, `1` = Aleatorio, `3` = Menor pérdida, `4` = Menor latencia, `5` = Puntuación híbrida, `6` = Pérdida y luego latencia, `7` = Menor pérdida superior aleatorio, `8` = Menor pérdida superior Round Robin.<br>El modo híbrido usa una puntuación combinada ponderada. El modo de pérdida y luego latencia primero preselecciona por pérdida, luego prefiere menor latencia dentro de ese nivel y rota entre los candidatos principales casi iguales. El modo superior aleatorio elige al azar entre el mejor nivel de pérdida para que la carga no se quede en un solo resolutor. El modo superior Round Robin recorre el mismo nivel superior de pérdida con rotación determinista. |
+| `RESOLVER_BALANCING_STRATEGY` | `6` | `0..8` | Elige cómo se seleccionan los resolutores.<br>`0/2` = Round Robin, `1` = Aleatorio, `3` = Menor pérdida, `4` = Menor latencia, `5` = Puntuación híbrida, `6` = Pérdida y luego latencia (Por defecto), `7` = Menor pérdida superior aleatorio, `8` = Menor pérdida superior Round Robin.<br>El modo híbrido usa una puntuación combinada ponderada. El modo de pérdida y luego latencia primero preselecciona por pérdida, luego prefiere menor latencia dentro de ese nivel y rota entre los candidatos principales casi iguales. El modo superior aleatorio elige al azar entre el mejor nivel de pérdida para que la carga no se quede en un solo resolutor. El modo superior Round Robin recorre el mismo nivel superior de pérdida con rotación determinista. |
 | `PACKET_DUPLICATION_COUNT` | `2` | se limita al rango válido en el código | Número de duplicaciones de paquetes salientes normales.<br>Valores más altos aumentan el coste de tráfico pero mejoran la supervivencia en enlaces débiles. |
 | `SETUP_PACKET_DUPLICATION_COUNT` | `2` | se limita al rango válido en el código | Similar a `PACKET_DUPLICATION_COUNT`, pero usado para paquetes sensibles a la configuración, como la creación de streams y otros eventos de control críticos. |
 | `STREAM_RESOLVER_FAILOVER_RESEND_THRESHOLD` | `2` | Si es `<1`, se aplica el valor de reserva | Si un stream acumula presión de reenvío repetida sobre el mismo resolutor preferido, el cliente puede hacer failover de ese stream a otro resolutor.<br>Este umbral controla la rapidez con que ocurre. |
 | `STREAM_RESOLVER_FAILOVER_COOLDOWN` | `2.5` | Si es `<=0`, se aplica el valor de reserva | Retardo mínimo entre dos failovers para el mismo stream.<br>Esto evita una oscilación inestable entre resolutores. |
-| `RECHECK_INACTIVE_SERVERS_ENABLED` | `true` | `true/false` | Activa las revisiones en segundo plano de los resolutores actualmente desactivados o no saludables.<br>Si se desactiva, una vez que un resolutor queda inutilizable, permanecerá desactivado hasta el reinicio o la reconstrucción manual. |
+| `RECHECK_INACTIVE_SERVERS_ENABLED` | `true` | `true/false` | Activa las revisiones en segundo plano de los resolutores actualmente desactivados o no saludables.<br>También activa **FastStart**: el cliente se conecta inmediatamente tras validar `RX_TX_WORKERS` resolutores y descubre el resto en segundo plano.<br>Si se desactiva, una vez que un resolutor queda inutilizable, permanecerá desactivado hasta el reinicio. |
+| `AUTO_SAVE_RANKED_RESOLVERS` | `true` | `true/false` | Guarda automáticamente los mejores resolutores clasificados en el encabezado gestionado de `client_resolvers.txt`.<br>En el siguiente inicio, FastStart utiliza inmediatamente estos resolutores probados más rápidos sin tener que escanear toda la lista desde cero.<br>Preserva todos los comentarios y subredes personalizados debajo del bloque. |
 | `AUTO_DISABLE_TIMEOUT_SERVERS` | `true` | `true/false` | Activa la desactivación automática de resolutores que siguen agotando el tiempo de espera y no muestran actividad exitosa. |
 | `AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS` | `30.0` | Si es `<=0`, se aplica el valor de reserva | Ventana de tiempo usada para decidir si un resolutor solo presenta timeouts.<br>Si todas las observaciones en esta ventana son timeouts, puede desactivarse. |
 | `BASE_ENCODE_DATA` | `false` | `true/false` | Si está activado, las cargas útiles se codifican en un formato base-safe antes de tunelizarlas.<br>Esto suele reducir la eficiencia de la carga útil, pero puede ayudar en entornos de resolutores estrictos. |
@@ -639,7 +656,26 @@ Estos ajustes son críticos en el servidor:
 | `MTU_ADDED_SERVER_LOG_FORMAT` | `"Resolver {IP} ({DOMAIN}) added back at {TIME} (UP {UP_MTU}, DOWN {DOWN_MTU})"` | cadena | Formato de registro/salida cuando un resolutor se restaura. |
 | `MTU_REACTIVE_ADDED_SERVER_LOG_FORMAT` | `"Resolver {IP} ({DOMAIN}) added back at {TIME} after reactive recheck (UP {UP_MTU}, DOWN {DOWN_MTU})"` | cadena | Formato de registro/salida cuando un resolutor se restaura mediante las comprobaciones de salud en segundo plano. |
 
-### 3.4.7) 🧵 Workers, Colas y Temporizadores de Runtime
+### 3.4.7) ⚡ Pruebas de Rendimiento Micro-Burst y Calificación de Velocidad
+
+| Parámetro | Valor de ejemplo | Valores permitidos / Comportamiento real | Explicación completa |
+| :--- | :--- | :--- | :--- |
+| `MICRO_BURST_TEST_ENABLED` | `true` | `true/false` | Si está activado, ejecuta la prueba de ráfaga tras el MTU para medir el rendimiento en ráfaga y detectar limitaciones de velocidad (rate-limits). |
+| `MICRO_BURST_PACKET_COUNT` | `6` | `2..32` | Número de consultas en ráfaga enviadas a cada resolutor candidato durante la prueba. |
+| `MICRO_BURST_PARALLELISM` | `8` | `1..128` | Concurrencia de la prueba de ráfaga. Recomendado `6-8` para móviles/Android, `16-32` para ordenadores de sobremesa o servidores. |
+| `MAX_ACTIVE_RESOLVERS` | `15` | `>=0` | Número máximo de resolutores con mayor puntuación activados en el grupo principal (`0` = sin límite). Los demás quedan en reserva (standby). |
+| `MAX_BURST_LOSS_RATIO` | `0.20` | `0.0..1.0` | Proporción máxima de pérdida tolerada durante la prueba de ráfaga antes de descartar el resolutor (`0.20` = 20% de pérdida). |
+| `MIN_BURST_THROUGHPUT_KBPS` | `0.0` | `>=0.0` | Límite mínimo de rendimiento opcional en KB/s (`0.0` desactiva el límite). |
+| `RECHECK_BURST_TEST_ENABLED` | `true` | `true/false` | Si está activado, las revisiones en segundo plano prueban los resolutores inactivos con una micro-ráfaga antes de reactivarlos. |
+| `RECHECK_BURST_PACKET_COUNT` | `4` | `2..32` | Número de consultas enviadas durante la comprobación de salud en segundo plano. |
+
+### 3.4.8) 📊 Monitorización del Rendimiento de Resolutores en Tiempo Real
+
+| Parámetro | Valor de ejemplo | Valores permitidos / Comportamiento real | Explicación completa |
+| :--- | :--- | :--- | :--- |
+| `RUNTIME_STATS_INTERVAL_SECONDS` | `60.0` | `1.0..86400.0` (o `0` = desactivado) | Intervalo en segundos de registro de la tabla de rendimiento en consola cuando hay tráfico.<br>`0` desactiva el registro periódico.<br>Pulsar `'s'` + Enter (o Enter) en la consola en cualquier momento muestra la tabla instantáneamente. |
+
+### 3.4.9) 🧵 Workers, Colas y Temporizadores de Runtime
 
 | Parámetro | Valor de ejemplo | Valores permitidos / Comportamiento real | Explicación completa |
 | :--- | :--- | :--- | :--- |
@@ -657,7 +693,7 @@ Estos ajustes son críticos en el servidor:
 | `SESSION_INIT_RETRY_MAX_SECONDS` | `60.0` | si no es válido, se aplica el valor de reserva | Retardo máximo de reintento para la inicialización de sesión. |
 | `SESSION_INIT_BUSY_RETRY_INTERVAL_SECONDS` | `60.0` | si no es válido, se aplica el valor de reserva | Retardo de reintento cuando el servidor responde explícitamente con `SESSION_BUSY`. |
 
-### 3.4.8) 📡 Ping / Keepalive
+### 3.4.10) 📡 Ping / Keepalive
 
 | Parámetro | Valor de ejemplo | Valores permitidos / Comportamiento real | Explicación completa |
 | :--- | :--- | :--- | :--- |
@@ -669,7 +705,7 @@ Estos ajustes son críticos en el servidor:
 | `PING_COOL_THRESHOLD_SECONDS` | `20.0` | número positivo | Umbral tras el cual la sesión se trata como en enfriamiento. |
 | `PING_COLD_THRESHOLD_SECONDS` | `30.0` | número positivo | Umbral tras el cual la sesión se trata como fría. |
 
-### 3.4.9) 🔄 ARQ y Empaquetado de Paquetes
+### 3.4.11) 🔄 ARQ y Empaquetado de Paquetes
 
 | Parámetro | Valor de ejemplo | Valores permitidos / Comportamiento real | Explicación completa |
 | :--- | :--- | :--- | :--- |
@@ -690,7 +726,7 @@ Estos ajustes son críticos en el servidor:
 | `ARQ_TERMINAL_DRAIN_TIMEOUT_SECONDS` | `120.0` | limitado en el código | Tras volverse terminal un stream, cuánto tiempo espera el cliente al vaciado de la cola. |
 | `ARQ_TERMINAL_ACK_WAIT_TIMEOUT_SECONDS` | `90.0` | limitado en el código | Cuánto tiempo espera el cliente el ACK terminal final. |
 
-### 3.4.10) 🪵 Registro
+### 3.4.12) 🪵 Registro
 
 | Parámetro | Valor de ejemplo | Valores permitidos / Comportamiento real | Explicación completa |
 | :--- | :--- | :--- | :--- |

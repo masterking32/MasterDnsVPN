@@ -20,6 +20,9 @@ logs/
 *.bak
 *.tmp
 *.exe
+*.exe~
 build/
 .gocache
 .bench/
+live-configs/
+.kilo/

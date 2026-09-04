@@ -310,6 +310,7 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		c.streamResolverFailoverCooldown = time.Second
 	}
 
+	c.balancer.SetMaxActiveResolvers(cfg.MaxActiveResolvers)
 	c.balancer.SetStreamFailoverConfig(c.streamResolverFailoverResendThreshold, c.streamResolverFailoverCooldown)
 	c.balancer.SetAutoDisableConfig(
 		cfg.AutoDisableTimeoutServers,
@@ -433,6 +434,12 @@ func (c *Client) Run(ctx context.Context) error {
 				}
 
 				c.ensureLocalDNSCachePersistence(ctx)
+
+				if c.cfg.RuntimeStatsIntervalSeconds > 0 {
+					go c.runRuntimeStatsLoop(ctx)
+				}
+				c.startInteractiveConsoleListener(ctx)
+				c.printRuntimeStatsHint()
 			}
 
 			select {

@@ -462,3 +462,207 @@ func TestBalancerSetConnectionMTUUpdatesBalancerOnly(t *testing.T) {
 		t.Fatalf("expected snapshot MTUs to update, got up=%d chars=%d down=%d", got.UploadMTUBytes, got.UploadMTUChars, got.DownloadMTUBytes)
 	}
 }
+
+func TestBalancerLossThenLatency_NoProbationStarvation(t *testing.T) {
+	b := NewBalancer(BalancingLossThenLatency, nil)
+	connections := []*Connection{
+		{Key: "slow-established", IsValid: true},
+		{Key: "fast-new", IsValid: true},
+	}
+	b.SetConnections(connections)
+	_ = b.SetConnectionValidity("slow-established", true)
+	_ = b.SetConnectionValidity("fast-new", true)
+
+	// "slow-established" has 10 packets, 0 loss, 600ms latency
+	for i := 0; i < 10; i++ {
+		b.ReportSend("slow-established")
+		b.ReportSuccess("slow-established", 600*time.Millisecond)
+	}
+
+	// "fast-new" has 2 packets, 0 loss, 45ms latency (previously trapped under sent < 5 probation)
+	for i := 0; i < 2; i++ {
+		b.ReportSend("fast-new")
+		b.ReportSuccess("fast-new", 45*time.Millisecond)
+	}
+
+	best, ok := b.GetBestConnection()
+	if !ok {
+		t.Fatal("expected a valid connection")
+	}
+	if best.Key != "fast-new" {
+		t.Fatalf("expected fast newly reactivated resolver to be picked, got %q", best.Key)
+	}
+}
+
+func TestBalancerMaxActiveResolversEnforced(t *testing.T) {
+	b := NewBalancer(BalancingRoundRobinDefault, nil)
+	b.SetMaxActiveResolvers(3)
+
+	connections := []*Connection{
+		{Key: "c1"}, {Key: "c2"}, {Key: "c3"}, {Key: "c4"}, {Key: "c5"},
+	}
+	b.SetConnections(connections)
+
+	for _, c := range connections {
+		b.SetConnectionValidity(c.Key, true)
+	}
+
+	if b.ActiveCount() != 3 {
+		t.Fatalf("expected ActiveCount to be strictly bounded to 3, got=%d", b.ActiveCount())
+	}
+	if b.TotalCount() != 5 {
+		t.Fatalf("expected TotalCount=5, got=%d", b.TotalCount())
+	}
+}
+
+func TestBalancerDynamicPromotionDemotion(t *testing.T) {
+	b := NewBalancer(BalancingLossThenLatency, nil)
+	b.SetMaxActiveResolvers(2)
+
+	connections := []*Connection{
+		{Key: "slow1", DownloadMTUBytes: 1000, UploadMTUBytes: 100},
+		{Key: "slow2", DownloadMTUBytes: 1000, UploadMTUBytes: 100},
+		{Key: "fast1", DownloadMTUBytes: 1000, UploadMTUBytes: 100},
+	}
+	b.SetConnections(connections)
+
+	// Activate slow1 (500ms) and slow2 (600ms)
+	b.SeedBurstStats("slow1", 4, 4, 500*time.Millisecond)
+	b.SetConnectionValidity("slow1", true)
+
+	b.SeedBurstStats("slow2", 4, 4, 600*time.Millisecond)
+	b.SetConnectionValidity("slow2", true)
+
+	if b.ActiveCount() != 2 {
+		t.Fatalf("expected 2 active resolvers initially, got=%d", b.ActiveCount())
+	}
+
+	// Now activate fast1 (45ms) - should displace slow2
+	b.SeedBurstStats("fast1", 4, 4, 45*time.Millisecond)
+	b.SetConnectionValidity("fast1", true)
+
+	if b.ActiveCount() != 2 {
+		t.Fatalf("expected ActiveCount to stay strictly 2, got=%d", b.ActiveCount())
+	}
+
+	fast1Conn, ok := b.GetConnectionByKey("fast1")
+	if !ok || !fast1Conn.IsValid {
+		t.Fatal("expected fast1 to be promoted to active")
+	}
+
+	slow2Conn, ok := b.GetConnectionByKey("slow2")
+	if !ok || slow2Conn.IsValid {
+		t.Fatal("expected slow2 to be demoted to standby (IsValid=false)")
+	}
+
+	slow1Conn, ok := b.GetConnectionByKey("slow1")
+	if !ok || !slow1Conn.IsValid {
+		t.Fatal("expected slow1 to remain active")
+	}
+}
+
+func TestBalancerOptimizeActivePool(t *testing.T) {
+	b := NewBalancer(BalancingLossThenLatency, nil)
+	b.SetMaxActiveResolvers(2)
+
+	connections := []*Connection{
+		{Key: "a"},
+		{Key: "b"},
+		{Key: "standby1"},
+	}
+	b.SetConnections(connections)
+	b.SetConnectionMTU("a", 100, 150, 1000)
+	b.SetConnectionMTU("b", 100, 150, 1000)
+	b.SetConnectionMTU("standby1", 100, 150, 1000)
+
+	// Activate a and b with good initial latencies
+	b.SeedBurstStats("a", 10, 10, 30*time.Millisecond)
+	b.SetConnectionValidity("a", true)
+
+	b.SeedBurstStats("b", 10, 10, 35*time.Millisecond)
+	b.SetConnectionValidity("b", true)
+
+	// Standby resolver has verified MTU and 55ms RTT (scores lower than a and b, so stays in standby)
+	b.SeedBurstStats("standby1", 4, 4, 55*time.Millisecond)
+	b.SetConnectionValidity("standby1", true)
+
+	standbyConn, _ := b.GetConnectionByKey("standby1")
+	if standbyConn.IsValid {
+		t.Fatal("expected standby1 to start in standby pool")
+	}
+
+	// Simulate heavy degradation on "a": RTT spikes to 800ms with 30% loss
+	b.SeedBurstStats("a", 20, 14, 800*time.Millisecond)
+
+	// Run optimization
+	swapped := b.OptimizeActivePool()
+	if !swapped {
+		t.Fatal("expected OptimizeActivePool to swap degraded active resolver")
+	}
+
+	// Verify standby1 is now active and "a" is now standby
+	standbyConnAfter, _ := b.GetConnectionByKey("standby1")
+	if !standbyConnAfter.IsValid {
+		t.Fatal("expected standby1 to be promoted to active")
+	}
+
+	aConnAfter, _ := b.GetConnectionByKey("a")
+	if aConnAfter.IsValid {
+		t.Fatal("expected degraded resolver a to be demoted to standby")
+	}
+
+	if b.ActiveCount() != 2 {
+		t.Fatalf("expected ActiveCount to remain strictly 2, got=%d", b.ActiveCount())
+	}
+}
+
+func TestBalancerGetRankedEndpoints(t *testing.T) {
+	b := NewBalancer(BalancingLowestLatency, nil)
+	b.SetMaxActiveResolvers(2)
+
+	connections := []*Connection{
+		{Key: "1.1.1.1|53|domain.com", Resolver: "1.1.1.1", ResolverPort: 53, Domain: "domain.com", UploadMTUBytes: 120, DownloadMTUBytes: 1500},
+		{Key: "8.8.8.8|53|domain.com", Resolver: "8.8.8.8", ResolverPort: 53, Domain: "domain.com", UploadMTUBytes: 120, DownloadMTUBytes: 1500},
+		{Key: "9.9.9.9|53|domain.com", Resolver: "9.9.9.9", ResolverPort: 53, Domain: "domain.com", UploadMTUBytes: 120, DownloadMTUBytes: 1500},
+		{Key: "1.1.1.1|53|domain2.com", Resolver: "1.1.1.1", ResolverPort: 53, Domain: "domain2.com", UploadMTUBytes: 120, DownloadMTUBytes: 1500},
+	}
+	b.SetConnections(connections)
+
+	// 1.1.1.1: fast 15ms
+	b.SeedBurstStats("1.1.1.1|53|domain.com", 20, 20, 15*time.Millisecond)
+	b.SetConnectionValidity("1.1.1.1|53|domain.com", true)
+
+	// 8.8.8.8: medium 30ms
+	b.SeedBurstStats("8.8.8.8|53|domain.com", 20, 20, 30*time.Millisecond)
+	b.SetConnectionValidity("8.8.8.8|53|domain.com", true)
+
+	// 9.9.9.9: slow 120ms
+	b.SeedBurstStats("9.9.9.9|53|domain.com", 20, 20, 120*time.Millisecond)
+	b.SetConnectionValidity("9.9.9.9|53|domain.com", true)
+
+	ranked := b.GetRankedEndpoints(10)
+	if len(ranked) != 3 {
+		t.Fatalf("expected 3 unique endpoints, got %d", len(ranked))
+	}
+
+	// First should be 1.1.1.1 (lowest RTT/highest score)
+	if ranked[0].IP != "1.1.1.1" {
+		t.Errorf("expected 1st ranked resolver to be 1.1.1.1, got %s", ranked[0].IP)
+	}
+	// Second should be 8.8.8.8
+	if ranked[1].IP != "8.8.8.8" {
+		t.Errorf("expected 2nd ranked resolver to be 8.8.8.8, got %s", ranked[1].IP)
+	}
+	// Third should be 9.9.9.9
+	if ranked[2].IP != "9.9.9.9" {
+		t.Errorf("expected 3rd ranked resolver to be 9.9.9.9, got %s", ranked[2].IP)
+	}
+
+	// Test maxCount clamp
+	limited := b.GetRankedEndpoints(2)
+	if len(limited) != 2 {
+		t.Fatalf("expected 2 endpoints when limited, got %d", len(limited))
+	}
+}
+
+
