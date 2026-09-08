@@ -1,0 +1,13 @@
+{
+  "name": "masterdnsvpn-wrapper-dashboard",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Wrapper-first GUI dashboard for the MasterDnsVPN client distribution package.",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
