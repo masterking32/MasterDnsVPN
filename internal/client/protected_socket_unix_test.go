@@ -7,192 +7,86 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"syscall"
 	"testing"
 	"time"
-
-	"golang.org/x/sys/unix"
 
 	"masterdnsvpn-go/internal/config"
 )
 
-type clientProtectServerResult struct {
-	fdCount int
-	err     error
-}
-
-func startClientStubProtectServer(t *testing.T, status byte) (string, <-chan clientProtectServerResult) {
+// startStubProtectServer accepts protect requests on a temporary Unix socket,
+// answers each with status and sends one value per request on the returned
+// channel. The sockprotect tests cover fd passing; this stub only shows that
+// socket creation reached the server.
+func startStubProtectServer(t *testing.T, status byte) (string, <-chan struct{}) {
 	t.Helper()
 
-	path := fmt.Sprintf("/tmp/masterdnsvpn-client-protect-%d.sock", time.Now().UnixNano())
-	_ = os.Remove(path)
+	// /tmp keeps the path under the sun_path limit; t.TempDir() can exceed it on macOS.
+	path := fmt.Sprintf("/tmp/mdv-client-protect-%d-%d.sock", os.Getpid(), time.Now().UnixNano())
 	listener, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatalf("Listen unix failed: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = listener.Close()
-		_ = os.Remove(path)
-	})
+	t.Cleanup(func() { _ = listener.Close() })
 
-	resultCh := make(chan clientProtectServerResult, 4)
+	served := make(chan struct{}, 4)
 	go func() {
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
 				return
 			}
-			go handleClientProtectConn(conn, status, resultCh)
+			go func() {
+				defer conn.Close()
+				if _, err := conn.Read(make([]byte, 1)); err != nil {
+					return
+				}
+				_, _ = conn.Write([]byte{status})
+				served <- struct{}{}
+			}()
 		}
 	}()
-
-	return path, resultCh
+	return path, served
 }
 
-func handleClientProtectConn(conn net.Conn, status byte, resultCh chan<- clientProtectServerResult) {
-	defer conn.Close()
-
-	unixConn, ok := conn.(*net.UnixConn)
-	if !ok {
-		resultCh <- clientProtectServerResult{err: syscall.EINVAL}
-		return
-	}
-
-	rawConn, err := unixConn.SyscallConn()
-	if err != nil {
-		resultCh <- clientProtectServerResult{err: err}
-		return
-	}
-
-	var (
-		payload [1]byte
-		oobn    int
-		readErr error
-	)
-	oob := make([]byte, unix.CmsgSpace(4))
-	if err := rawConn.Read(func(fd uintptr) bool {
-		_, oobn, _, _, readErr = unix.Recvmsg(int(fd), payload[:], oob, 0)
-		return true
-	}); err != nil {
-		resultCh <- clientProtectServerResult{err: err}
-		return
-	}
-	if readErr != nil {
-		resultCh <- clientProtectServerResult{err: readErr}
-		return
-	}
-
-	messages, err := unix.ParseSocketControlMessage(oob[:oobn])
-	if err != nil {
-		resultCh <- clientProtectServerResult{err: err}
-		return
-	}
-
-	fdCount := 0
-	for _, msg := range messages {
-		fds, err := unix.ParseUnixRights(&msg)
-		if err != nil {
-			resultCh <- clientProtectServerResult{err: err}
-			return
-		}
-		fdCount += len(fds)
-		for _, receivedFD := range fds {
-			_ = unix.Close(receivedFD)
-		}
-	}
-
-	_, err = conn.Write([]byte{status})
-	resultCh <- clientProtectServerResult{fdCount: fdCount, err: err}
-}
-
-func requireClientProtectResult(t *testing.T, resultCh <-chan clientProtectServerResult) clientProtectServerResult {
+func requireServed(t *testing.T, served <-chan struct{}) {
 	t.Helper()
 
 	select {
-	case result := <-resultCh:
-		if result.err != nil {
-			t.Fatalf("protect server failed: %v", result.err)
-		}
-		return result
+	case <-served:
 	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for protect server")
-		return clientProtectServerResult{}
+		t.Fatal("protect server was not contacted")
 	}
 }
 
-func TestProtectedResolverQuerySendsFDToProtectServer(t *testing.T) {
-	resolverConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+func TestDialUDPResolverUsesProtectServer(t *testing.T) {
+	path, served := startStubProtectServer(t, 0x01)
+	c := New(config.ClientConfig{FDControlUnixSocket: path}, nil, nil)
+
+	conn, err := c.dialUDPResolver(context.Background(), "127.0.0.1:53")
 	if err != nil {
-		t.Fatalf("ListenUDP resolver failed: %v", err)
+		t.Fatalf("dialUDPResolver returned error: %v", err)
 	}
-	defer resolverConn.Close()
-
-	protectPath, protectResults := startClientStubProtectServer(t, 0x01)
-	c := New(config.ClientConfig{
-		FDControlUnixSocket:         protectPath,
-		PacketDuplicationCount:      1,
-		SetupPacketDuplicationCount: 1,
-		RX_TX_Workers:               1,
-	}, nil, nil)
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		buf := make([]byte, 512)
-		n, addr, err := resolverConn.ReadFromUDP(buf)
-		if err != nil || n < 2 {
-			return
-		}
-		_, _ = resolverConn.WriteToUDP([]byte{buf[0], buf[1], 0x81, 0x00}, addr)
-	}()
-
-	udpConn, err := c.getUDPConn(context.Background(), resolverConn.LocalAddr().String())
-	if err != nil {
-		t.Fatalf("getUDPConn returned error: %v", err)
-	}
-	defer udpConn.Close()
-
-	response, err := c.exchangeUDPQueryWithConn(udpConn, []byte{0x12, 0x34, 0x01}, time.Second)
-	if err != nil {
-		t.Fatalf("exchangeUDPQueryWithConn returned error: %v", err)
-	}
-	if len(response) < 2 || response[0] != 0x12 || response[1] != 0x34 {
-		t.Fatalf("unexpected resolver response: %v", response)
-	}
-
-	result := requireClientProtectResult(t, protectResults)
-	if result.fdCount != 1 {
-		t.Fatalf("expected one protected resolver fd, got %d", result.fdCount)
-	}
-
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for resolver traffic")
-	}
+	defer conn.Close()
+	requireServed(t, served)
 }
 
-func TestListenUDPProtectedSendsFDToProtectServer(t *testing.T) {
-	protectPath, protectResults := startClientStubProtectServer(t, 0x01)
-	c := New(config.ClientConfig{FDControlUnixSocket: protectPath}, nil, nil)
+func TestListenUDPProtectedUsesProtectServer(t *testing.T) {
+	path, served := startStubProtectServer(t, 0x01)
+	c := New(config.ClientConfig{FDControlUnixSocket: path}, nil, nil)
 
-	conn, err := c.listenUDPProtected(context.Background(), &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	conn, err := c.listenUDPProtected(context.Background(), "0.0.0.0:0")
 	if err != nil {
 		t.Fatalf("listenUDPProtected returned error: %v", err)
 	}
 	defer conn.Close()
-
-	result := requireClientProtectResult(t, protectResults)
-	if result.fdCount != 1 {
-		t.Fatalf("expected one protected listener fd, got %d", result.fdCount)
-	}
+	requireServed(t, served)
 }
 
 func TestListenUDPProtectedFailsOnProtectFailure(t *testing.T) {
-	protectPath, _ := startClientStubProtectServer(t, 0x00)
-	c := New(config.ClientConfig{FDControlUnixSocket: protectPath}, nil, nil)
+	path, _ := startStubProtectServer(t, 0x00)
+	c := New(config.ClientConfig{FDControlUnixSocket: path}, nil, nil)
 
-	conn, err := c.listenUDPProtected(context.Background(), &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	conn, err := c.listenUDPProtected(context.Background(), "0.0.0.0:0")
 	if err == nil {
 		_ = conn.Close()
 		t.Fatal("expected listenUDPProtected to fail on protect failure")

@@ -6,161 +6,123 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
-type protectServerResult struct {
-	fdCount int
-	err     error
-}
-
-func startStubProtectServer(t *testing.T, status byte) (string, <-chan protectServerResult) {
+// startStubProtectServer speaks the protect protocol on a temporary Unix
+// socket. It answers every request with status and reports on the returned
+// channel how many fds the request carried.
+func startStubProtectServer(t *testing.T, status byte) (string, <-chan int) {
 	t.Helper()
 
-	path := fmt.Sprintf("/tmp/masterdnsvpn-protect-%d.sock", time.Now().UnixNano())
-	_ = os.Remove(path)
-	listener, err := net.Listen("unix", path)
+	// /tmp keeps the path under the sun_path limit; t.TempDir() can exceed it on macOS.
+	path := fmt.Sprintf("/tmp/mdv-protect-%d-%d.sock", os.Getpid(), time.Now().UnixNano())
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 	if err != nil {
-		t.Fatalf("Listen unix failed: %v", err)
+		t.Fatalf("ListenUnix failed: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = listener.Close()
-		_ = os.Remove(path)
-	})
+	t.Cleanup(func() { _ = listener.Close() })
 
-	resultCh := make(chan protectServerResult, 1)
+	fdCounts := make(chan int, 4)
 	go func() {
-		conn, err := listener.Accept()
-		if err != nil {
-			resultCh <- protectServerResult{err: err}
-			return
-		}
-		defer conn.Close()
-
-		unixConn, ok := conn.(*net.UnixConn)
-		if !ok {
-			resultCh <- protectServerResult{err: syscall.EINVAL}
-			return
-		}
-
-		rawConn, err := unixConn.SyscallConn()
-		if err != nil {
-			resultCh <- protectServerResult{err: err}
-			return
-		}
-
-		var (
-			payload [1]byte
-			oobn    int
-			readErr error
-		)
-		oob := make([]byte, unix.CmsgSpace(4))
-		if err := rawConn.Read(func(fd uintptr) bool {
-			_, oobn, _, _, readErr = unix.Recvmsg(int(fd), payload[:], oob, 0)
-			return true
-		}); err != nil {
-			resultCh <- protectServerResult{err: err}
-			return
-		}
-		if readErr != nil {
-			resultCh <- protectServerResult{err: readErr}
-			return
-		}
-
-		messages, err := unix.ParseSocketControlMessage(oob[:oobn])
-		if err != nil {
-			resultCh <- protectServerResult{err: err}
-			return
-		}
-
-		fdCount := 0
-		for _, msg := range messages {
-			fds, err := unix.ParseUnixRights(&msg)
+		for {
+			conn, err := listener.AcceptUnix()
 			if err != nil {
-				resultCh <- protectServerResult{err: err}
 				return
 			}
-			fdCount += len(fds)
-			for _, receivedFD := range fds {
-				_ = unix.Close(receivedFD)
-			}
+			go func() {
+				defer conn.Close()
+				fdCounts <- receiveFDs(conn)
+				_, _ = conn.Write([]byte{status})
+			}()
 		}
-
-		_, err = conn.Write([]byte{status})
-		resultCh <- protectServerResult{fdCount: fdCount, err: err}
 	}()
-
-	return path, resultCh
+	return path, fdCounts
 }
 
-func callProtectWithUDPSocket(t *testing.T, path string) error {
+// receiveFDs reads one protect request, closes the fds it carried and returns
+// their count, or -1 on error.
+func receiveFDs(conn *net.UnixConn) int {
+	payload := make([]byte, 1)
+	oob := make([]byte, syscall.CmsgSpace(4))
+	_, oobn, _, _, err := conn.ReadMsgUnix(payload, oob)
+	if err != nil {
+		return -1
+	}
+	messages, err := syscall.ParseSocketControlMessage(oob[:oobn])
+	if err != nil {
+		return -1
+	}
+	count := 0
+	for i := range messages {
+		fds, err := syscall.ParseUnixRights(&messages[i])
+		if err != nil {
+			return -1
+		}
+		for _, fd := range fds {
+			_ = syscall.Close(fd)
+		}
+		count += len(fds)
+	}
+	return count
+}
+
+func protectTestSocket(t *testing.T, path string) error {
 	t.Helper()
 
-	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
-		t.Fatalf("ListenPacket udp failed: %v", err)
+		t.Fatalf("ListenUDP failed: %v", err)
 	}
 	defer conn.Close()
 
-	sysConn, ok := conn.(syscall.Conn)
-	if !ok {
-		t.Fatal("udp socket does not expose SyscallConn")
-	}
-	rawConn, err := sysConn.SyscallConn()
+	rawConn, err := conn.SyscallConn()
 	if err != nil {
 		t.Fatalf("SyscallConn failed: %v", err)
 	}
-
 	var protectErr error
 	if err := rawConn.Control(func(fd uintptr) {
 		protectErr = ProtectFD(path, fd)
 	}); err != nil {
-		return err
+		t.Fatalf("Control failed: %v", err)
 	}
 	return protectErr
 }
 
-func requireProtectServerResult(t *testing.T, resultCh <-chan protectServerResult) protectServerResult {
+func requireFDCount(t *testing.T, fdCounts <-chan int, want int) {
 	t.Helper()
 
 	select {
-	case result := <-resultCh:
-		if result.err != nil {
-			t.Fatalf("protect server failed: %v", result.err)
+	case got := <-fdCounts:
+		if got != want {
+			t.Fatalf("protect server received %d fds, want %d", got, want)
 		}
-		return result
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for protect server")
-		return protectServerResult{}
 	}
 }
 
 func TestProtectFDSendsExactlyOneFD(t *testing.T) {
-	path, resultCh := startStubProtectServer(t, 0x01)
+	path, fdCounts := startStubProtectServer(t, 0x01)
 
-	if err := callProtectWithUDPSocket(t, path); err != nil {
+	if err := protectTestSocket(t, path); err != nil {
 		t.Fatalf("ProtectFD returned error: %v", err)
 	}
-
-	result := requireProtectServerResult(t, resultCh)
-	if result.fdCount != 1 {
-		t.Fatalf("expected one fd, got %d", result.fdCount)
-	}
+	requireFDCount(t, fdCounts, 1)
 }
 
-func TestProtectFDReturnsErrorOnFailureStatus(t *testing.T) {
-	path, resultCh := startStubProtectServer(t, 0x00)
+func TestProtectFDReportsFailureStatus(t *testing.T) {
+	path, fdCounts := startStubProtectServer(t, 0x00)
 
-	if err := callProtectWithUDPSocket(t, path); err == nil {
+	err := protectTestSocket(t, path)
+	if err == nil {
 		t.Fatal("expected ProtectFD to fail on 0x00 status")
 	}
-
-	result := requireProtectServerResult(t, resultCh)
-	if result.fdCount != 1 {
-		t.Fatalf("expected one fd, got %d", result.fdCount)
+	if !strings.Contains(err.Error(), "0x00") {
+		t.Fatalf("error should include the status byte, got: %v", err)
 	}
+	requireFDCount(t, fdCounts, 1)
 }
