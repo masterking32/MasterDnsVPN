@@ -52,7 +52,7 @@ type ClientConfig struct {
 	RecheckInactiveServersEnabled         bool              `toml:"RECHECK_INACTIVE_SERVERS_ENABLED"`
 	AutoDisableTimeoutServers             bool              `toml:"AUTO_DISABLE_TIMEOUT_SERVERS"`
 	AutoDisableTimeoutWindowSeconds       float64           `toml:"AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS"`
-	FDControlUnixSocket                   string            `toml:"FD_CONTROL_UNIX_SOCKET" json:"fd_control_unix_socket,omitempty"`
+	FDControlUnixSocket                   string            `toml:"FD_CONTROL_UNIX_SOCKET"`
 	BaseEncodeData                        bool              `toml:"BASE_ENCODE_DATA"`
 	UploadCompressionType                 int               `toml:"UPLOAD_COMPRESSION_TYPE"`
 	DownloadCompressionType               int               `toml:"DOWNLOAD_COMPRESSION_TYPE"`
@@ -337,9 +337,6 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 		cfg.LogLevel = "INFO"
 	}
 	cfg.FDControlUnixSocket = strings.TrimSpace(cfg.FDControlUnixSocket)
-	if envProtectPath := strings.TrimSpace(os.Getenv("MASTERDNSVPN_PROTECT_PATH")); envProtectPath != "" {
-		cfg.FDControlUnixSocket = envProtectPath
-	}
 
 	switch cfg.ProtocolType {
 	case "", "SOCKS5":

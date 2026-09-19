@@ -30,7 +30,7 @@ DOMAINS = ["v.domain.com"]
 DATA_ENCRYPTION_METHOD = 1
 
 # Shared encryption key.
-# Required on the client.
+# Required unless DATA_ENCRYPTION_METHOD is 0.
 # Must match the server-side key file contents.
 ENCRYPTION_KEY = ""
 
@@ -149,11 +149,13 @@ AUTO_DISABLE_TIMEOUT_SERVERS = true
 # Clamped to [1s, 86400s].
 AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS = 30.0
 
-# Android VpnService integrations only.
-# When set, every upstream resolver/carrier socket fd is sent to this Unix socket
-# for VpnService.protect(fd) before connect/bind.
-# MASTERDNSVPN_PROTECT_PATH overrides this TOML value.
-# FD_CONTROL_UNIX_SOCKET = ""
+# Android VpnService hosts only. Leave empty everywhere else.
+# When set, the client sends the fd of every upstream UDP socket (resolver
+# pool, MTU probes, health checks, tunnel workers) to this Unix socket so the
+# host can call VpnService.protect(fd) before the socket is connected or bound.
+# The client never sends local listeners (SOCKS5/TCP, SOCKS5 UDP relay, local DNS).
+# If the protect server is unreachable or rejects the fd, socket creation fails.
+FD_CONTROL_UNIX_SOCKET = ""
 
 # If true, payload labels are base-encoded before tunneling.
 # Usually keep false unless a specific resolver path behaves better with it.
