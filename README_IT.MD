@@ -572,7 +572,7 @@ Queste impostazioni sono critiche sul server:
 | `PROTOCOL_TYPE` | `"SOCKS5"` | `"SOCKS5"` o `"TCP"` | Sceglie la modalità del servizio locale esposta dal client.<br>`SOCKS5` è la modalità predefinita e consigliata per l'uso normale.<br>`TCP` è utile quando vuoi inoltrare il traffico verso un unico target remoto fisso anziché fornire alle applicazioni un proxy SOCKS. |
 | `DOMAINS` | `["v.example.com"]` | Elenco di stringhe non vuoto | Questi sono i domini del tunnel usati per costruire le richieste DNS.<br>Ogni dominio qui deve appartenere allo stesso tunnel che hai configurato sul server.<br>Se questo elenco è errato, il client può costruire query DNS valide che il server semplicemente ignorerà. |
 | `DATA_ENCRYPTION_METHOD` | `1` | `0..5` | Deve corrispondere a quello del server.<br>`0=None`, `1=XOR`, `2=ChaCha20`, `3=AES-128-GCM`, `4=AES-192-GCM`, `5=AES-256-GCM`.<br>XOR è leggero ma più debole. Le modalità AEAD sono più robuste ma hanno maggiore overhead. |
-| `ENCRYPTION_KEY` | `""` | Stringa | Segreto condiviso usato dal codec del client.<br>Deve essere esattamente identico alla chiave di cifratura lato server.<br>Se la chiave è errata, i pacchetti potrebbero essere interpretati come dati incomprensibili e il tunnel non funzionerà. |
+| `ENCRYPTION_KEY` | `""` | Stringa | Segreto condiviso usato dal codec del client.<br>Deve essere esattamente identico alla chiave di cifratura lato server.<br>Se la chiave è errata, i pacchetti potrebbero essere interpretati come dati incomprensibili e il tunnel non funzionerà.<br>Non è richiesta quando `DATA_ENCRYPTION_METHOD` è `0`. |
 
 ### 3.4.2) 🧦 Proxy Locale
 
@@ -610,6 +610,7 @@ Queste impostazioni sono critiche sul server:
 | `RECHECK_INACTIVE_SERVERS_ENABLED` | `true` | `true/false` | Abilita i ricontrolli in background per i resolver attualmente disabilitati o non sani.<br>Se disabilitato, una volta che un resolver diventa inutilizzabile, rimarrà disabilitato fino al riavvio o alla ricostruzione manuale. |
 | `AUTO_DISABLE_TIMEOUT_SERVERS` | `true` | `true/false` | Abilita la disabilitazione automatica dei resolver che continuano ad andare in timeout e non mostrano alcuna attività riuscita. |
 | `AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS` | `30.0` | Se `<=0`, si applica il fallback | Finestra temporale usata per decidere se un resolver presenta solo timeout.<br>Se tutte le osservazioni in questa finestra sono timeout, può essere disabilitato. |
+| `FD_CONTROL_UNIX_SOCKET` | `""` | Vuoto, oppure il percorso di un socket Unix | Solo per host Android con VpnService.<br>Se impostato, il client invia l'fd di ogni socket UDP in uscita (pool dei resolver, sonde MTU, controlli di salute, worker del tunnel) a questo socket Unix prima di connect/bind, così l'host può chiamare `VpnService.protect(fd)` e tenere il traffico verso i resolver fuori dal tunnel.<br>I listener locali (SOCKS5/TCP, relay UDP di SOCKS5, DNS locale) non vengono mai inviati. Se il server di protezione non è raggiungibile o rifiuta l'fd, la creazione del socket fallisce.<br>Lascialo vuoto su desktop e server. |
 | `BASE_ENCODE_DATA` | `false` | `true/false` | Se abilitato, i payload vengono codificati in un formato base-safe prima del tunneling.<br>Questo di solito riduce l'efficienza del payload, ma può aiutare in ambienti con resolver rigorosi. |
 
 ### 3.4.5) 🗜️ Compressione

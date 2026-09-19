@@ -572,7 +572,7 @@ Copy-Item client_resolvers.simple client_resolvers.txt
 | `PROTOCOL_TYPE` | `"SOCKS5"` | `"SOCKS5"` 或 `"TCP"` | 选择客户端对外暴露的本地服务模式。<br>`SOCKS5` 是常规使用的默认且推荐的模式。<br>`TCP` 在你希望将流量转发到一个固定的远程目标，而非给应用提供 SOCKS 代理时很有用。 |
 | `DOMAINS` | `["v.example.com"]` | 非空的字符串列表 | 这些是用于构建 DNS 请求的隧道域名。<br>这里的每个域名都必须属于你在服务端配置的同一条隧道。<br>如果此列表有误，客户端可能会构建出有效的 DNS 查询，但服务器会直接忽略它们。 |
 | `DATA_ENCRYPTION_METHOD` | `1` | `0..5` | 必须与服务端匹配。<br>`0=None`、`1=XOR`、`2=ChaCha20`、`3=AES-128-GCM`、`4=AES-192-GCM`、`5=AES-256-GCM`。<br>XOR 轻量但较弱。AEAD 模式更强但开销更大。 |
-| `ENCRYPTION_KEY` | `""` | 字符串 | 客户端编解码器使用的共享密钥。<br>它必须与服务端的加密密钥完全相同。<br>如果密钥错误，数据包可能被解析为乱码，隧道将无法工作。 |
+| `ENCRYPTION_KEY` | `""` | 字符串 | 客户端编解码器使用的共享密钥。<br>它必须与服务端的加密密钥完全相同。<br>如果密钥错误，数据包可能被解析为乱码，隧道将无法工作。<br>当 `DATA_ENCRYPTION_METHOD` 为 `0` 时不需要设置。 |
 
 ### 3.4.2) 🧦 本地代理
 
@@ -610,6 +610,7 @@ Copy-Item client_resolvers.simple client_resolvers.txt
 | `RECHECK_INACTIVE_SERVERS_ENABLED` | `true` | `true/false` | 为当前被禁用或不健康的解析器启用后台重新检查。<br>如果禁用，一旦解析器变得不可用，它将一直保持禁用状态，直到重启或手动重建。 |
 | `AUTO_DISABLE_TIMEOUT_SERVERS` | `true` | `true/false` | 启用对持续超时且无任何成功活动的解析器的自动禁用。 |
 | `AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS` | `30.0` | 若 `<=0` 则使用回退值 | 用于判断某解析器是否仅有超时的时间窗口。<br>如果此窗口内的所有观察结果都是超时，该解析器可能会被禁用。 |
+| `FD_CONTROL_UNIX_SOCKET` | `""` | 留空，或填写 Unix 套接字路径 | 仅用于基于 VpnService 的 Android 宿主。<br>设置后，客户端会在 connect/bind 之前把每个上游 UDP 套接字（解析器连接池、MTU 探测、健康检查、隧道 worker）的 fd 发送到此 Unix 套接字，以便宿主调用 `VpnService.protect(fd)`，让发往解析器的流量不进入隧道。<br>本地监听器（SOCKS5/TCP、SOCKS5 UDP 中继、本地 DNS）不会被发送。如果 protect 服务不可达或拒绝该 fd，套接字创建将失败。<br>桌面和服务器环境请留空。 |
 | `BASE_ENCODE_DATA` | `false` | `true/false` | 如果启用，载荷会在隧道传输前以基于安全字符集的格式编码。<br>这通常会降低载荷效率，但在严格的解析器环境中可能有所帮助。 |
 
 ### 3.4.5) 🗜️ 压缩
