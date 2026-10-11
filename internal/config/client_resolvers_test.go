@@ -10,6 +10,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -258,6 +259,54 @@ func TestFormatResolverAddressForFile(t *testing.T) {
 		got := FormatResolverAddressForFile(tc.addr)
 		if got != tc.want {
 			t.Errorf("FormatResolverAddressForFile(%+v) = %q, want %q", tc.addr, got, tc.want)
+		}
+	}
+}
+
+func TestResolversFileReadErrorPreservation(t *testing.T) {
+	dir := t.TempDir()
+	ranked := []ResolverAddress{{IP: "1.1.1.1", Port: 53}}
+
+	// 1. Non-existent file initializes a clean file
+	nonExistentPath := filepath.Join(dir, "new_resolvers.txt")
+	if err := UpdateResolversFileWithRanked(nonExistentPath, ranked); err != nil {
+		t.Fatalf("expected non-existent file to succeed, got %v", err)
+	}
+	if _, err := os.Stat(nonExistentPath); err != nil {
+		t.Fatalf("expected new file to exist: %v", err)
+	}
+
+	// 2. Unreadable directory path returns error immediately without creating temporary or corrupt files
+	dirPath := filepath.Join(dir, "directory_target")
+	if err := os.Mkdir(dirPath, 0o755); err != nil {
+		t.Fatalf("Mkdir failed: %v", err)
+	}
+	if err := UpdateResolversFileWithRanked(dirPath, ranked); err == nil {
+		t.Fatal("expected UpdateResolversFileWithRanked to fail on directory target")
+	}
+
+	// 3. Permission denied on platforms supporting 000 chmod preserves content without overwriting
+	if runtime.GOOS != "windows" {
+		filePath := filepath.Join(dir, "protected_resolvers.txt")
+		initialContent := "# Preserved Comments\n8.8.8.8\n"
+		if err := os.WriteFile(filePath, []byte(initialContent), 0o644); err != nil {
+			t.Fatalf("WriteFile failed: %v", err)
+		}
+		_ = os.Chmod(filePath, 0o000)
+		defer os.Chmod(filePath, 0o644)
+
+		err := UpdateResolversFileWithRanked(filePath, ranked)
+		if err == nil {
+			t.Fatal("expected UpdateResolversFileWithRanked to fail on unreadable file")
+		}
+
+		_ = os.Chmod(filePath, 0o644)
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			t.Fatalf("ReadFile failed: %v", err)
+		}
+		if string(data) != initialContent {
+			t.Fatalf("file content was not preserved: got=%s want=%s", string(data), initialContent)
 		}
 	}
 }

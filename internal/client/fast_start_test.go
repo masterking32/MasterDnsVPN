@@ -199,3 +199,133 @@ func TestRunInitialMTUTests_FallbackWhenFewerResolversWork(t *testing.T) {
 		t.Fatalf("expected 1 active resolver, got=%d", activeCount)
 	}
 }
+
+func startMockMultiDomainMTUDNSListener(t *testing.T, domains []string) (*net.UDPConn, int, *atomic.Int32) {
+	t.Helper()
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatalf("failed to listen UDP: %v", err)
+	}
+
+	serverCfg := config.DefaultServerConfig()
+	serverCfg.Domain = domains
+	serverCfg.MinVPNLabelLength = 3
+	serverCfg.DataEncryptionMethod = 0
+	serverCodec, err := security.NewCodec(0, "")
+	if err != nil {
+		t.Fatalf("server codec init failed: %v", err)
+	}
+	server := udpserver.New(serverCfg, nil, serverCodec)
+
+	var queryCount atomic.Int32
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, remoteAddr, err := conn.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			queryCount.Add(1)
+			query := make([]byte, n)
+			copy(query, buf[:n])
+			response := server.HandlePacket(query)
+			if len(response) > 0 {
+				_, _ = conn.WriteToUDP(response, remoteAddr)
+			}
+		}
+	}()
+
+	port := conn.LocalAddr().(*net.UDPAddr).Port
+	return conn, port, &queryCount
+}
+
+func TestFastStartEarlyExit(t *testing.T) {
+	domain := "v.example.com"
+	const totalResolvers = 8
+
+	// Start 8 mock resolvers
+	resolvers := make([]config.ResolverAddress, totalResolvers)
+	for i := 0; i < totalResolvers; i++ {
+		conn, port, _ := startMockMTUDNSListener(t, domain)
+		resolvers[i] = config.ResolverAddress{IP: "127.0.0.1", Port: port}
+		defer conn.Close()
+	}
+
+	cfg := config.DefaultClientConfig()
+	cfg.Domains = []string{domain}
+	cfg.Resolvers = resolvers
+	cfg.RecheckInactiveServersEnabled = true
+	cfg.RX_TX_Workers = 1     // target is 1 valid resolver
+	cfg.MTUTestParallelism = 4 // configured parallelism is 4
+	cfg.MinUploadMTU = 100
+	cfg.MaxUploadMTU = 200
+	cfg.MinDownloadMTU = 200
+	cfg.MaxDownloadMTU = 400
+	cfg.MTUTestRetries = 1
+	cfg.MTUTestTimeout = 1.0
+
+	client := createTestFastStartClient(t, cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	err := client.RunInitialMTUTests(ctx)
+	if err != nil {
+		t.Fatalf("RunInitialMTUTests failed: %v", err)
+	}
+
+	activeCount := client.balancer.ActiveCount()
+	if activeCount < 1 || activeCount >= totalResolvers {
+		t.Fatalf("expected early exit with partial active resolvers (>=1 and <%d), got=%d", totalResolvers, activeCount)
+	}
+	if client.balancer.TotalCount() != totalResolvers {
+		t.Fatalf("expected total %d connections, got=%d", totalResolvers, client.balancer.TotalCount())
+	}
+}
+
+func TestFastStartUniqueResolvers(t *testing.T) {
+	domains := []string{"d1.example.com", "d2.example.com", "d3.example.com"}
+
+	// Start 2 working mock resolvers supporting all domains
+	conn1, port1, _ := startMockMultiDomainMTUDNSListener(t, domains)
+	defer conn1.Close()
+	conn2, port2, _ := startMockMultiDomainMTUDNSListener(t, domains)
+	defer conn2.Close()
+
+	resolvers := []config.ResolverAddress{
+		{IP: "127.0.0.1", Port: port1},
+		{IP: "127.0.0.1", Port: port2},
+	}
+
+	cfg := config.DefaultClientConfig()
+	cfg.Domains = domains
+	cfg.Resolvers = resolvers
+	cfg.RecheckInactiveServersEnabled = true
+	cfg.RX_TX_Workers = 2 // requires 2 UNIQUE resolvers
+	cfg.MTUTestParallelism = 4
+	cfg.MinUploadMTU = 100
+	cfg.MaxUploadMTU = 200
+	cfg.MinDownloadMTU = 200
+	cfg.MaxDownloadMTU = 400
+	cfg.MTUTestRetries = 1
+	cfg.MTUTestTimeout = 1.0
+
+	client := createTestFastStartClient(t, cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	err := client.RunInitialMTUTests(ctx)
+	if err != nil {
+		t.Fatalf("RunInitialMTUTests failed: %v", err)
+	}
+
+	// Verify that BOTH unique resolver endpoints are active in balancer
+	activeConns := client.balancer.ActiveConnections()
+	activeEndpoints := make(map[string]bool)
+	for _, conn := range activeConns {
+		activeEndpoints[conn.ResolverLabel] = true
+	}
+
+	if len(activeEndpoints) < 2 {
+		t.Fatalf("expected at least 2 unique resolvers active in balancer, got=%d (activeEndpoints=%+v)", len(activeEndpoints), activeEndpoints)
+	}
+}

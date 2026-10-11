@@ -453,11 +453,11 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 	cfg.MTUTestTimeout = defaultFloatAtMostZero(cfg.MTUTestTimeout, 2.0)
 	cfg.MTUTestParallelism = defaultIntBelow(cfg.MTUTestParallelism, 1, 1)
 	cfg.MicroBurstPacketCount = clampInt(defaultIntBelow(cfg.MicroBurstPacketCount, 2, 6), 2, 32)
-	cfg.MicroBurstParallelism = clampInt(defaultIntBelow(cfg.MicroBurstParallelism, 1, 8), 1, 64)
+	cfg.MicroBurstParallelism = clampInt(defaultIntBelow(cfg.MicroBurstParallelism, 1, 8), 1, 128)
 	cfg.MaxActiveResolvers = clampInt(defaultIntBelow(cfg.MaxActiveResolvers, 0, 15), 0, 1024)
 	cfg.MaxBurstLossRatio = clampFloat(defaultFloatBelow(cfg.MaxBurstLossRatio, 0.0, 0.20), 0.0, 1.0)
 	cfg.MinBurstThroughputKBps = clampFloat(defaultFloatBelow(cfg.MinBurstThroughputKBps, 0.0, 0.0), 0.0, 100000.0)
-	cfg.RecheckBurstPacketCount = clampInt(defaultIntBelow(cfg.RecheckBurstPacketCount, 2, 4), 2, 16)
+	cfg.RecheckBurstPacketCount = clampInt(defaultIntBelow(cfg.RecheckBurstPacketCount, 2, 4), 2, 32)
 	if cfg.RuntimeStatsIntervalSeconds < 0.0 {
 		cfg.RuntimeStatsIntervalSeconds = 0.0
 	} else if cfg.RuntimeStatsIntervalSeconds > 0.0 {

@@ -209,16 +209,19 @@ func calculateResolverRuntimeSpeedAndScore(s ResolverStatsSnapshot) (string, str
 	return speedStr, scoreStr
 }
 
-// runRuntimeStatsLoop runs a periodic background checker that logs performance
-// stats whenever tunnel traffic has been processed.
+// runRuntimeStatsLoop runs a periodic background checker that optimizes the active pool
+// and optionally logs performance stats whenever tunnel traffic has been processed.
 func (c *Client) runRuntimeStatsLoop(ctx context.Context) {
-	if c == nil || c.cfg.RuntimeStatsIntervalSeconds <= 0 {
+	if c == nil {
 		return
 	}
 
-	interval := time.Duration(c.cfg.RuntimeStatsIntervalSeconds * float64(time.Second))
-	if interval < time.Second {
-		interval = 60 * time.Second
+	interval := 60 * time.Second
+	if c.cfg.RuntimeStatsIntervalSeconds > 0 {
+		interval = time.Duration(c.cfg.RuntimeStatsIntervalSeconds * float64(time.Second))
+		if interval < time.Second {
+			interval = 60 * time.Second
+		}
 	}
 
 	ticker := time.NewTicker(interval)
@@ -238,11 +241,13 @@ func (c *Client) runRuntimeStatsLoop(ctx context.Context) {
 				}
 			}
 
-			currentSentTotal := c.calculateTotalSentPackets()
-			if currentSentTotal > lastSentTotal {
-				lastSentTotal = currentSentTotal
-				if c.log != nil && c.log.Enabled(logger.LevelInfo) {
-					c.DumpRuntimeStats("Periodic")
+			if c.cfg.RuntimeStatsIntervalSeconds > 0 {
+				currentSentTotal := c.calculateTotalSentPackets()
+				if currentSentTotal > lastSentTotal {
+					lastSentTotal = currentSentTotal
+					if c.log != nil && c.log.Enabled(logger.LevelInfo) {
+						c.DumpRuntimeStats("Periodic")
+					}
 				}
 			}
 		}

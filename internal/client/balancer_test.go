@@ -1,8 +1,12 @@
 package client
 
 import (
+	"context"
+	"sync"
 	"testing"
 	"time"
+
+	Enums "masterdnsvpn-go/internal/enums"
 )
 
 func TestBalancerLeastLossFallsBackToRoundRobinWithoutStats(t *testing.T) {
@@ -665,4 +669,75 @@ func TestBalancerGetRankedEndpoints(t *testing.T) {
 	}
 }
 
+func TestResolverStatsSnapshotDataRace(t *testing.T) {
+	b := NewBalancer(BalancingLossThenLatency, nil)
+	connections := []*Connection{
+		{Key: "r1", IsValid: true},
+		{Key: "r2", IsValid: true},
+		{Key: "r3", IsValid: true},
+	}
+	b.SetConnections(connections)
+	b.SetConnectionValidity("r1", true)
+	b.SetConnectionValidity("r2", true)
+	b.SetConnectionValidity("r3", true)
 
+	for i := uint16(1); i <= 10; i++ {
+		b.EnsureStream(i)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	var wg sync.WaitGroup
+
+	// Goroutine 1: Continuous SelectTargets mutating PreferredResolverKey on streams
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		var streamID uint16 = 1
+		for ctx.Err() == nil {
+			packetType := uint8(Enums.PACKET_STREAM_DATA)
+			if streamID%2 == 0 {
+				packetType = uint8(Enums.PACKET_STREAM_RESEND)
+			}
+			_, _ = b.SelectTargets(packetType, streamID, 2)
+			streamID = (streamID % 10) + 1
+		}
+	}()
+
+	// Goroutine 2: Continuous GetStatsSnapshot reading PreferredResolverKey
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for ctx.Err() == nil {
+			snaps := b.GetStatsSnapshot()
+			if len(snaps) != 3 {
+				t.Errorf("expected 3 snapshots, got %d", len(snaps))
+				return
+			}
+		}
+	}()
+
+	// Goroutine 3: Continuous SnapshotResolverStats reading PreferredResolverKey
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for ctx.Err() == nil {
+			_ = b.SnapshotResolverStats()
+		}
+	}()
+
+	// Goroutine 4: Clear references periodically
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for ctx.Err() == nil {
+			b.mu.Lock()
+			b.clearPreferredResolverReferencesLocked("r1")
+			b.mu.Unlock()
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+
+	wg.Wait()
+}

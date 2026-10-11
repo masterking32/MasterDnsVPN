@@ -72,6 +72,27 @@ type mtuScanCounters struct {
 	valid          atomic.Int32
 	rejectUpload   atomic.Int32
 	rejectDownload atomic.Int32
+	mu             sync.Mutex
+	validEndpoints map[string]struct{}
+	uniqueValid    atomic.Int32
+}
+
+func (m *mtuScanCounters) recordValid(endpoint string) int32 {
+	m.valid.Add(1)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.validEndpoints == nil {
+		m.validEndpoints = make(map[string]struct{})
+	}
+	if _, exists := m.validEndpoints[endpoint]; !exists {
+		m.validEndpoints[endpoint] = struct{}{}
+		return m.uniqueValid.Add(1)
+	}
+	return m.uniqueValid.Load()
+}
+
+func (m *mtuScanCounters) uniqueValidCount() int32 {
+	return m.uniqueValid.Load()
 }
 
 type mtuDecision struct {
@@ -325,20 +346,26 @@ func (c *Client) RunInitialMTUTests(ctx context.Context) error {
 	}
 
 	fastStart := c.cfg.RecheckInactiveServersEnabled
-	targetValid := len(scanConnections)
+
+	// Count total unique resolver endpoints in scanConnections
+	uniqueEndpoints := make(map[string]struct{}, len(scanConnections))
+	for _, conn := range scanConnections {
+		uniqueEndpoints[conn.ResolverLabel] = struct{}{}
+	}
+	totalUniqueResolvers := len(uniqueEndpoints)
+
+	targetValidResolvers := totalUniqueResolvers
 	if fastStart {
 		minRequired := c.cfg.RX_TX_Workers
 		if minRequired < 1 {
 			minRequired = 1
 		}
-		targetValid = min(len(scanConnections), minRequired)
+		targetValidResolvers = min(totalUniqueResolvers, minRequired)
 	}
 
 	uploadCaps := c.precomputeUploadCaps()
+	// Retain full configured probe parallelism during FastStart; rely on context cancellation
 	workerCount := min(max(1, c.cfg.EffectiveMTUTestParallelism()), len(scanConnections))
-	if fastStart {
-		workerCount = min(workerCount, targetValid)
-	}
 	c.logMTUStart(workerCount)
 	c.prepareMTUSuccessOutputFile()
 
@@ -348,7 +375,7 @@ func (c *Client) RunInitialMTUTests(ctx context.Context) error {
 			if err := ctx.Err(); err != nil {
 				return nil
 			}
-			if fastStart && counters.valid.Load() >= int32(targetValid) {
+			if fastStart && counters.uniqueValidCount() >= int32(targetValidResolvers) {
 				break
 			}
 			conn := scanConnections[idx]
@@ -358,7 +385,7 @@ func (c *Client) RunInitialMTUTests(ctx context.Context) error {
 		scanCtx, cancelScan := context.WithCancel(ctx)
 		defer cancelScan()
 
-		jobs := make(chan int, workerCount)
+		jobs := make(chan int)
 		var wg sync.WaitGroup
 		for range workerCount {
 			wg.Go(func() {
@@ -366,13 +393,13 @@ func (c *Client) RunInitialMTUTests(ctx context.Context) error {
 					if scanCtx.Err() != nil {
 						return
 					}
-					if fastStart && counters.valid.Load() >= int32(targetValid) {
+					if fastStart && counters.uniqueValidCount() >= int32(targetValidResolvers) {
 						cancelScan()
 						return
 					}
 					conn := scanConnections[idx]
 					c.runConnectionMTUTest(scanCtx, conn, idx+1, len(scanConnections), uploadCaps[conn.Domain], counters)
-					if fastStart && counters.valid.Load() >= int32(targetValid) {
+					if fastStart && counters.uniqueValidCount() >= int32(targetValidResolvers) {
 						cancelScan()
 					}
 				}
@@ -381,7 +408,7 @@ func (c *Client) RunInitialMTUTests(ctx context.Context) error {
 
 	dispatchLoop:
 		for idx := range scanConnections {
-			if fastStart && counters.valid.Load() >= int32(targetValid) {
+			if fastStart && counters.uniqueValidCount() >= int32(targetValidResolvers) {
 				cancelScan()
 				break dispatchLoop
 			}
@@ -910,6 +937,9 @@ func (c *Client) runConnectionMTUTest(ctx context.Context, conn Connection, serv
 	}
 
 	result, reason := c.probeConnectionMTU(ctx, conn, maxUploadPayload)
+	if ctx.Err() != nil {
+		return
+	}
 	if counters == nil {
 		return
 	}
@@ -953,7 +983,7 @@ func (c *Client) runConnectionMTUTest(ctx context.Context, conn Connection, serv
 	}
 
 	completed := counters.completed.Add(1)
-	validNow := counters.valid.Add(1)
+	validNow := counters.recordValid(conn.ResolverLabel)
 	rejectedNow := counters.rejectUpload.Load() + counters.rejectDownload.Load()
 	if c.log != nil && c.log.Enabled(logger.LevelInfo) {
 		c.log.Infof(

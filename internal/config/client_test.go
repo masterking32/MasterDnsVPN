@@ -609,6 +609,50 @@ RECHECK_BURST_PACKET_COUNT = 5
 	if cfg.RecheckBurstPacketCount != 5 {
 		t.Fatalf("unexpected RecheckBurstPacketCount: got=%d want=5", cfg.RecheckBurstPacketCount)
 	}
+
+	// Test max clamps: MICRO_BURST_PARALLELISM = 128, RECHECK_BURST_PACKET_COUNT = 32
+	if err := os.WriteFile(configPath, []byte(`
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["v.domain.com"]
+DATA_ENCRYPTION_METHOD = 1
+ENCRYPTION_KEY = "secret"
+MICRO_BURST_PARALLELISM = 128
+RECHECK_BURST_PACKET_COUNT = 32
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile config failed: %v", err)
+	}
+	cfgClamped, err := LoadClientConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadClientConfig returned error: %v", err)
+	}
+	if cfgClamped.MicroBurstParallelism != 128 {
+		t.Fatalf("expected MicroBurstParallelism 128, got=%d", cfgClamped.MicroBurstParallelism)
+	}
+	if cfgClamped.RecheckBurstPacketCount != 32 {
+		t.Fatalf("expected RecheckBurstPacketCount 32, got=%d", cfgClamped.RecheckBurstPacketCount)
+	}
+
+	// Test exceeding limits clamps to bounds
+	if err := os.WriteFile(configPath, []byte(`
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["v.domain.com"]
+DATA_ENCRYPTION_METHOD = 1
+ENCRYPTION_KEY = "secret"
+MICRO_BURST_PARALLELISM = 256
+RECHECK_BURST_PACKET_COUNT = 64
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile config failed: %v", err)
+	}
+	cfgExcess, err := LoadClientConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadClientConfig returned error: %v", err)
+	}
+	if cfgExcess.MicroBurstParallelism != 128 {
+		t.Fatalf("expected MicroBurstParallelism clamped to 128, got=%d", cfgExcess.MicroBurstParallelism)
+	}
+	if cfgExcess.RecheckBurstPacketCount != 32 {
+		t.Fatalf("expected RecheckBurstPacketCount clamped to 32, got=%d", cfgExcess.RecheckBurstPacketCount)
+	}
 }
 
 func TestLoadClientConfigRuntimeStatsKnobs(t *testing.T) {

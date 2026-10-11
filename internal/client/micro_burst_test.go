@@ -68,6 +68,27 @@ func TestCalculateBurstScore(t *testing.T) {
 	if fastScore <= lossyScore {
 		t.Fatalf("expected fastScore (%v) > lossyScore (%v)", fastScore, lossyScore)
 	}
+
+	// Burst throughput comparison with identical RTT and loss
+	fastBurstResult := BurstProbeResult{
+		Qualified:           true,
+		SentCount:           6,
+		ReceivedCount:       6,
+		LossRatio:           0.0,
+		BurstThroughputKBps: 500.0,
+		AverageRTT:          30 * time.Millisecond,
+	}
+	slowBurstResult := BurstProbeResult{
+		Qualified:           true,
+		SentCount:           6,
+		ReceivedCount:       6,
+		LossRatio:           0.0,
+		BurstThroughputKBps: 50.0,
+		AverageRTT:          30 * time.Millisecond,
+	}
+	if calculateBurstScore(fastBurstResult) <= calculateBurstScore(slowBurstResult) {
+		t.Fatalf("expected higher burst throughput to yield higher score")
+	}
 }
 
 func startMockBurstServer(t *testing.T, domain string, dropAfter int, delayPerPacket time.Duration) (*net.UDPConn, string) {
@@ -299,5 +320,116 @@ func TestRunMicroBurstQualificationRankingAndSelection(t *testing.T) {
 	// Verify Balancer active count
 	if c.balancer.ActiveCount() != 2 {
 		t.Fatalf("expected balancer active count 2, got %d", c.balancer.ActiveCount())
+	}
+
+	// Subtest 1: Strict Zero Loss (MAX_BURST_LOSS_RATIO = 0.0)
+	t.Run("StrictZeroLoss", func(t *testing.T) {
+		cfgZero := cfg
+		cfgZero.MaxBurstLossRatio = 0.0
+		cZero := New(cfgZero, nil, codec)
+		cZero.syncedDownloadMTU = 400
+		cZero.syncedUploadMTU = 100
+		cZero.balancer.SetConnections(ptrs)
+
+		// conns has server1 (0% loss), server2 (0% loss), server3 (lossy)
+		activeZero, rankedZero := cZero.runMicroBurstQualification(context.Background(), conns)
+		if len(activeZero) != 2 {
+			t.Fatalf("expected 2 active connections under strict zero loss, got %d", len(activeZero))
+		}
+		for _, r := range rankedZero {
+			if r.Connection.Key == "r3|53|example.com" && r.BurstResult.Qualified {
+				t.Fatal("expected lossy candidate to be disqualified under MaxBurstLossRatio = 0.0")
+			}
+		}
+	})
+
+	// Subtest 2: Fallback Elimination when zero candidates qualify
+	t.Run("FallbackEliminationOnZeroQualified", func(t *testing.T) {
+		cfgStrict := cfg
+		// Set impossibly high min throughput requirement so none qualify
+		cfgStrict.MinBurstThroughputKBps = 100000.0
+		cStrict := New(cfgStrict, nil, codec)
+		cStrict.syncedDownloadMTU = 400
+		cStrict.syncedUploadMTU = 100
+		cStrict.balancer.SetConnections(ptrs)
+
+		activeStrict, _ := cStrict.runMicroBurstQualification(context.Background(), conns)
+		if len(activeStrict) != 0 {
+			t.Fatalf("expected 0 active connections when none qualify, got %d", len(activeStrict))
+		}
+	})
+}
+
+func TestSendPipelinedMicroBurstDeterministicTimestampPairing(t *testing.T) {
+	// Start mock UDP server that echoes packets
+	serverConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatalf("failed to listen UDP: %v", err)
+	}
+	defer serverConn.Close()
+
+	addr := serverConn.LocalAddr().String()
+	serverCfg := config.DefaultServerConfig()
+	serverCfg.Domain = []string{"example.com"}
+	serverCodec, _ := security.NewCodec(0, "")
+	server := udpserver.New(serverCfg, nil, serverCodec)
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, remoteAddr, err := serverConn.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			query := make([]byte, n)
+			copy(query, buf[:n])
+			response := server.HandlePacket(query)
+			if len(response) > 0 {
+				_, _ = serverConn.WriteToUDP(response, remoteAddr)
+			}
+		}
+	}()
+
+	cfg := config.DefaultClientConfig()
+	cfg.Domains = []string{"example.com"}
+	codec, _ := security.NewCodec(0, "")
+	c := New(cfg, nil, codec)
+
+	conn := Connection{
+		Domain:        "example.com",
+		Resolver:      "127.0.0.1",
+		ResolverLabel: addr,
+		Key:           "127.0.0.1|53|example.com",
+	}
+
+	transport, err := newUDPQueryTransport(addr)
+	if err != nil {
+		t.Fatalf("newUDPQueryTransport failed: %v", err)
+	}
+	defer transport.conn.Close()
+
+	// 8 packets spaced across 14ms (2ms sleep * 7).
+	// Under deterministic pairing, MinRTT and MaxRTT reflect actual RTT rather than inflated drift.
+	result := c.sendPipelinedMicroBurst(
+		context.Background(),
+		conn,
+		transport,
+		8,
+		500,
+		100,
+		2*time.Second,
+	)
+
+	if !result.Qualified {
+		t.Fatalf("expected micro-burst to qualify, got rejected: %s", result.RejectReason)
+	}
+	if result.ReceivedCount != 8 {
+		t.Fatalf("expected 8 received, got %d", result.ReceivedCount)
+	}
+	if result.AverageRTT <= 0 {
+		t.Fatalf("expected valid positive AverageRTT, got %v", result.AverageRTT)
+	}
+	if result.BurstThroughputKBps <= 0 {
+		t.Fatalf("expected positive BurstThroughputKBps, got %v", result.BurstThroughputKBps)
 	}
 }
