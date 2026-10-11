@@ -86,6 +86,7 @@ type Client struct {
 	sessionResetPending   atomic.Bool
 	runtimeResetPending   atomic.Bool
 	resolverHealthStarted atomic.Bool
+	runtimeStatsStarted   atomic.Bool
 	sessionResetSignal    chan struct{}
 	rxDroppedPackets      atomic.Uint64
 	lastRXDropLogUnix     atomic.Int64
@@ -435,7 +436,7 @@ func (c *Client) Run(ctx context.Context) error {
 
 				c.ensureLocalDNSCachePersistence(ctx)
 
-				if c.cfg.RuntimeStatsIntervalSeconds > 0 {
+				if c.runtimeStatsStarted.CompareAndSwap(false, true) {
 					go c.runRuntimeStatsLoop(ctx)
 				}
 				c.startInteractiveConsoleListener(ctx)

@@ -323,8 +323,14 @@ func (b *Balancer) GetStatsSnapshot() []ResolverStatsSnapshot {
 	// Count active streams assigned per resolver key
 	streamCounts := make(map[string]int)
 	for _, route := range b.streamRoutes {
-		if route != nil && route.PreferredResolverKey != "" {
-			streamCounts[route.PreferredResolverKey]++
+		if route == nil {
+			continue
+		}
+		route.mu.Lock()
+		key := route.PreferredResolverKey
+		route.mu.Unlock()
+		if key != "" {
+			streamCounts[key]++
 		}
 	}
 
@@ -362,6 +368,11 @@ func (b *Balancer) GetStatsSnapshot() []ResolverStatsSnapshot {
 	}
 
 	return snapshots
+}
+
+// SnapshotResolverStats returns a point-in-time snapshot of metrics for all loaded resolvers.
+func (b *Balancer) SnapshotResolverStats() []ResolverStatsSnapshot {
+	return b.GetStatsSnapshot()
 }
 
 // GetRankedEndpoints returns unique ResolverAddress endpoints sorted in descending
@@ -1294,11 +1305,15 @@ func (b *Balancer) clearPreferredResolverReferencesLocked(serverKey string) {
 		return
 	}
 	for _, state := range b.streamRoutes {
-		if state == nil || state.PreferredResolverKey != serverKey {
+		if state == nil {
 			continue
 		}
-		state.PreferredResolverKey = ""
-		state.ResendStreak = 0
+		state.mu.Lock()
+		if state.PreferredResolverKey == serverKey {
+			state.PreferredResolverKey = ""
+			state.ResendStreak = 0
+		}
+		state.mu.Unlock()
 	}
 }
 

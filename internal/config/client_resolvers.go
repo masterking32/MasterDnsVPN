@@ -120,7 +120,12 @@ func UpdateResolversFileWithRanked(filePath string, ranked []ResolverAddress) er
 	}
 
 	var userLines []string
-	if data, err := os.ReadFile(path); err == nil {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+	} else {
 		lines := strings.Split(string(data), "\n")
 		inAutoBlock := false
 		for _, line := range lines {

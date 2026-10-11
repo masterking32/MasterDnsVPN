@@ -94,6 +94,7 @@ func (c *Client) sendPipelinedMicroBurst(
 	requestLen := max(1+mtuProbeCodeLength+2, uploadMTU)
 	items := make(map[uint32]*burstProbeItem, packetCount)
 	queries := make([][]byte, 0, packetCount)
+	codes := make([]uint32, 0, packetCount)
 	useBase64Flag := false
 
 	for i := 0; i < packetCount; i++ {
@@ -115,6 +116,7 @@ func (c *Client) sendPipelinedMicroBurst(
 			code: code,
 		}
 		queries = append(queries, query)
+		codes = append(codes, code)
 	}
 
 	// 1. Send all queries pipelined with slight pacing to prevent local socket overflow
@@ -125,15 +127,9 @@ func (c *Client) sendPipelinedMicroBurst(
 			return result
 		}
 
-		code := binary.BigEndian.Uint32(queries[i][len(queries[i])-mtuProbeCodeLength:]) // will be tracked via items
-		_ = code
-
-		now := time.Now()
-		for _, item := range items {
-			if item.sentAt.IsZero() {
-				item.sentAt = now
-				break
-			}
+		code := codes[i]
+		if item := items[code]; item != nil {
+			item.sentAt = time.Now()
 		}
 
 		if _, err := transport.conn.Write(query); err != nil {
@@ -229,7 +225,7 @@ func (c *Client) sendPipelinedMicroBurst(
 
 	// 4. Determine qualification status
 	maxLossAllowed := c.cfg.MaxBurstLossRatio
-	if maxLossAllowed <= 0 {
+	if maxLossAllowed < 0 {
 		maxLossAllowed = 0.20
 	}
 
@@ -239,9 +235,9 @@ func (c *Client) sendPipelinedMicroBurst(
 	} else if result.LossRatio > maxLossAllowed {
 		result.Qualified = false
 		result.RejectReason = fmt.Sprintf("excessive burst loss: %.1f%% > %.1f%%", result.LossRatio*100, maxLossAllowed*100)
-	} else if c.cfg.MinBurstThroughputKBps > 0 && result.ThroughputKBps < c.cfg.MinBurstThroughputKBps {
+	} else if c.cfg.MinBurstThroughputKBps > 0 && result.BurstThroughputKBps < c.cfg.MinBurstThroughputKBps {
 		result.Qualified = false
-		result.RejectReason = fmt.Sprintf("low throughput: %.1f KB/s < %.1f KB/s", result.ThroughputKBps, c.cfg.MinBurstThroughputKBps)
+		result.RejectReason = fmt.Sprintf("low throughput: %.1f KB/s < %.1f KB/s", result.BurstThroughputKBps, c.cfg.MinBurstThroughputKBps)
 	} else {
 		result.Qualified = true
 	}
@@ -256,16 +252,40 @@ func calculateBurstScore(result BurstProbeResult) float64 {
 		return 0.0
 	}
 
-	downloadMTU := result.DownloadMTUBytes
-	if downloadMTU <= 0 && result.ReceivedCount > 0 && result.TotalBytesRx > 0 {
-		downloadMTU = result.TotalBytesRx / result.ReceivedCount
+	speedKBps := result.BurstThroughputKBps
+	if speedKBps <= 0 {
+		speedKBps = result.ThroughputKBps
 	}
-	if downloadMTU <= 0 {
-		downloadMTU = 500
+	if speedKBps <= 0 {
+		downloadMTU := result.DownloadMTUBytes
+		if downloadMTU <= 0 && result.ReceivedCount > 0 && result.TotalBytesRx > 0 {
+			downloadMTU = result.TotalBytesRx / result.ReceivedCount
+		}
+		if downloadMTU <= 0 {
+			downloadMTU = 500
+		}
+		speedKBps, _ = CalculateResolverScore(downloadMTU, result.AverageRTT, result.LossRatio)
 	}
 
-	_, score := CalculateResolverScore(downloadMTU, result.AverageRTT, result.LossRatio)
-	return score
+	lossRatio := result.LossRatio
+	if lossRatio < 0 {
+		lossRatio = 0
+	} else if lossRatio > 1.0 {
+		lossRatio = 1.0
+	}
+
+	effectiveThroughput := speedKBps * (1.0 - lossRatio)
+	if effectiveThroughput < 0 {
+		effectiveThroughput = 0
+	}
+
+	rttMillis := float64(result.AverageRTT.Milliseconds())
+	latencyPenalty := 1.0 + (rttMillis / 500.0)
+	if latencyPenalty <= 0 {
+		latencyPenalty = 1.0
+	}
+
+	return effectiveThroughput / latencyPenalty
 }
 
 // runMicroBurstQualification runs parallel pipelined bursts across all MTU-tested resolvers,
@@ -369,18 +389,10 @@ func (c *Client) runMicroBurstQualification(ctx context.Context, validConns []Co
 		}
 	}
 
-	// If no resolver qualified under strict criteria, fall back to best scoring
+	// If no resolver qualified under strict criteria, keep qualifiedConns empty so caller reports ErrNoValidConnections
 	if len(qualifiedConns) == 0 {
 		if c.log != nil && c.log.Enabled(logger.LevelWarn) {
-			c.log.Warnf("<yellow>⚠️ No resolvers met strict burst qualification; selecting top available resolvers.</yellow>")
-		}
-		for _, r := range results {
-			if r.BurstResult.ReceivedCount > 0 {
-				qualifiedConns = append(qualifiedConns, r.Connection)
-			}
-		}
-		if len(qualifiedConns) == 0 {
-			qualifiedConns = validConns
+			c.log.Warnf("<yellow>⚠️ No resolvers met burst qualification criteria.</yellow>")
 		}
 	}
 

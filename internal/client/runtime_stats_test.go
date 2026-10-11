@@ -208,3 +208,46 @@ func TestClientSaveRankedResolversToFile(t *testing.T) {
 	}
 }
 
+func TestRuntimeStatsLoopExecutesPoolOptimizationWhenIntervalZero(t *testing.T) {
+	cfg := config.DefaultClientConfig()
+	cfg.RuntimeStatsIntervalSeconds = 0.0 // disabled stats logging
+
+	c := New(cfg, nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		c.runRuntimeStatsLoop(ctx)
+		close(done)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-done:
+		t.Fatal("expected runRuntimeStatsLoop to stay alive for periodic pool optimization when interval is 0")
+	default:
+		// Succeeded: goroutine is running
+	}
+
+	cancel()
+	select {
+	case <-done:
+		// Clean termination
+	case <-time.After(1 * time.Second):
+		t.Fatal("runRuntimeStatsLoop did not terminate within deadline")
+	}
+}
+
+func TestRuntimeStatsStartedCompareAndSwapGuard(t *testing.T) {
+	cfg := config.DefaultClientConfig()
+	c := New(cfg, nil, nil)
+
+	if !c.runtimeStatsStarted.CompareAndSwap(false, true) {
+		t.Fatal("expected first CompareAndSwap to succeed")
+	}
+	if c.runtimeStatsStarted.CompareAndSwap(false, true) {
+		t.Fatal("expected subsequent CompareAndSwap to return false across session reset")
+	}
+}
+
