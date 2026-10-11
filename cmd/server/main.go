@@ -33,12 +33,15 @@ func waitForExitInput() {
 
 func main() {
 	configPath := flag.String("config", "server_config.toml", "Path to server configuration file")
+	flag.StringVar(configPath, "c", "server_config.toml", "Alias for -config")
 	jsonPath := flag.String("json", "", "Path to server JSON configuration file")
 	jsonPathShort := flag.String("j", "", "Alias for -json")
 	jsonBase64 := flag.String("json_base64", "", "Load server JSON configuration from base64")
 	jsonBase64Alias := flag.String("json-base64", "", "Alias for -json_base64")
 	logPath := flag.String("log", "", "Path to log file (optional)")
+	flag.StringVar(logPath, "l", "", "Alias for -log")
 	versionFlag := flag.Bool("version", false, "Print version and exit")
+	flag.BoolVar(versionFlag, "v", false, "Alias for -version")
 	genKeyFlag := flag.Bool("genkey", false, "Generate encryption key and exit")
 	nowaitFlag := flag.Bool("nowait", false, "Do not wait for input on exit (useful for scripting)")
 	configFlags, err := config.NewServerConfigFlagBinder(flag.CommandLine)
