@@ -527,15 +527,46 @@ func (c *Client) RunInitialMTUTests(ctx context.Context) error {
 			c.applySyncedMTUState(minUpload, minDownload, minUploadChars)
 		}
 
-		burstQualified, _ := c.runMicroBurstQualification(ctx, batchValidConns)
+		neededUnique := targetValidResolvers - len(qualifiedEndpoints)
+		if neededUnique < 0 {
+			neededUnique = 0
+		}
+		domainCount := len(c.cfg.Domains)
+		if domainCount < 1 {
+			domainCount = 1
+		}
+		maxBurstActive := neededUnique * domainCount
+		if c.cfg.MaxActiveResolvers > 0 && maxBurstActive > c.cfg.MaxActiveResolvers {
+			maxBurstActive = c.cfg.MaxActiveResolvers
+		}
+
+		burstQualified, results := c.runMicroBurstQualification(ctx, batchValidConns, maxBurstActive)
 		qualifiedMap := make(map[string]bool, len(burstQualified))
 		for _, q := range burstQualified {
 			qualifiedMap[q.Key] = true
 			qualifiedEndpoints[q.ResolverLabel] = struct{}{}
 		}
-		for _, conn := range batchValidConns {
-			if !qualifiedMap[conn.Key] {
-				disqualifiedEndpoints[conn.ResolverLabel] = struct{}{}
+		for _, r := range results {
+			if !r.BurstResult.Qualified {
+				disqualifiedEndpoints[r.Connection.ResolverLabel] = struct{}{}
+			}
+		}
+	}
+
+	if fastStart {
+		activeEndpoints := make(map[string]bool)
+		for _, conn := range c.balancer.ActiveConnections() {
+			activeEndpoints[conn.ResolverLabel] = true
+		}
+		if len(activeEndpoints) > targetValidResolvers {
+			keptEndpoints := make(map[string]bool, targetValidResolvers)
+			for _, conn := range c.balancer.ActiveConnections() {
+				if len(keptEndpoints) < targetValidResolvers || keptEndpoints[conn.ResolverLabel] {
+					keptEndpoints[conn.ResolverLabel] = true
+				} else {
+					c.balancer.SetConnectionValidity(conn.Key, false)
+					c.balancer.SetConnectionStandbyEligible(conn.Key, true)
+				}
 			}
 		}
 	}
