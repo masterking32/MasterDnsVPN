@@ -418,6 +418,14 @@ func (c *Client) runMicroBurstQualification(ctx context.Context, validConns []Co
 				r.BurstResult.ReceivedCount,
 				r.BurstResult.AverageRTT,
 			)
+		} else if r.BurstResult.Qualified {
+			c.balancer.SetConnectionStandbyEligible(r.Connection.Key, true)
+			c.balancer.SeedBurstStats(
+				r.Connection.Key,
+				r.BurstResult.SentCount,
+				r.BurstResult.ReceivedCount,
+				r.BurstResult.AverageRTT,
+			)
 		}
 	}
 
