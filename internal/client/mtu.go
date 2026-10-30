@@ -437,8 +437,8 @@ func (c *Client) RunInitialMTUTests(ctx context.Context) error {
 					continue
 				}
 
-				c.runConnectionMTUTest(batchCtx, conn, idx+1, len(scanConnections), uploadCaps[conn.Domain], counters)
-				if batchCtx.Err() != nil {
+				completed := c.runConnectionMTUTest(batchCtx, conn, idx+1, len(scanConnections), uploadCaps[conn.Domain], counters)
+				if !completed {
 					break
 				}
 				testedKeys[conn.Key] = true
@@ -458,8 +458,8 @@ func (c *Client) RunInitialMTUTests(ctx context.Context) error {
 							return
 						}
 						conn := scanConnections[idx]
-						c.runConnectionMTUTest(batchCtx, conn, idx+1, len(scanConnections), uploadCaps[conn.Domain], counters)
-						if batchCtx.Err() != nil {
+						completed := c.runConnectionMTUTest(batchCtx, conn, idx+1, len(scanConnections), uploadCaps[conn.Domain], counters)
+						if !completed {
 							return
 						}
 						testedMu.Lock()
@@ -554,6 +554,14 @@ func (c *Client) RunInitialMTUTests(ctx context.Context) error {
 	}
 
 	if fastStart {
+		if c.cfg.MicroBurstTestEnabled {
+			for _, conn := range c.balancer.ActiveConnections() {
+				if _, qual := qualifiedEndpoints[conn.ResolverLabel]; !qual {
+					c.balancer.SetConnectionValidity(conn.Key, false)
+					c.balancer.SetConnectionStandbyEligible(conn.Key, false)
+				}
+			}
+		}
 		activeEndpoints := make(map[string]bool)
 		for _, conn := range c.balancer.ActiveConnections() {
 			activeEndpoints[conn.ResolverLabel] = true
@@ -561,6 +569,13 @@ func (c *Client) RunInitialMTUTests(ctx context.Context) error {
 		if len(activeEndpoints) > targetValidResolvers {
 			keptEndpoints := make(map[string]bool, targetValidResolvers)
 			for _, conn := range c.balancer.ActiveConnections() {
+				if c.cfg.MicroBurstTestEnabled {
+					if _, qual := qualifiedEndpoints[conn.ResolverLabel]; !qual {
+						c.balancer.SetConnectionValidity(conn.Key, false)
+						c.balancer.SetConnectionStandbyEligible(conn.Key, false)
+						continue
+					}
+				}
 				if len(keptEndpoints) < targetValidResolvers || keptEndpoints[conn.ResolverLabel] {
 					keptEndpoints[conn.ResolverLabel] = true
 				} else {
@@ -1027,9 +1042,9 @@ func (c *Client) confirmResolverDown(conn *Connection, window time.Duration) boo
 	return true
 }
 
-func (c *Client) runConnectionMTUTest(ctx context.Context, conn Connection, serverID int, total int, maxUploadPayload int, counters *mtuScanCounters) {
+func (c *Client) runConnectionMTUTest(ctx context.Context, conn Connection, serverID int, total int, maxUploadPayload int, counters *mtuScanCounters) (completed bool) {
 	if conn.Key == "" {
-		return
+		return false
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -1043,12 +1058,12 @@ func (c *Client) runConnectionMTUTest(ctx context.Context, conn Connection, serv
 			}
 
 			if counters != nil {
-				completed := counters.completed.Add(1)
+				completedCount := counters.completed.Add(1)
 				rejectedNow := counters.rejectUpload.Add(1) + counters.rejectDownload.Load()
 				if c.log != nil && c.log.Enabled(logger.LevelWarn) {
 					c.log.Warnf(
 						"<red>❌ Rejected (%d/%d): <cyan>%s</cyan> via <cyan>%s</cyan> | reason=<yellow>PANIC</yellow> | totals: valid=<green>%d</green>, rejected=<red>%d</red></red>",
-						completed,
+						completedCount,
 						total,
 						conn.Domain,
 						conn.ResolverLabel,
@@ -1072,10 +1087,10 @@ func (c *Client) runConnectionMTUTest(ctx context.Context, conn Connection, serv
 
 	result, reason := c.probeConnectionMTU(ctx, conn, maxUploadPayload)
 	if ctx.Err() != nil {
-		return
+		return false
 	}
 	if counters == nil {
-		return
+		return false
 	}
 
 	decision := buildMTUDecision(result, reason)
@@ -1083,12 +1098,12 @@ func (c *Client) runConnectionMTUTest(ctx context.Context, conn Connection, serv
 
 	switch reason {
 	case mtuRejectUpload:
-		completed := counters.completed.Add(1)
+		completedCount := counters.completed.Add(1)
 		rejectedNow := counters.rejectUpload.Add(1) + counters.rejectDownload.Load()
 		if c.log != nil && c.log.Enabled(logger.LevelWarn) {
 			c.log.Warnf(
 				"<red>❌ Rejected (%d/%d): <cyan>%s</cyan> via <cyan>%s</cyan> | reason=<yellow>UPLOAD_MTU</yellow> | value=<cyan>%d</cyan> | totals: valid=<green>%d</green>, rejected=<red>%d</red></red>",
-				completed,
+				completedCount,
 				total,
 				conn.Domain,
 				conn.ResolverLabel,
@@ -1097,14 +1112,14 @@ func (c *Client) runConnectionMTUTest(ctx context.Context, conn Connection, serv
 				rejectedNow,
 			)
 		}
-		return
+		return true
 	case mtuRejectDownload:
-		completed := counters.completed.Add(1)
+		completedCount := counters.completed.Add(1)
 		rejectedNow := counters.rejectUpload.Load() + counters.rejectDownload.Add(1)
 		if c.log != nil && c.log.Enabled(logger.LevelWarn) {
 			c.log.Warnf(
 				"<red>❌ Rejected (%d/%d): <cyan>%s</cyan> via <cyan>%s</cyan> | reason=<yellow>DOWNLOAD_MTU</yellow> | value=<cyan>%d</cyan> | totals: valid=<green>%d</green>, rejected=<red>%d</red></red>",
-				completed,
+				completedCount,
 				total,
 				conn.Domain,
 				conn.ResolverLabel,
@@ -1113,16 +1128,16 @@ func (c *Client) runConnectionMTUTest(ctx context.Context, conn Connection, serv
 				rejectedNow,
 			)
 		}
-		return
+		return true
 	}
 
-	completed := counters.completed.Add(1)
+	completedCount := counters.completed.Add(1)
 	validNow := counters.recordValid(conn.ResolverLabel)
 	rejectedNow := counters.rejectUpload.Load() + counters.rejectDownload.Load()
 	if c.log != nil && c.log.Enabled(logger.LevelInfo) {
 		c.log.Infof(
 			"<green>✅ Accepted (%d/%d): <cyan>%s</cyan> via <cyan>%s</cyan> | upload=<cyan>%d</cyan> | download=<cyan>%d</cyan> | totals: valid=<green>%d</green>, rejected=<red>%d</red></green>",
-			completed,
+			completedCount,
 			total,
 			conn.Domain,
 			conn.ResolverLabel,
@@ -1135,6 +1150,7 @@ func (c *Client) runConnectionMTUTest(ctx context.Context, conn Connection, serv
 	if acceptedConn, ok := c.balancer.GetConnectionByKey(conn.Key); ok {
 		c.appendMTUSuccessLine(&acceptedConn)
 	}
+	return true
 }
 
 func (c *Client) probeConnectionMTU(ctx context.Context, conn Connection, maxUploadPayload int) (mtuConnectionProbeResult, mtuRejectReason) {
