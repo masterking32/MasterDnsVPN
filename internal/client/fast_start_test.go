@@ -8,6 +8,7 @@ package client
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -327,5 +328,157 @@ func TestFastStartUniqueResolvers(t *testing.T) {
 
 	if len(activeEndpoints) < 2 {
 		t.Fatalf("expected at least 2 unique resolvers active in balancer, got=%d (activeEndpoints=%+v)", len(activeEndpoints), activeEndpoints)
+	}
+}
+
+func TestProbeConnectionMTU_ContextCancellation(t *testing.T) {
+	blackholeConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatalf("failed to listen UDP: %v", err)
+	}
+	defer blackholeConn.Close()
+	blackholePort := blackholeConn.LocalAddr().(*net.UDPAddr).Port
+
+	cfg := config.DefaultClientConfig()
+	domain := "v.example.com"
+	cfg.Domains = []string{domain}
+	cfg.Resolvers = []config.ResolverAddress{{IP: "127.0.0.1", Port: blackholePort}}
+	cfg.MTUTestTimeout = 3.0 // 3 seconds timeout
+	cfg.MTUTestRetries = 1
+
+	client := createTestFastStartClient(t, cfg)
+
+	conn := Connection{
+		Domain:        domain,
+		Resolver:      "127.0.0.1",
+		ResolverPort:  blackholePort,
+		ResolverLabel: fmt.Sprintf("127.0.0.1:%d", blackholePort),
+		Key:           "blackhole",
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(40*time.Millisecond, cancel)
+
+	start := time.Now()
+	_, reason := client.probeConnectionMTU(ctx, conn, 200)
+	duration := time.Since(start)
+
+	if reason != mtuRejectUpload {
+		t.Fatalf("expected probe to reject with mtuRejectUpload on cancellation, got=%v", reason)
+	}
+
+	if duration >= 500*time.Millisecond {
+		t.Fatalf("probeConnectionMTU blocked for %v (>= 500ms); in-flight socket read was not cancelled immediately on context cancellation", duration)
+	}
+}
+
+func startMockSelectivelyDroppingMTUDNSListener(t *testing.T, domain string, maxResponsesBeforeDrop int) (*net.UDPConn, int, *atomic.Int32) {
+	t.Helper()
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatalf("failed to listen UDP: %v", err)
+	}
+
+	serverCfg := config.DefaultServerConfig()
+	serverCfg.Domain = []string{domain}
+	serverCfg.MinVPNLabelLength = 3
+	serverCfg.DataEncryptionMethod = 0
+	serverCodec, err := security.NewCodec(0, "")
+	if err != nil {
+		t.Fatalf("server codec init failed: %v", err)
+	}
+	server := udpserver.New(serverCfg, nil, serverCodec)
+
+	var queryCount atomic.Int32
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, remoteAddr, err := conn.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			count := queryCount.Add(1)
+			if maxResponsesBeforeDrop >= 0 && int(count) > maxResponsesBeforeDrop {
+				// Drop packet: simulate loss / failure during micro-burst
+				continue
+			}
+			query := make([]byte, n)
+			copy(query, buf[:n])
+			response := server.HandlePacket(query)
+			if len(response) > 0 {
+				_, _ = conn.WriteToUDP(response, remoteAddr)
+			}
+		}
+	}()
+
+	port := conn.LocalAddr().(*net.UDPAddr).Port
+	return conn, port, &queryCount
+}
+
+func TestRunInitialMTUTests_BurstRetryScanning(t *testing.T) {
+	domain := "v.example.com"
+
+	// 4 mock resolvers:
+	// Resolvers 0 & 1 will answer initial MTU probes (2 queries), but drop burst queries
+	conn0, port0, _ := startMockSelectivelyDroppingMTUDNSListener(t, domain, 2)
+	defer conn0.Close()
+	conn1, port1, _ := startMockSelectivelyDroppingMTUDNSListener(t, domain, 2)
+	defer conn1.Close()
+
+	// Resolvers 2 & 3 are healthy and answer all MTU and burst queries
+	conn2, port2, _ := startMockSelectivelyDroppingMTUDNSListener(t, domain, -1)
+	defer conn2.Close()
+	conn3, port3, _ := startMockSelectivelyDroppingMTUDNSListener(t, domain, -1)
+	defer conn3.Close()
+
+	resolvers := []config.ResolverAddress{
+		{IP: "127.0.0.1", Port: port0},
+		{IP: "127.0.0.1", Port: port1},
+		{IP: "127.0.0.1", Port: port2},
+		{IP: "127.0.0.1", Port: port3},
+	}
+
+	cfg := config.DefaultClientConfig()
+	cfg.Domains = []string{domain}
+	cfg.Resolvers = resolvers
+	cfg.RecheckInactiveServersEnabled = true // FastStart mode
+	cfg.MicroBurstTestEnabled = true         // Micro-burst qualification enabled
+	cfg.MicroBurstPacketCount = 6
+	cfg.RX_TX_Workers = 2                    // Target is 2 burst-qualified resolvers
+	cfg.MTUTestParallelism = 2
+	cfg.MinUploadMTU = 100
+	cfg.MaxUploadMTU = 100                   // Single query upload MTU probe
+	cfg.MinDownloadMTU = 300
+	cfg.MaxDownloadMTU = 300                 // Single query download MTU probe
+	cfg.MTUTestRetries = 1
+	cfg.MTUTestTimeout = 0.5
+
+	client := createTestFastStartClient(t, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	err := client.RunInitialMTUTests(ctx)
+	if err != nil {
+		t.Fatalf("RunInitialMTUTests failed despite healthy unscanned candidates available: %v", err)
+	}
+
+	activeCount := client.balancer.ActiveCount()
+	if activeCount != 2 {
+		t.Fatalf("expected 2 active resolvers after burst retry scanning, got=%d", activeCount)
+	}
+
+	// Verify that the active resolvers in balancer are indeed Resolvers 2 & 3 (port2 and port3)
+	activeConns := client.balancer.ActiveConnections()
+	labelMap := make(map[string]bool)
+	for _, c := range activeConns {
+		labelMap[c.ResolverLabel] = true
+	}
+
+	expectedLabel2 := fmt.Sprintf("127.0.0.1:%d", port2)
+	expectedLabel3 := fmt.Sprintf("127.0.0.1:%d", port3)
+	if !labelMap[expectedLabel2] || !labelMap[expectedLabel3] {
+		t.Fatalf("expected healthy resolvers %s and %s to be active, got active set: %+v",
+			expectedLabel2, expectedLabel3, labelMap)
 	}
 }

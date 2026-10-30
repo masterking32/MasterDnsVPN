@@ -370,59 +370,173 @@ func (c *Client) RunInitialMTUTests(ctx context.Context) error {
 	c.prepareMTUSuccessOutputFile()
 
 	counters := &mtuScanCounters{}
-	if workerCount <= 1 {
-		for idx := range scanConnections {
-			if err := ctx.Err(); err != nil {
-				return nil
-			}
-			if fastStart && counters.uniqueValidCount() >= int32(targetValidResolvers) {
-				break
-			}
-			conn := scanConnections[idx]
-			c.runConnectionMTUTest(ctx, conn, idx+1, len(scanConnections), uploadCaps[conn.Domain], counters)
-		}
-	} else {
-		scanCtx, cancelScan := context.WithCancel(ctx)
-		defer cancelScan()
+	testedKeys := make(map[string]bool, len(scanConnections))
+	qualifiedEndpoints := make(map[string]struct{}, targetValidResolvers)
+	disqualifiedEndpoints := make(map[string]struct{})
 
-		jobs := make(chan int)
-		var wg sync.WaitGroup
-		for range workerCount {
-			wg.Go(func() {
-				for idx := range jobs {
-					if scanCtx.Err() != nil {
-						return
-					}
-					if fastStart && counters.uniqueValidCount() >= int32(targetValidResolvers) {
-						cancelScan()
-						return
-					}
-					conn := scanConnections[idx]
-					c.runConnectionMTUTest(scanCtx, conn, idx+1, len(scanConnections), uploadCaps[conn.Domain], counters)
-					if fastStart && counters.uniqueValidCount() >= int32(targetValidResolvers) {
-						cancelScan()
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil
+		}
+
+		if fastStart && len(qualifiedEndpoints) >= targetValidResolvers {
+			break
+		}
+
+		// Check if all candidate connections are exhausted
+		allTested := true
+		for _, conn := range scanConnections {
+			if !testedKeys[conn.Key] {
+				if _, disq := disqualifiedEndpoints[conn.ResolverLabel]; disq {
+					testedKeys[conn.Key] = true
+				} else {
+					allTested = false
+				}
+			}
+		}
+		if allTested {
+			break
+		}
+
+		needed := targetValidResolvers - len(qualifiedEndpoints)
+		if !fastStart || needed < 1 {
+			needed = totalUniqueResolvers
+		}
+
+		batchCtx, cancelBatch := context.WithCancel(ctx)
+		batchUniqueValid := &atomic.Int32{}
+		var batchMu sync.Mutex
+		batchEndpoints := make(map[string]struct{})
+		var batchValidConns []Connection
+
+		recordBatchValid := func(conn Connection) {
+			batchMu.Lock()
+			defer batchMu.Unlock()
+			batchValidConns = append(batchValidConns, conn)
+			if _, alreadyQual := qualifiedEndpoints[conn.ResolverLabel]; !alreadyQual {
+				if _, exists := batchEndpoints[conn.ResolverLabel]; !exists {
+					batchEndpoints[conn.ResolverLabel] = struct{}{}
+					if batchUniqueValid.Add(1) >= int32(needed) && fastStart {
+						cancelBatch()
 					}
 				}
-			})
+			}
 		}
 
-	dispatchLoop:
-		for idx := range scanConnections {
-			if fastStart && counters.uniqueValidCount() >= int32(targetValidResolvers) {
-				cancelScan()
-				break dispatchLoop
+		if workerCount <= 1 {
+			for idx := range scanConnections {
+				if batchCtx.Err() != nil {
+					break
+				}
+				conn := scanConnections[idx]
+				if testedKeys[conn.Key] {
+					continue
+				}
+				if _, disq := disqualifiedEndpoints[conn.ResolverLabel]; disq {
+					testedKeys[conn.Key] = true
+					continue
+				}
+
+				c.runConnectionMTUTest(batchCtx, conn, idx+1, len(scanConnections), uploadCaps[conn.Domain], counters)
+				if batchCtx.Err() != nil {
+					break
+				}
+				testedKeys[conn.Key] = true
+				if acceptedConn, ok := c.balancer.GetConnectionByKey(conn.Key); ok && acceptedConn.IsValid {
+					recordBatchValid(acceptedConn)
+				}
 			}
-			select {
-			case <-scanCtx.Done():
-				break dispatchLoop
-			case jobs <- idx:
+		} else {
+			jobs := make(chan int)
+			var wg sync.WaitGroup
+			var testedMu sync.Mutex
+
+			for range workerCount {
+				wg.Go(func() {
+					for idx := range jobs {
+						if batchCtx.Err() != nil {
+							return
+						}
+						conn := scanConnections[idx]
+						c.runConnectionMTUTest(batchCtx, conn, idx+1, len(scanConnections), uploadCaps[conn.Domain], counters)
+						if batchCtx.Err() != nil {
+							return
+						}
+						testedMu.Lock()
+						testedKeys[conn.Key] = true
+						testedMu.Unlock()
+
+						if acceptedConn, ok := c.balancer.GetConnectionByKey(conn.Key); ok && acceptedConn.IsValid {
+							recordBatchValid(acceptedConn)
+						}
+					}
+				})
 			}
+
+		dispatchLoop:
+			for idx := range scanConnections {
+				if fastStart && batchUniqueValid.Load() >= int32(needed) {
+					cancelBatch()
+					break dispatchLoop
+				}
+				conn := scanConnections[idx]
+				testedMu.Lock()
+				alreadyTested := testedKeys[conn.Key]
+				testedMu.Unlock()
+				if alreadyTested {
+					continue
+				}
+				if _, disq := disqualifiedEndpoints[conn.ResolverLabel]; disq {
+					testedMu.Lock()
+					testedKeys[conn.Key] = true
+					testedMu.Unlock()
+					continue
+				}
+
+				select {
+				case <-batchCtx.Done():
+					break dispatchLoop
+				case jobs <- idx:
+				}
+			}
+			close(jobs)
+			wg.Wait()
 		}
-		close(jobs)
-		wg.Wait()
+		cancelBatch()
 
 		if err := ctx.Err(); err != nil {
 			return nil
+		}
+
+		if len(batchValidConns) == 0 {
+			continue
+		}
+
+		if !c.cfg.MicroBurstTestEnabled {
+			for _, conn := range batchValidConns {
+				qualifiedEndpoints[conn.ResolverLabel] = struct{}{}
+			}
+			continue
+		}
+
+		// Micro-burst qualification enabled:
+		// Optimize and sync MTU state with current valid connections before running burst
+		activeConns := c.balancer.ActiveConnections()
+		validConns, minUpload, minDownload, minUploadChars := c.optimizeMTUResolvers(activeConns)
+		if len(validConns) > 0 {
+			c.applySyncedMTUState(minUpload, minDownload, minUploadChars)
+		}
+
+		burstQualified, _ := c.runMicroBurstQualification(ctx, batchValidConns)
+		qualifiedMap := make(map[string]bool, len(burstQualified))
+		for _, q := range burstQualified {
+			qualifiedMap[q.Key] = true
+			qualifiedEndpoints[q.ResolverLabel] = struct{}{}
+		}
+		for _, conn := range batchValidConns {
+			if !qualifiedMap[conn.Key] {
+				disqualifiedEndpoints[conn.ResolverLabel] = struct{}{}
+			}
 		}
 	}
 
@@ -438,17 +552,6 @@ func (c *Client) RunInitialMTUTests(ctx context.Context) error {
 	c.applySyncedMTUState(minUpload, minDownload, minUploadChars)
 	c.appendMTUUsageSeparatorOnce()
 	c.logMTUCompletion(validConns)
-
-	if c.cfg.MicroBurstTestEnabled {
-		qualifiedConns, _ := c.runMicroBurstQualification(ctx, validConns)
-		if len(qualifiedConns) == 0 {
-			if c.log != nil {
-				c.log.Errorf("<red>No valid connections remaining after micro-burst qualification!</red>")
-			}
-			return ErrNoValidConnections
-		}
-		validConns = qualifiedConns
-	}
 
 	if fastStart && len(validConns) < len(scanConnections) {
 		remaining := len(scanConnections) - len(validConns)
@@ -1011,6 +1114,18 @@ func (c *Client) probeConnectionMTU(ctx context.Context, conn Connection, maxUpl
 		return result, mtuRejectUpload
 	}
 	defer probeTransport.conn.Close()
+
+	if ctx != nil {
+		if ctx.Err() != nil {
+			return result, mtuRejectUpload
+		}
+		stop := context.AfterFunc(ctx, func() {
+			if probeTransport.conn != nil {
+				_ = probeTransport.conn.Close()
+			}
+		})
+		defer stop()
+	}
 
 	upOK, upBytes, upChars, upRTT, err := c.testUploadMTU(ctx, conn, probeTransport, maxUploadPayload)
 	if err != nil || !upOK {
