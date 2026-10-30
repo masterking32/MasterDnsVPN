@@ -89,6 +89,7 @@ func TestRunInitialMTUTests_FastStartExitsEarly(t *testing.T) {
 	cfg.Resolvers = resolvers
 	cfg.RecheckInactiveServersEnabled = true
 	cfg.RX_TX_Workers = 2
+	cfg.MTUTestParallelism = 2
 	cfg.MinUploadMTU = 100
 	cfg.MaxUploadMTU = 200
 	cfg.MinDownloadMTU = 200
@@ -599,5 +600,45 @@ func TestAdversarial_RunInitialMTUTests_ContextCancellationPrompt(t *testing.T) 
 
 	if duration >= 2*time.Second {
 		t.Fatalf("RunInitialMTUTests took %v to return after context cancellation (expected < 2s)", duration)
+	}
+}
+
+func TestRecheckInactiveResolver_RevokesStandbyEligibilityOnFailure(t *testing.T) {
+	domain := "v.example.com"
+	conn, port, _ := startMockMTUDNSListener(t, domain)
+	// Immediately close the mock listener so any probe will fail
+	conn.Close()
+
+	cfg := config.DefaultClientConfig()
+	cfg.Domains = []string{domain}
+	cfg.Resolvers = []config.ResolverAddress{{IP: "127.0.0.1", Port: port}}
+	cfg.MTUTestTimeout = 0.2
+	cfg.MTUTestRetries = 1
+
+	client := createTestFastStartClient(t, cfg)
+	conns := client.balancer.AllConnections()
+	if len(conns) == 0 {
+		t.Fatal("expected at least 1 connection")
+	}
+
+	targetConn := conns[0]
+	// Explicitly mark standby eligible while inactive
+	client.balancer.SetConnectionValidity(targetConn.Key, false)
+	client.balancer.SetConnectionStandbyEligible(targetConn.Key, true)
+	if !client.balancer.IsConnectionStandbyEligible(targetConn.Key) {
+		t.Fatal("expected targetConn to be standby eligible initially")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	client.recheckInactiveResolver(ctx, targetConn)
+
+	if client.balancer.IsConnectionStandbyEligible(targetConn.Key) {
+		t.Fatal("expected standby eligibility to be revoked after failed health probe")
+	}
+	connAfter, ok := client.balancer.GetConnectionByKey(targetConn.Key)
+	if !ok || connAfter.IsValid {
+		t.Fatal("expected failed resolver to remain inactive")
 	}
 }

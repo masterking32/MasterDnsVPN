@@ -143,6 +143,9 @@ func UpdateResolversFileWithRanked(filePath string, ranked []ResolverAddress) er
 			}
 			userLines = append(userLines, line)
 		}
+		if inAutoBlock {
+			return fmt.Errorf("unterminated managed block in %s: missing footer marker %q", path, AutoRankedFooterMarker)
+		}
 	}
 
 	// Trim leading and trailing empty lines from userLines for clean formatting
