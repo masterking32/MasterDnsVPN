@@ -85,7 +85,7 @@ docker buildx build \
   "${TAG_ARGS[@]}" \
   -f Dockerfile \
   --push \
-  .
+  ..
 
 echo
 echo "Build and push completed:"

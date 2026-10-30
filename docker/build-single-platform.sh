@@ -25,6 +25,6 @@ docker build \
   --build-arg RELEASE_SHA256="${RELEASE_SHA256}" \
   -t "${IMAGE_NAME}:${TAG}" \
   -f Dockerfile \
-  .
+  ..
 
 echo "Local image built successfully: ${IMAGE_NAME}:${TAG}"

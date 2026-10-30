@@ -363,7 +363,7 @@ func (c *Client) runMicroBurstQualification(ctx context.Context, validConns []Co
 					return
 				}
 				conn := validConns[idx]
-				transport, err := newUDPQueryTransport(conn.ResolverLabel)
+				transport, err := c.newUDPQueryTransport(ctx, conn.ResolverLabel)
 				if err != nil {
 					results[idx] = QualifiedResolver{
 						Connection: conn,

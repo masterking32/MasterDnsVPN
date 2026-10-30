@@ -43,6 +43,7 @@ func (l *TCPListener) Start(ctx context.Context, ip string, port int) error {
 
 	listeners := make([]net.Listener, 0, len(addrs))
 	for i, addr := range addrs {
+		// App-facing local socket. protectControl is for upstream sockets only.
 		listener, err := net.Listen("tcp", addr)
 		if err != nil {
 			if i == 0 {

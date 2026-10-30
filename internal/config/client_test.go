@@ -76,6 +76,81 @@ MTU_TEST_TIMEOUT = 1.5
 	}
 }
 
+func TestLoadClientConfigTrimsFDControlUnixSocket(t *testing.T) {
+	dir := t.TempDir()
+
+	configPath := filepath.Join(dir, "client_config.toml")
+	resolversPath := filepath.Join(dir, "client_resolvers.txt")
+
+	if err := os.WriteFile(configPath, []byte(`
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["v.domain.com"]
+DATA_ENCRYPTION_METHOD = 1
+ENCRYPTION_KEY = "secret"
+FD_CONTROL_UNIX_SOCKET = " /tmp/masterdnsvpn-protect.sock "
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile config failed: %v", err)
+	}
+	if err := os.WriteFile(resolversPath, []byte("8.8.8.8\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile resolvers failed: %v", err)
+	}
+
+	cfg, err := LoadClientConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadClientConfig returned error: %v", err)
+	}
+
+	if cfg.FDControlUnixSocket != "/tmp/masterdnsvpn-protect.sock" {
+		t.Fatalf("unexpected fd control path: got=%q", cfg.FDControlUnixSocket)
+	}
+}
+
+func TestLoadClientConfigAllowsEmptyKeyWhenEncryptionNone(t *testing.T) {
+	dir := t.TempDir()
+
+	configPath := filepath.Join(dir, "client_config.toml")
+	resolversPath := filepath.Join(dir, "client_resolvers.txt")
+
+	if err := os.WriteFile(configPath, []byte(`
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["v.domain.com"]
+DATA_ENCRYPTION_METHOD = 0
+ENCRYPTION_KEY = ""
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile config failed: %v", err)
+	}
+	if err := os.WriteFile(resolversPath, []byte("8.8.8.8\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile resolvers failed: %v", err)
+	}
+
+	if _, err := LoadClientConfig(configPath); err != nil {
+		t.Fatalf("expected empty key to be allowed with DATA_ENCRYPTION_METHOD = 0, got: %v", err)
+	}
+}
+
+func TestLoadClientConfigRejectsEmptyKeyWhenEncryptionEnabled(t *testing.T) {
+	dir := t.TempDir()
+
+	configPath := filepath.Join(dir, "client_config.toml")
+	resolversPath := filepath.Join(dir, "client_resolvers.txt")
+
+	if err := os.WriteFile(configPath, []byte(`
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["v.domain.com"]
+DATA_ENCRYPTION_METHOD = 1
+ENCRYPTION_KEY = ""
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile config failed: %v", err)
+	}
+	if err := os.WriteFile(resolversPath, []byte("8.8.8.8\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile resolvers failed: %v", err)
+	}
+
+	if _, err := LoadClientConfig(configPath); err == nil {
+		t.Fatal("expected empty key to be rejected when encryption is enabled")
+	}
+}
+
 func TestLoadClientConfigRejectsInvalidProtocol(t *testing.T) {
 	dir := t.TempDir()
 

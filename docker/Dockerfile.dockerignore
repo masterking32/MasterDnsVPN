@@ -1,0 +1,10 @@
+# Only files needed to build the container entrypoint belong in the context.
+**
+!go.mod
+!go.sum
+!docker/
+docker/*
+!docker/Dockerfile
+!docker/Dockerfile.dockerignore
+!docker/entrypoint/
+!docker/entrypoint/**

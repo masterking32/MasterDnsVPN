@@ -288,6 +288,8 @@ Automáticamente:
 * linux/arm64/v8
 * linux/mips64le
 
+La imagen incluye el servidor y su plantilla de configuración para las cinco arquitecturas. El primer inicio no necesita descargar archivos; se reutilizan la configuración y las claves existentes en `/data`. El entorno mínimo no incluye shell ni gestor de paquetes.
+
 ---
 
 #### Sección 2.2.3: 🚀 Inicio rápido
@@ -588,7 +590,7 @@ Estos ajustes son críticos en el servidor:
 | `PROTOCOL_TYPE` | `"SOCKS5"` | `"SOCKS5"` o `"TCP"` | Elige el modo de servicio local que expone el cliente.<br>`SOCKS5` es el modo por defecto y recomendado para uso normal.<br>`TCP` es útil cuando quieres reenviar tráfico a un único destino remoto fijo en lugar de ofrecer un proxy SOCKS a las aplicaciones. |
 | `DOMAINS` | `["v.example.com"]` | Lista de cadenas no vacía | Estos son los dominios del túnel usados para construir las solicitudes DNS.<br>Cada dominio aquí debe pertenecer al mismo túnel que configuraste en el servidor.<br>Si esta lista es incorrecta, el cliente puede construir consultas DNS válidas que el servidor simplemente ignorará. |
 | `DATA_ENCRYPTION_METHOD` | `1` | `0..5` | Debe coincidir con el servidor.<br>`0=None`, `1=XOR`, `2=ChaCha20`, `3=AES-128-GCM`, `4=AES-192-GCM`, `5=AES-256-GCM`.<br>XOR es ligero pero más débil. Los modos AEAD son más fuertes pero tienen más sobrecarga. |
-| `ENCRYPTION_KEY` | `""` | Cadena | Secreto compartido usado por el códec del cliente.<br>Debe ser exactamente igual que la clave de cifrado del lado del servidor.<br>Si la clave es incorrecta, los paquetes pueden interpretarse como basura y el túnel no funcionará. |
+| `ENCRYPTION_KEY` | `""` | Cadena | Secreto compartido usado por el códec del cliente.<br>Debe ser exactamente igual que la clave de cifrado del lado del servidor.<br>Si la clave es incorrecta, los paquetes pueden interpretarse como basura y el túnel no funcionará.<br>No es obligatoria cuando `DATA_ENCRYPTION_METHOD` es `0`. |
 
 ### 3.4.2) 🧦 Proxy Local
 
@@ -627,6 +629,7 @@ Estos ajustes son críticos en el servidor:
 | `AUTO_SAVE_RANKED_RESOLVERS` | `true` | `true/false` | Guarda automáticamente los mejores resolutores clasificados en el encabezado gestionado de `client_resolvers.txt`.<br>En el siguiente inicio, FastStart utiliza inmediatamente estos resolutores probados más rápidos sin tener que escanear toda la lista desde cero.<br>Preserva todos los comentarios y subredes personalizados debajo del bloque. |
 | `AUTO_DISABLE_TIMEOUT_SERVERS` | `true` | `true/false` | Activa la desactivación automática de resolutores que siguen agotando el tiempo de espera y no muestran actividad exitosa. |
 | `AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS` | `30.0` | Si es `<=0`, se aplica el valor de reserva | Ventana de tiempo usada para decidir si un resolutor solo presenta timeouts.<br>Si todas las observaciones en esta ventana son timeouts, puede desactivarse. |
+| `FD_CONTROL_UNIX_SOCKET` | `""` | Vacío, o la ruta de un socket Unix | Solo para hosts Android con VpnService.<br>Si se define, el cliente envía el fd de cada socket UDP de salida (pool de resolutores, sondas MTU, comprobaciones de salud, workers del túnel) a este socket Unix antes de connect/bind, para que el host pueda llamar a `VpnService.protect(fd)` y mantener el tráfico hacia los resolutores fuera del túnel.<br>Los listeners locales (SOCKS5/TCP, relay UDP de SOCKS5, DNS local) nunca se envían. Si el servidor de protección no responde o rechaza el fd, la creación del socket falla.<br>Déjalo vacío en equipos de escritorio y servidores. |
 | `BASE_ENCODE_DATA` | `false` | `true/false` | Si está activado, las cargas útiles se codifican en un formato base-safe antes de tunelizarlas.<br>Esto suele reducir la eficiencia de la carga útil, pero puede ayudar en entornos de resolutores estrictos. |
 
 ### 3.4.5) 🗜️ Compresión

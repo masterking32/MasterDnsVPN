@@ -6,13 +6,10 @@ on:
 permissions:
   contents: write
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-
 jobs:
   preflight:
     name: Preflight - suggest secrets & generate tag
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       release_tag: ${{ steps.get_tag.outputs.tag }}
     steps:
@@ -89,7 +86,7 @@ jobs:
             go_os: linux
             cgo_enabled: "0"
             smoke_test: false
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             platform: Linux-Legacy
             arch: amd64
             ext: ""
@@ -239,24 +236,29 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
-          go-version: "1.21"
+          go-version-file: go.mod
           cache: true
 
       - name: Set up Java 17 for Android builds
         if: ${{ matrix.android_ndk }}
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
       - name: Set up Android SDK
         if: ${{ matrix.android_ndk }}
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          # Keep the Java 17-compatible command-line tools used by this build.
+          cmdline-tools-version: "12266719"
+          # Only the NDK below is needed; skip extra SDK packages (including obsolete tools).
+          packages: ""
 
       - name: Install Android NDK
         if: ${{ matrix.android_ndk }}
@@ -341,23 +343,27 @@ jobs:
           cp server_config.toml.simple dist/server_config.toml || true
 
       - name: Prepare smoke-test config
+        if: ${{ matrix.smoke_test }}
         shell: bash
         run: |
           python3 - <<'PY'
-          import sys
           import re
           from pathlib import Path
 
-          val = "smoke-test-key-12345678901234567890123456789012"
-          for f_name in ["dist/client_config.toml", "dist/server_config.toml"]:
-              p = Path(f_name)
-              if not p.exists(): continue
-              content = p.read_text(encoding="utf-8", errors="ignore")
+          # Keep test settings out of the packaged configuration templates.
+          smoke = Path("dist/smoke")
+          smoke.mkdir(parents=True, exist_ok=True)
+          val = "0123456789abcdef0123456789abcdef"
+          for f_name in ["client_config.toml", "server_config.toml"]:
+              content = (Path("dist") / f_name).read_text(encoding="utf-8")
               content = re.sub(r'ENCRYPTION_KEY\s*=\s*""', f'ENCRYPTION_KEY = "{val}"', content)
-              # Ensure server key file points to something that won't fail if we use it
               if "server" in f_name:
                   content = re.sub(r'ENCRYPTION_KEY_FILE\s*=\s*".*?"', 'ENCRYPTION_KEY_FILE = "encrypt_key.txt"', content)
-              p.write_text(content, encoding="utf-8")
+                  content = re.sub(r'(?m)^UDP_HOST\s*=.*$', 'UDP_HOST = "127.0.0.1"', content)
+                  content = re.sub(r'(?m)^UDP_PORT\s*=.*$', 'UDP_PORT = 15353', content)
+              (smoke / f_name).write_text(content, encoding="utf-8")
+          (smoke / "encrypt_key.txt").write_text(val, encoding="utf-8")
+          (smoke / "client_resolvers.txt").write_text("127.0.0.1:15353\n", encoding="utf-8")
           PY
 
       - name: Smoke test executables (Windows)
@@ -373,7 +379,7 @@ jobs:
 
           # Client Test
           Write-Host "Smoke testing $clientBin ..."
-          $proc = Start-Process -FilePath ".\\$clientBin" -ArgumentList "--config", "client_config.toml" -PassThru -NoNewWindow -RedirectStandardOutput "$clientBin.smoke.out" -RedirectStandardError "$clientBin.smoke.err"
+          $proc = Start-Process -FilePath ".\\$clientBin" -ArgumentList "--config", "smoke/client_config.toml" -PassThru -WindowStyle Hidden -RedirectStandardOutput "$clientBin.smoke.out" -RedirectStandardError "$clientBin.smoke.err"
           Start-Sleep -Seconds 5
           if ($proc.HasExited) {
               if ($proc.ExitCode -ne 0) {
@@ -387,7 +393,7 @@ jobs:
 
           # Server Test
           Write-Host "Smoke testing $serverBin ..."
-          $proc = Start-Process -FilePath ".\\$serverBin" -ArgumentList "--config", "server_config.toml" -PassThru -NoNewWindow -RedirectStandardOutput "$serverBin.smoke.out" -RedirectStandardError "$serverBin.smoke.err"
+          $proc = Start-Process -FilePath ".\\$serverBin" -ArgumentList "--config", "smoke/server_config.toml", "--nowait" -PassThru -WindowStyle Hidden -RedirectStandardOutput "$serverBin.smoke.out" -RedirectStandardError "$serverBin.smoke.err"
           Start-Sleep -Seconds 5
           if ($proc.HasExited) {
               if ($proc.ExitCode -ne 0) {
@@ -420,12 +426,12 @@ jobs:
             out_file="$bin.smoke.out"
             err_file="$bin.smoke.err"
 
-            conf="client_config.toml"
+            conf="smoke/client_config.toml"
             if [[ "$bin" == *"Server"* ]]; then
-              conf="server_config.toml"
+              conf="smoke/server_config.toml"
             fi
 
-            "./$bin" --config "$conf" >"$out_file" 2>"$err_file" &
+            "./$bin" --config "$conf" </dev/null >"$out_file" 2>"$err_file" &
             pid=$!
             sleep 5
 
@@ -439,20 +445,18 @@ jobs:
               code=$?
               set -e
               echo "$bin exited early with code $code"
-              # We allow exit code 0 if it finished setup, or ignore if it's just a missing config error but didn't crash
               if [ "$code" -ne 0 ]; then
                   echo "---- STDOUT ($bin) ----"
                   cat "$out_file" || true
                   echo "---- STDERR ($bin) ----"
                   cat "$err_file" || true
-                  # For Go, we might expect some errors if config is missing, but it shouldn't "crash"
-                  # exit 1
+                  exit "$code"
               fi
             fi
           done
 
       - name: Set up Python for README conversion
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -630,7 +634,7 @@ jobs:
           sha256sum "${CLIENT_ZIP}" "${CLIENT_TAR}" "${SERVER_ZIP}" "${SERVER_TAR}" > SHA256SUMS.txt
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: build-artifacts-${{ matrix.platform }}-${{ matrix.arch }}
           path: |

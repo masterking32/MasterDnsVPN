@@ -162,7 +162,7 @@ func TestSendPipelinedMicroBurstSuccess(t *testing.T) {
 		Key:           "127.0.0.1|53|example.com",
 	}
 
-	transport, err := newUDPQueryTransport(addr)
+	transport, err := c.newUDPQueryTransport(context.Background(), addr)
 	if err != nil {
 		t.Fatalf("newUDPQueryTransport failed: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestSendPipelinedMicroBurstDetectsRateLimiting(t *testing.T) {
 		Key:           "127.0.0.1|53|example.com",
 	}
 
-	transport, err := newUDPQueryTransport(addr)
+	transport, err := c.newUDPQueryTransport(context.Background(), addr)
 	if err != nil {
 		t.Fatalf("newUDPQueryTransport failed: %v", err)
 	}
@@ -402,7 +402,7 @@ func TestSendPipelinedMicroBurstDeterministicTimestampPairing(t *testing.T) {
 		Key:           "127.0.0.1|53|example.com",
 	}
 
-	transport, err := newUDPQueryTransport(addr)
+	transport, err := c.newUDPQueryTransport(context.Background(), addr)
 	if err != nil {
 		t.Fatalf("newUDPQueryTransport failed: %v", err)
 	}

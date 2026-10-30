@@ -1,4 +1,6 @@
-FROM debian:bookworm-slim AS downloader
+# Download and compile on the builder's native architecture. The final image
+# contains only static binaries, so it needs no target-specific distro image.
+FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS downloader
 
 ARG TARGETARCH
 ARG TARGETVARIANT
@@ -7,6 +9,7 @@ ARG RELEASE_SHA256=
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
   ca-certificates \
+  binutils \
   curl \
   unzip \
   && rm -rf /var/lib/apt/lists/*
@@ -30,9 +33,14 @@ RUN set -eux; \
   *) \
   echo "Unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
   esac; \
+  if [ "${RELEASE_TAG}" = latest ]; then \
+  RELEASE_URL="https://github.com/masterking32/MasterDnsVPN/releases/latest/download"; \
+  else \
+  RELEASE_URL="https://github.com/masterking32/MasterDnsVPN/releases/download/${RELEASE_TAG}"; \
+  fi; \
   curl -fsSL --retry 3 --retry-delay 2 \
   -o /tmp/masterdnsvpn.zip \
-  "https://github.com/masterking32/MasterDnsVPN/releases/download/${RELEASE_TAG}/${ARTIFACT}"; \
+  "${RELEASE_URL}/${ARTIFACT}"; \
   if [ -n "${RELEASE_SHA256}" ]; then \
   echo "${RELEASE_SHA256}  /tmp/masterdnsvpn.zip" | sha256sum -c -; \
   fi; \
@@ -42,35 +50,53 @@ RUN set -eux; \
   if [ -z "${BIN}" ]; then echo "Could not find extracted binary for ${PREFIX}" >&2; exit 1; fi; \
   mv "${BIN}" /out/masterdnsvpn; \
   chmod 0755 /out/masterdnsvpn; \
-  find /out -type f ! -path /out/masterdnsvpn -delete
+  readelf -l /out/masterdnsvpn > /tmp/program-headers; \
+  readelf -d /out/masterdnsvpn > /tmp/dynamic-section; \
+  if grep -q INTERP /tmp/program-headers || grep -q NEEDED /tmp/dynamic-section; then \
+  echo "The release binary must be statically linked for the scratch runtime." >&2; exit 1; \
+  fi; \
+  test -s /out/server_config.toml; \
+  mv /out/server_config.toml /out/server_config.toml.simple; \
+  find /out -type f ! -path /out/masterdnsvpn ! -path /out/server_config.toml.simple -delete
 
-FROM debian:bookworm-slim
+FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS entrypoint-builder
+
+ARG TARGETARCH
+ARG TARGETVARIANT
+
+WORKDIR /src
+# Use the repository root as context to share the launcher's pinned TOML dependency.
+COPY go.mod go.sum ./
+RUN go mod download github.com/BurntSushi/toml
+COPY docker/entrypoint/ ./docker/entrypoint/
+
+RUN mkdir -p /out && \
+  CGO_ENABLED=0 GOOS=linux GOARCH="${TARGETARCH}" GOARM="${TARGETVARIANT#v}" \
+  GOMIPS64=softfloat \
+  go build -trimpath -ldflags="-s -w" -o /out/docker-entrypoint ./docker/entrypoint && \
+  readelf -l /out/docker-entrypoint > /tmp/program-headers && \
+  readelf -d /out/docker-entrypoint > /tmp/dynamic-section && \
+  if grep -q INTERP /tmp/program-headers || grep -q NEEDED /tmp/dynamic-section; then \
+  echo "The container entrypoint must be statically linked for the scratch runtime." >&2; exit 1; \
+  fi
+
+FROM scratch
 
 LABEL org.opencontainers.image.source=https://github.com/masterking32/MasterDnsVPN
 
-ENV DEBIAN_FRONTEND=noninteractive \
-  APP_DIR=/opt/masterdnsvpn \
+ENV APP_DIR=/opt/masterdnsvpn \
   DATA_DIR=/data \
-  CONFIG_FILE=server_config.toml \
-  KEY_FILE=encrypt_key.txt
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-  bash \
-  ca-certificates \
-  curl \
-  tini \
-  && rm -rf /var/lib/apt/lists/* \
-  && mkdir -p /opt/masterdnsvpn /data
+  CONFIG_FILE=server_config.toml
 
 COPY --from=downloader /out/masterdnsvpn /opt/masterdnsvpn/masterdnsvpn
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-
-RUN chmod 0755 /opt/masterdnsvpn/masterdnsvpn /usr/local/bin/docker-entrypoint.sh
+COPY --from=downloader /out/server_config.toml.simple /usr/share/masterdnsvpn/server_config.toml.simple
+COPY --from=downloader /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=entrypoint-builder /out/docker-entrypoint /usr/local/bin/docker-entrypoint
 
 WORKDIR /opt/masterdnsvpn
 
 EXPOSE 53/tcp 53/udp
 VOLUME ["/data"]
 
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint"]
 CMD ["-nowait"]
