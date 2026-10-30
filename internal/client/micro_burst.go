@@ -91,6 +91,19 @@ func (c *Client) sendPipelinedMicroBurst(
 		return result
 	}
 
+	if ctx != nil {
+		if ctx.Err() != nil {
+			result.RejectReason = "context cancelled"
+			return result
+		}
+		stop := context.AfterFunc(ctx, func() {
+			if transport.conn != nil {
+				_ = transport.conn.Close()
+			}
+		})
+		defer stop()
+	}
+
 	requestLen := max(1+mtuProbeCodeLength+2, uploadMTU)
 	items := make(map[uint32]*burstProbeItem, packetCount)
 	queries := make([][]byte, 0, packetCount)
@@ -199,6 +212,12 @@ func (c *Client) sendPipelinedMicroBurst(
 		lastReceivedAt = now
 	}
 
+	if ctx != nil && ctx.Err() != nil {
+		result.Qualified = false
+		result.RejectReason = "context cancelled"
+		return result
+	}
+
 	// 3. Compute loss, timing, and throughput
 	lostCount := packetCount - result.ReceivedCount
 	result.LossRatio = float64(lostCount) / float64(packetCount)
@@ -290,7 +309,7 @@ func calculateBurstScore(result BurstProbeResult) float64 {
 
 // runMicroBurstQualification runs parallel pipelined bursts across all MTU-tested resolvers,
 // ranks them, and selects the top active candidates.
-func (c *Client) runMicroBurstQualification(ctx context.Context, validConns []Connection) ([]Connection, []QualifiedResolver) {
+func (c *Client) runMicroBurstQualification(ctx context.Context, validConns []Connection, maxActiveLimit ...int) ([]Connection, []QualifiedResolver) {
 	if len(validConns) == 0 {
 		return nil, nil
 	}
@@ -398,7 +417,16 @@ func (c *Client) runMicroBurstQualification(ctx context.Context, validConns []Co
 
 	// Apply MaxActiveResolvers limit
 	maxActive := c.cfg.MaxActiveResolvers
-	if maxActive > 0 && len(qualifiedConns) > maxActive {
+	if len(maxActiveLimit) > 0 {
+		limit := maxActiveLimit[0]
+		if limit < 0 {
+			limit = 0
+		}
+		if maxActive <= 0 || limit < maxActive {
+			maxActive = limit
+		}
+	}
+	if maxActive >= 0 && len(qualifiedConns) > maxActive {
 		qualifiedConns = qualifiedConns[:maxActive]
 	}
 
@@ -410,22 +438,17 @@ func (c *Client) runMicroBurstQualification(ctx context.Context, validConns []Co
 
 	for _, r := range results {
 		isActive := activeMap[r.Connection.Key]
+		if r.BurstResult.Qualified {
+			c.balancer.SeedBurstStats(
+				r.Connection.Key,
+				r.BurstResult.SentCount,
+				r.BurstResult.ReceivedCount,
+				r.BurstResult.AverageRTT,
+			)
+		}
 		c.balancer.SetConnectionValidity(r.Connection.Key, isActive)
-		if isActive {
-			c.balancer.SeedBurstStats(
-				r.Connection.Key,
-				r.BurstResult.SentCount,
-				r.BurstResult.ReceivedCount,
-				r.BurstResult.AverageRTT,
-			)
-		} else if r.BurstResult.Qualified {
+		if !isActive && r.BurstResult.Qualified {
 			c.balancer.SetConnectionStandbyEligible(r.Connection.Key, true)
-			c.balancer.SeedBurstStats(
-				r.Connection.Key,
-				r.BurstResult.SentCount,
-				r.BurstResult.ReceivedCount,
-				r.BurstResult.AverageRTT,
-			)
 		}
 	}
 

@@ -290,12 +290,15 @@ func (b *Balancer) SetConnectionValidityWithLog(key string, valid bool, logReact
 		if !valid && b.connections[idx].StandbyEligible {
 			b.connections[idx].StandbyEligible = false
 			b.clearPreferredResolverReferencesLocked(key)
+		} else if valid && b.connections[idx].StandbyEligible {
+			b.connections[idx].StandbyEligible = false
 		}
 		return true
 	}
 
 	b.connections[idx].IsValid = valid
 	if valid {
+		b.connections[idx].StandbyEligible = false
 		if stats := b.stats[idx]; stats != nil {
 			stats.resetWindow()
 		}
@@ -309,13 +312,16 @@ func (b *Balancer) SetConnectionValidityWithLog(key string, valid bool, logReact
 }
 
 // SetConnectionStandbyEligible explicitly sets whether an inactive resolver is eligible
-// for standby promotion during pool optimization.
+// for standby promotion during pool optimization. Active connections cannot be marked standby eligible.
 func (b *Balancer) SetConnectionStandbyEligible(key string, eligible bool) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	idx, ok := b.indexByKey[key]
 	if !ok || idx < 0 || idx >= len(b.connections) {
+		return false
+	}
+	if b.connections[idx].IsValid {
 		return false
 	}
 	b.connections[idx].StandbyEligible = eligible
