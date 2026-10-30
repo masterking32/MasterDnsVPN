@@ -1886,21 +1886,32 @@ func (b *Balancer) pickFromPoolLocked(pool []Connection, pick balancerPoolPick) 
 }
 
 func (b *Balancer) limitConnectionPoolLocked(pool []Connection, count int, pick balancerPoolPick) []Connection {
-	if len(pool) == 0 {
+	if len(pool) == 0 || count <= 0 {
 		return nil
 	}
 	if count >= len(pool) {
 		return pool
 	}
-	if pick == poolPickRoundRobin {
+	switch pick {
+	case poolPickRoundRobin:
 		start := roundRobinStartIndex(b.rrCounter.Add(uint64(count))-uint64(count), len(pool))
 		ordered := make([]Connection, len(pool))
 		for i := range pool {
 			ordered[i] = pool[(start+i)%len(pool)]
 		}
 		return ordered[:count]
+	default:
+		if count == 1 {
+			idx := int(b.nextRandom() % uint64(len(pool)))
+			pool[0] = pool[idx]
+			return pool[:1:1]
+		}
+		for i := 0; i < count; i++ {
+			j := i + int(b.nextRandom()%uint64(len(pool)-i))
+			pool[i], pool[j] = pool[j], pool[i]
+		}
+		return pool[:count:count]
 	}
-	return pool[:count]
 }
 
 func (b *Balancer) lossThenLatencyCandidatesLocked(excludeKey string) []Connection {
