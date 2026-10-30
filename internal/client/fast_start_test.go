@@ -484,6 +484,7 @@ func TestRunInitialMTUTests_BurstRetryScanning(t *testing.T) {
 }
 
 func TestAdversarial_RunInitialMTUTests_Replenishment_2InitialBurstFailures(t *testing.T) {
+	t.Parallel()
 	domain := "v.example.com"
 
 	// 5 mock resolvers:
