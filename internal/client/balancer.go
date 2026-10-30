@@ -1805,7 +1805,7 @@ func (b *Balancer) hasLossSignalLocked() bool {
 			continue
 		}
 		sent, _, _, _, _ := stats.snapshot()
-		if sent >= 5 {
+		if sent > 0 {
 			return true
 		}
 	}
@@ -1819,7 +1819,7 @@ func (b *Balancer) hasLatencySignalLocked() bool {
 			continue
 		}
 		_, _, _, _, count := stats.snapshot()
-		if count >= 5 {
+		if count > 0 {
 			return true
 		}
 	}
@@ -1886,21 +1886,32 @@ func (b *Balancer) pickFromPoolLocked(pool []Connection, pick balancerPoolPick) 
 }
 
 func (b *Balancer) limitConnectionPoolLocked(pool []Connection, count int, pick balancerPoolPick) []Connection {
-	if len(pool) == 0 {
+	if len(pool) == 0 || count <= 0 {
 		return nil
 	}
 	if count >= len(pool) {
 		return pool
 	}
-	if pick == poolPickRoundRobin {
+	switch pick {
+	case poolPickRoundRobin:
 		start := roundRobinStartIndex(b.rrCounter.Add(uint64(count))-uint64(count), len(pool))
 		ordered := make([]Connection, len(pool))
 		for i := range pool {
 			ordered[i] = pool[(start+i)%len(pool)]
 		}
 		return ordered[:count]
+	default:
+		if count == 1 {
+			idx := int(b.nextRandom() % uint64(len(pool)))
+			pool[0] = pool[idx]
+			return pool[:1:1]
+		}
+		for i := 0; i < count; i++ {
+			j := i + int(b.nextRandom()%uint64(len(pool)-i))
+			pool[i], pool[j] = pool[j], pool[i]
+		}
+		return pool[:count:count]
 	}
-	return pool[:count]
 }
 
 func (b *Balancer) lossThenLatencyCandidatesLocked(excludeKey string) []Connection {
@@ -1908,6 +1919,7 @@ func (b *Balancer) lossThenLatencyCandidatesLocked(excludeKey string) []Connecti
 		idx     int
 		loss    uint64
 		latency uint64
+		hasRTT  bool
 	}
 
 	if !b.hasHybridSignalLocked() || len(b.activeIDs) == 0 {
@@ -1922,10 +1934,20 @@ func (b *Balancer) lossThenLatencyCandidatesLocked(excludeKey string) []Connecti
 		}
 		loss := b.lossScoreLocked(idx)
 		latency := b.hybridLatencyPenaltyLocked(idx)
+		hasRTT := false
+		if idx >= 0 && idx < len(b.stats) && b.stats[idx] != nil {
+			_, _, _, _, count := b.stats[idx].snapshot()
+			hasRTT = count > 0
+		}
 		if loss < bestLoss {
 			bestLoss = loss
 		}
-		candidates = append(candidates, candidate{idx: idx, loss: loss, latency: latency})
+		candidates = append(candidates, candidate{
+			idx:     idx,
+			loss:    loss,
+			latency: latency,
+			hasRTT:  hasRTT,
+		})
 	}
 	if len(candidates) == 0 {
 		return nil
@@ -1944,7 +1966,7 @@ func (b *Balancer) lossThenLatencyCandidatesLocked(excludeKey string) []Connecti
 			continue
 		}
 		lossShortlist = append(lossShortlist, cand)
-		if cand.latency < bestLatency {
+		if cand.hasRTT && cand.latency < bestLatency {
 			bestLatency = cand.latency
 		}
 	}
@@ -1952,15 +1974,22 @@ func (b *Balancer) lossThenLatencyCandidatesLocked(excludeKey string) []Connecti
 		return nil
 	}
 
+	if bestLatency == ^uint64(0) {
+		selected := make([]Connection, 0, len(lossShortlist))
+		for _, cand := range lossShortlist {
+			selected = append(selected, b.connections[cand.idx])
+		}
+		return selected
+	}
+
 	latencyTolerance := latencyToleranceForTier(bestLatency)
 	latencyCutoff := bestLatency + latencyTolerance
 
 	selected := make([]Connection, 0, len(lossShortlist))
 	for _, cand := range lossShortlist {
-		if cand.latency > latencyCutoff {
-			continue
+		if !cand.hasRTT || cand.latency <= latencyCutoff {
+			selected = append(selected, b.connections[cand.idx])
 		}
-		selected = append(selected, b.connections[cand.idx])
 	}
 	if len(selected) > 0 {
 		return selected
@@ -2032,13 +2061,10 @@ func (b *Balancer) leastLossTopTierCandidatesLocked(excludeKey string) []Connect
 
 func (b *Balancer) lossScoreLocked(idx int) uint64 {
 	if idx < 0 || idx >= len(b.stats) || b.stats[idx] == nil {
-		return 200 // Use a more neutral default for unknown
+		return 0
 	}
 	sent, _, lost, _, _ := b.stats[idx].snapshot()
-	if sent < 5 {
-		return 200 // Initial probation
-	}
-	if lost == 0 {
+	if sent == 0 || lost == 0 {
 		return 0
 	}
 	return (lost * 1000) / sent
@@ -2049,7 +2075,7 @@ func (b *Balancer) latencyScoreLocked(idx int) uint64 {
 		return 999000
 	}
 	_, _, _, sum, count := b.stats[idx].snapshot()
-	if count < 5 {
+	if count == 0 {
 		return 999000
 	}
 	return sum / count
