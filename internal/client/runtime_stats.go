@@ -241,8 +241,8 @@ func (c *Client) runRuntimeStatsLoop(ctx context.Context) {
 				}
 			}
 
-			if c.cfg.RuntimeStatsIntervalSeconds > 0 {
-				currentSentTotal := c.calculateTotalSentPackets()
+			if c.cfg.RuntimeStatsIntervalSeconds > 0 && c.balancer != nil {
+				currentSentTotal := c.balancer.TotalPacketsSent()
 				if currentSentTotal > lastSentTotal {
 					lastSentTotal = currentSentTotal
 					if c.log != nil && c.log.Enabled(logger.LevelInfo) {

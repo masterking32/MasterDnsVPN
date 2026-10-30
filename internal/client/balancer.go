@@ -84,6 +84,7 @@ type balancerPendingShard struct {
 type Balancer struct {
 	strategy         int
 	rrCounter        atomic.Uint64
+	totalPacketsSent atomic.Uint64
 	healthRRCounter  atomic.Uint64
 	rngState         atomic.Uint64
 	nextPendingSweep atomic.Int64
@@ -566,10 +567,22 @@ func (b *Balancer) ApplyMTUProbeResult(key string, uploadBytes int, uploadChars 
 }
 
 func (b *Balancer) ReportSend(serverKey string) {
+	if b == nil {
+		return
+	}
+	b.totalPacketsSent.Add(1)
 	if stats := b.statsForKey(serverKey); stats != nil {
 		stats.sent.Add(1)
 		stats.applyHalfLife()
 	}
+}
+
+// TotalPacketsSent returns the monotonic total number of tunnel packets sent through the balancer.
+func (b *Balancer) TotalPacketsSent() uint64 {
+	if b == nil {
+		return 0
+	}
+	return b.totalPacketsSent.Load()
 }
 
 func (b *Balancer) ReportSuccess(serverKey string, rtt time.Duration) {

@@ -371,6 +371,7 @@ func (c *Client) RunInitialMTUTests(ctx context.Context) error {
 
 	counters := &mtuScanCounters{}
 	testedKeys := make(map[string]bool, len(scanConnections))
+	qualifiedKeys := make(map[string]struct{})
 	qualifiedEndpoints := make(map[string]struct{}, targetValidResolvers)
 	disqualifiedEndpoints := make(map[string]struct{})
 
@@ -442,7 +443,7 @@ func (c *Client) RunInitialMTUTests(ctx context.Context) error {
 					break
 				}
 				testedKeys[conn.Key] = true
-				if acceptedConn, ok := c.balancer.GetConnectionByKey(conn.Key); ok && acceptedConn.IsValid {
+				if acceptedConn, ok := c.balancer.GetConnectionByKey(conn.Key); ok && (acceptedConn.IsValid || acceptedConn.StandbyEligible) {
 					recordBatchValid(acceptedConn)
 				}
 			}
@@ -466,7 +467,7 @@ func (c *Client) RunInitialMTUTests(ctx context.Context) error {
 						testedKeys[conn.Key] = true
 						testedMu.Unlock()
 
-						if acceptedConn, ok := c.balancer.GetConnectionByKey(conn.Key); ok && acceptedConn.IsValid {
+						if acceptedConn, ok := c.balancer.GetConnectionByKey(conn.Key); ok && (acceptedConn.IsValid || acceptedConn.StandbyEligible) {
 							recordBatchValid(acceptedConn)
 						}
 					}
@@ -544,6 +545,7 @@ func (c *Client) RunInitialMTUTests(ctx context.Context) error {
 		qualifiedMap := make(map[string]bool, len(burstQualified))
 		for _, q := range burstQualified {
 			qualifiedMap[q.Key] = true
+			qualifiedKeys[q.Key] = struct{}{}
 			qualifiedEndpoints[q.ResolverLabel] = struct{}{}
 		}
 		for _, r := range results {
@@ -556,7 +558,7 @@ func (c *Client) RunInitialMTUTests(ctx context.Context) error {
 	if fastStart {
 		if c.cfg.MicroBurstTestEnabled {
 			for _, conn := range c.balancer.ActiveConnections() {
-				if _, qual := qualifiedEndpoints[conn.ResolverLabel]; !qual {
+				if _, qual := qualifiedKeys[conn.Key]; !qual {
 					c.balancer.SetConnectionValidity(conn.Key, false)
 					c.balancer.SetConnectionStandbyEligible(conn.Key, false)
 				}
@@ -570,7 +572,7 @@ func (c *Client) RunInitialMTUTests(ctx context.Context) error {
 			keptEndpoints := make(map[string]bool, targetValidResolvers)
 			for _, conn := range c.balancer.ActiveConnections() {
 				if c.cfg.MicroBurstTestEnabled {
-					if _, qual := qualifiedEndpoints[conn.ResolverLabel]; !qual {
+					if _, qual := qualifiedKeys[conn.Key]; !qual {
 						c.balancer.SetConnectionValidity(conn.Key, false)
 						c.balancer.SetConnectionStandbyEligible(conn.Key, false)
 						continue
@@ -840,6 +842,9 @@ func (c *Client) recheckInactiveResolver(ctx context.Context, conn Connection) {
 	if c == nil || c.balancer == nil || conn.Key == "" {
 		return
 	}
+
+	// Revoke standby eligibility before probing so failed/degraded candidates cannot be promoted
+	c.balancer.SetConnectionStandbyEligible(conn.Key, false)
 
 	transport, err := newUDPQueryTransport(conn.ResolverLabel)
 	if err != nil {

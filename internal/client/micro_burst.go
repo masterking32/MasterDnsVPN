@@ -132,33 +132,44 @@ func (c *Client) sendPipelinedMicroBurst(
 		codes = append(codes, code)
 	}
 
-	// 1. Send all queries pipelined with slight pacing to prevent local socket overflow
-	firstSentAt := time.Now()
-	for i, query := range queries {
-		if ctx.Err() != nil {
-			result.RejectReason = "context cancelled"
-			return result
-		}
-
-		code := codes[i]
-		if item := items[code]; item != nil {
-			item.sentAt = time.Now()
-		}
-
-		if _, err := transport.conn.Write(query); err != nil {
-			result.RejectReason = fmt.Sprintf("write error: %v", err)
-			return result
-		}
-
-		if i < len(queries)-1 {
-			time.Sleep(2 * time.Millisecond)
-		}
-	}
-
-	// 2. Read incoming responses until all received or timeout
+	// 1. Send queries paced while concurrently receiving responses
 	_ = transport.conn.SetReadDeadline(time.Now().Add(timeout))
 	defer func() {
 		_ = transport.conn.SetReadDeadline(time.Time{})
+	}()
+
+	var itemMu sync.Mutex
+	firstSentAt := time.Now()
+	senderDone := make(chan struct{})
+
+	go func() {
+		defer close(senderDone)
+		for i, query := range queries {
+			if ctx != nil && ctx.Err() != nil {
+				return
+			}
+
+			code := codes[i]
+			now := time.Now()
+			itemMu.Lock()
+			if item := items[code]; item != nil {
+				item.sentAt = now
+			}
+			itemMu.Unlock()
+
+			if _, err := transport.conn.Write(query); err != nil {
+				_ = transport.conn.Close()
+				return
+			}
+
+			if i < len(queries)-1 {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(2 * time.Millisecond):
+				}
+			}
+		}
 	}()
 
 	readBuf := c.getRuntimeUDPBuffer()
@@ -170,7 +181,7 @@ func (c *Client) sendPipelinedMicroBurst(
 	var maxRTT time.Duration
 
 	for result.ReceivedCount < packetCount {
-		if ctx.Err() != nil {
+		if ctx != nil && ctx.Err() != nil {
 			break
 		}
 
@@ -186,8 +197,10 @@ func (c *Client) sendPipelinedMicroBurst(
 		}
 
 		respCode := binary.BigEndian.Uint32(packet.Payload[:mtuProbeCodeLength])
+		itemMu.Lock()
 		item, exists := items[respCode]
 		if !exists || item.received {
+			itemMu.Unlock()
 			continue
 		}
 
@@ -199,18 +212,23 @@ func (c *Client) sendPipelinedMicroBurst(
 			item.rtt = item.receivedAt.Sub(firstSentAt)
 		}
 		item.bytesRx = len(packet.Payload)
+		rtt := item.rtt
+		bytesRx := item.bytesRx
+		itemMu.Unlock()
 
 		result.ReceivedCount++
-		result.TotalBytesRx += item.bytesRx
-		sumRTT += item.rtt
-		if item.rtt < minRTT {
-			minRTT = item.rtt
+		result.TotalBytesRx += bytesRx
+		sumRTT += rtt
+		if rtt < minRTT {
+			minRTT = rtt
 		}
-		if item.rtt > maxRTT {
-			maxRTT = item.rtt
+		if rtt > maxRTT {
+			maxRTT = rtt
 		}
 		lastReceivedAt = now
 	}
+
+	<-senderDone
 
 	if ctx != nil && ctx.Err() != nil {
 		result.Qualified = false
@@ -436,8 +454,8 @@ func (c *Client) runMicroBurstQualification(ctx context.Context, validConns []Co
 		activeMap[conn.Key] = true
 	}
 
+	// Phase 1: Seed burst stats for all qualified candidates
 	for _, r := range results {
-		isActive := activeMap[r.Connection.Key]
 		if r.BurstResult.Qualified {
 			c.balancer.SeedBurstStats(
 				r.Connection.Key,
@@ -446,8 +464,23 @@ func (c *Client) runMicroBurstQualification(ctx context.Context, validConns []Co
 				r.BurstResult.AverageRTT,
 			)
 		}
-		c.balancer.SetConnectionValidity(r.Connection.Key, isActive)
-		if !isActive && r.BurstResult.Qualified {
+	}
+
+	// Phase 2: Deactivate unselected candidates first to clear active pool capacity
+	for _, r := range results {
+		if !activeMap[r.Connection.Key] {
+			c.balancer.SetConnectionValidity(r.Connection.Key, false)
+		}
+	}
+
+	// Phase 3: Admit qualified winners into active pool in ranked order
+	for _, conn := range qualifiedConns {
+		c.balancer.SetConnectionValidity(conn.Key, true)
+	}
+
+	// Phase 4: Mark remaining qualified candidates as standby eligible
+	for _, r := range results {
+		if !activeMap[r.Connection.Key] && r.BurstResult.Qualified {
 			c.balancer.SetConnectionStandbyEligible(r.Connection.Key, true)
 		}
 	}

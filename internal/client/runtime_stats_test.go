@@ -98,6 +98,16 @@ func TestGetStatsSnapshotAndDump(t *testing.T) {
 	if totalSent != 170 { // 100 + 50 + 20
 		t.Fatalf("expected 170 total sent, got %d", totalSent)
 	}
+
+	// Verify TotalPacketsSent monotonic tracking
+	if c.balancer.TotalPacketsSent() != 0 {
+		t.Fatalf("expected 0 initial TotalPacketsSent, got %d", c.balancer.TotalPacketsSent())
+	}
+	c.balancer.ReportSend("1.1.1.1|53|example.com")
+	c.balancer.ReportSend("8.8.8.8|53|example.com")
+	if c.balancer.TotalPacketsSent() != 2 {
+		t.Fatalf("expected 2 TotalPacketsSent, got %d", c.balancer.TotalPacketsSent())
+	}
 }
 
 func TestLogResolverReactivatedFormatting(t *testing.T) {

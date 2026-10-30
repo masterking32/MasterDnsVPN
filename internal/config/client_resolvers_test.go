@@ -311,3 +311,32 @@ func TestResolversFileReadErrorPreservation(t *testing.T) {
 	}
 }
 
+
+func TestWriteRankedResolversFile_UnterminatedBlockReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "unterminated.txt")
+
+	// Missing footer marker
+	content := AutoRankedHeaderMarker + "\n# Some ranked resolver\n8.8.8.8\n# User custom resolver\n1.2.3.4\n"
+	if err := os.WriteFile(filePath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	ranked := []ResolverAddress{{IP: "9.9.9.9", Port: 53}}
+	err := UpdateResolversFileWithRanked(filePath, ranked)
+	if err == nil {
+		t.Fatal("expected error on unterminated managed block, got nil")
+	}
+	if !strings.Contains(err.Error(), "unterminated managed block") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+
+	// Verify original file is unchanged
+	afterData, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("ReadFile failed: %v", err)
+	}
+	if string(afterData) != content {
+		t.Fatalf("file content was modified despite error: got=%s want=%s", string(afterData), content)
+	}
+}
