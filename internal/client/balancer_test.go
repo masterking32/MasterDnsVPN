@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -922,3 +923,235 @@ func TestBalancerOptimizeActivePool_SessionMTUVerification(t *testing.T) {
 		t.Fatalf("expected active count to remain 2, got=%d", b.ActiveCount())
 	}
 }
+func TestBalancerLossThenLatency_SeededReactivationExploration(t *testing.T) {
+	b := NewBalancer(BalancingLossThenLatency, nil)
+	connections := []*Connection{
+		{Key: "fast-established", IsValid: true},
+		{Key: "reactivated-seeded", IsValid: true},
+	}
+	b.SetConnections(connections)
+	_ = b.SetConnectionValidity("fast-established", true)
+	_ = b.SetConnectionValidity("reactivated-seeded", true)
+
+	// "fast-established" has 10 packets, 0 loss, 40ms latency
+	for i := 0; i < 10; i++ {
+		b.ReportSend("fast-established")
+		b.ReportSuccess("fast-established", 40*time.Millisecond)
+	}
+
+	// "reactivated-seeded" has conservative stats seeded (sent=10, acked=8, lost=0, rttCount=0)
+	b.SeedConservativeStats("reactivated-seeded")
+
+	// Verify that the candidate pool includes both resolvers so zero-RTT candidate gets explored
+	pool := b.GetUniqueConnections(2)
+	if len(pool) != 2 {
+		t.Fatalf("expected both resolvers in candidate pool for exploration, got %d", len(pool))
+	}
+
+	hasReactivated := false
+	for i := 0; i < 50; i++ {
+		best, ok := b.GetBestConnection()
+		if !ok {
+			t.Fatal("expected a valid connection")
+		}
+		if best.Key == "reactivated-seeded" {
+			hasReactivated = true
+			break
+		}
+	}
+	if !hasReactivated {
+		t.Fatal("expected zero-RTT reactivated resolver to be selected for exploration")
+	}
+
+	// Once explored and reporting 20ms RTT, it should consistently win over 40ms established
+	b.ReportSend("reactivated-seeded")
+	b.ReportSuccess("reactivated-seeded", 20*time.Millisecond)
+
+	best, ok := b.GetBestConnection()
+	if !ok {
+		t.Fatal("expected a valid connection")
+	}
+	if best.Key != "reactivated-seeded" {
+		t.Fatalf("expected measured 20ms reactivated resolver to win over 40ms, got %q", best.Key)
+	}
+}
+
+func TestBalancerSelectTargets_LossThenLatencyExplorationDistribution(t *testing.T) {
+	b := NewBalancer(BalancingLossThenLatency, nil)
+	connections := []*Connection{
+		{Key: "fast-established", IsValid: true},
+		{Key: "reactivated-seeded", IsValid: true},
+	}
+	b.SetConnections(connections)
+	_ = b.SetConnectionValidity("fast-established", true)
+	_ = b.SetConnectionValidity("reactivated-seeded", true)
+
+	// "fast-established" has 10 packets, 0 loss, 40ms latency
+	for i := 0; i < 10; i++ {
+		b.ReportSend("fast-established")
+		b.ReportSuccess("fast-established", 40*time.Millisecond)
+	}
+
+	// "reactivated-seeded" has conservative stats seeded (sent=10, acked=8, lost=0, rttCount=0)
+	b.SeedConservativeStats("reactivated-seeded")
+
+	counts := make(map[string]int)
+	totalCalls := 100
+	for i := 0; i < totalCalls; i++ {
+		targets, err := b.SelectTargets(uint8(Enums.PACKET_STREAM_DATA), 1, 1)
+		if err != nil {
+			t.Fatalf("unexpected error selecting targets: %v", err)
+		}
+		if len(targets) != 1 {
+			t.Fatalf("expected 1 target, got %d", len(targets))
+		}
+		counts[targets[0].Key]++
+	}
+
+	if counts["reactivated-seeded"] == 0 {
+		t.Fatalf("expected reactivated-seeded to receive calls for zero-RTT exploration via SelectTargets(..., 1), got 0/%d", totalCalls)
+	}
+	if counts["fast-established"] == 0 {
+		t.Fatalf("expected fast-established to receive calls, got 0/%d", totalCalls)
+	}
+
+	// Both candidates must receive significant traffic share (>15% each across eligible candidates)
+	minRequired := int(float64(totalCalls) * 0.15)
+	if counts["reactivated-seeded"] < minRequired || counts["fast-established"] < minRequired {
+		t.Fatalf("unbalanced distribution in SelectTargets(..., 1): fast-established=%d, reactivated-seeded=%d (expected each >= %d)",
+			counts["fast-established"], counts["reactivated-seeded"], minRequired)
+	}
+}
+
+func TestBalancerSelectTargets_LossThenLatencyMultipleEligibleCandidatesDistribution(t *testing.T) {
+	b := NewBalancer(BalancingLossThenLatency, nil)
+	connections := []*Connection{
+		{Key: "cand-1", IsValid: true},
+		{Key: "cand-2", IsValid: true},
+		{Key: "cand-3", IsValid: true},
+	}
+	b.SetConnections(connections)
+	for _, c := range connections {
+		_ = b.SetConnectionValidity(c.Key, true)
+	}
+
+	// cand-1: 0 loss, 40ms latency (best latency)
+	for i := 0; i < 10; i++ {
+		b.ReportSend("cand-1")
+		b.ReportSuccess("cand-1", 40*time.Millisecond)
+	}
+	// cand-2: 0 loss, 46ms latency (tolerance for 40ms is 40/4=10ms -> cutoff 50ms; 46 <= 50)
+	for i := 0; i < 10; i++ {
+		b.ReportSend("cand-2")
+		b.ReportSuccess("cand-2", 46*time.Millisecond)
+	}
+	// cand-3: seeded conservative stats (0 loss, 0 RTT, zero-RTT exploration candidate)
+	b.SeedConservativeStats("cand-3")
+
+	counts := make(map[string]int)
+	totalCalls := 300
+	for i := 0; i < totalCalls; i++ {
+		targets, err := b.SelectTargets(uint8(Enums.PACKET_STREAM_DATA), 1, 1)
+		if err != nil {
+			t.Fatalf("unexpected error selecting targets: %v", err)
+		}
+		if len(targets) != 1 {
+			t.Fatalf("expected 1 target, got %d", len(targets))
+		}
+		counts[targets[0].Key]++
+	}
+
+	// Assert balanced distribution (>15% each across all 3 eligible candidates)
+	minRequired := int(float64(totalCalls) * 0.15) // 45 calls out of 300 (expected ~100)
+	for _, c := range connections {
+		if counts[c.Key] < minRequired {
+			t.Fatalf("unbalanced distribution for %q in SelectTargets(..., 1): got %d/%d (%.1f%%), expected >= %d (15%%)",
+				c.Key, counts[c.Key], totalCalls, float64(counts[c.Key])/float64(totalCalls)*100, minRequired)
+		}
+	}
+}
+
+func TestBalancerSelectTargets_LeastLossTopRandomMultiTargetSubsetSampling(t *testing.T) {
+	b := NewBalancer(BalancingLeastLossTopRandom, nil)
+	connections := make([]*Connection, 32)
+	for i := 0; i < 32; i++ {
+		connections[i] = &Connection{Key: fmt.Sprintf("c%d", i+1), IsValid: true}
+	}
+	b.SetConnections(connections)
+	for _, c := range connections {
+		_ = b.SetConnectionValidity(c.Key, true)
+		for i := 0; i < 10; i++ {
+			b.ReportSend(c.Key)
+			b.ReportSuccess(c.Key, 20*time.Millisecond)
+		}
+	}
+
+	// Repeatedly request 2 targets from pool of 4 (top 10% of 32 candidates = 4)
+	seenFirst := make(map[string]bool)
+	seenPairs := make(map[string]bool)
+	for i := 0; i < 100; i++ {
+		targets, err := b.SelectTargets(uint8(Enums.PACKET_PING), 0, 2)
+		if err != nil || len(targets) != 2 {
+			t.Fatalf("expected 2 targets, got %d, err=%v", len(targets), err)
+		}
+		if targets[0].Key == targets[1].Key {
+			t.Fatalf("expected unique targets in sample, got duplicates: %v", targets)
+		}
+		seenFirst[targets[0].Key] = true
+		seenPairs[targets[0].Key+":"+targets[1].Key] = true
+	}
+
+	if len(seenFirst) < 2 {
+		t.Fatalf("expected random subset sampling to vary first selected target, got %v", seenFirst)
+	}
+	if len(seenPairs) < 3 {
+		t.Fatalf("expected multiple distinct target pairs selected, got %d pairs", len(seenPairs))
+	}
+}
+
+func TestBalancerLimitConnectionPool_EdgeCases(t *testing.T) {
+	b := NewBalancer(BalancingLossThenLatency, nil)
+
+	// 1. Empty pool returns nil
+	if res := b.limitConnectionPoolLocked(nil, 1, poolPickRandom); res != nil {
+		t.Fatalf("expected nil for empty pool, got %v", res)
+	}
+
+	pool := []Connection{
+		{Key: "c1"},
+		{Key: "c2"},
+		{Key: "c3"},
+	}
+
+	// 2. count <= 0 returns nil
+	if res := b.limitConnectionPoolLocked(pool, 0, poolPickRandom); res != nil {
+		t.Fatalf("expected nil for count=0, got %v", res)
+	}
+	if res := b.limitConnectionPoolLocked(pool, -1, poolPickRandom); res != nil {
+		t.Fatalf("expected nil for count=-1, got %v", res)
+	}
+
+	// 3. count >= len(pool) returns pool unmodified
+	if res := b.limitConnectionPoolLocked(pool, 3, poolPickRandom); len(res) != 3 {
+		t.Fatalf("expected all 3 conns when count=3, got %d", len(res))
+	}
+	if res := b.limitConnectionPoolLocked(pool, 5, poolPickRandom); len(res) != 3 {
+		t.Fatalf("expected all 3 conns when count=5, got %d", len(res))
+	}
+
+	// 4. count == 1 limits capacity to 1
+	pCopy := append([]Connection(nil), pool...)
+	res1 := b.limitConnectionPoolLocked(pCopy, 1, poolPickRandom)
+	if len(res1) != 1 || cap(res1) != 1 {
+		t.Fatalf("expected len=1 and cap=1 for count=1, got len=%d cap=%d", len(res1), cap(res1))
+	}
+
+	// 5. count == 2 limits capacity to 2
+	pCopy2 := append([]Connection(nil), pool...)
+	res2 := b.limitConnectionPoolLocked(pCopy2, 2, poolPickRandom)
+	if len(res2) != 2 || cap(res2) != 2 {
+		t.Fatalf("expected len=2 and cap=2 for count=2, got len=%d cap=%d", len(res2), cap(res2))
+	}
+}
+
+
