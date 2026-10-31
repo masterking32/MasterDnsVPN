@@ -854,9 +854,13 @@ func (c *Client) recheckInactiveResolver(ctx context.Context, conn Connection) {
 
 	ok, resolveTime := c.recheckResolverUploadMTU(ctx, conn, transport)
 	if !ok {
+		c.balancer.SetConnectionValidity(conn.Key, false)
+		c.balancer.SetConnectionStandbyEligible(conn.Key, false)
 		return
 	}
 	if !c.recheckResolverDownloadMTU(ctx, conn, transport) {
+		c.balancer.SetConnectionValidity(conn.Key, false)
+		c.balancer.SetConnectionStandbyEligible(conn.Key, false)
 		return
 	}
 
@@ -891,6 +895,8 @@ func (c *Client) recheckInactiveResolver(ctx context.Context, conn Connection) {
 			probeTimeout,
 		)
 		if !burstResult.Qualified {
+			c.balancer.SetConnectionValidity(conn.Key, false)
+			c.balancer.SetConnectionStandbyEligible(conn.Key, false)
 			return
 		}
 		c.balancer.SeedBurstStats(conn.Key, burstResult.SentCount, burstResult.ReceivedCount, burstResult.AverageRTT)

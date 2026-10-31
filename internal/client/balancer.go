@@ -1162,6 +1162,7 @@ func (b *Balancer) NextInactiveConnectionForHealthCheck(now time.Time, minInterv
 		}
 
 		conn.LastHealthCheckAt = now
+		conn.StandbyEligible = false
 		return *conn, true
 	}
 
