@@ -340,3 +340,132 @@ func TestWriteRankedResolversFile_UnterminatedBlockReturnsError(t *testing.T) {
 		t.Fatalf("file content was modified despite error: got=%s want=%s", string(afterData), content)
 	}
 }
+
+// TestEmpirical_ResolversUnterminatedBlockFailsafe empirically tests detection of
+// unterminated auto-ranked blocks across diverse adversarial corrupted/truncated inputs:
+// 1. Header followed immediately by EOF.
+// 2. Header with user comments and CIDRs, but truncated before footer.
+// 3. Header with partial/malformed footer prefix.
+// 4. Repeated/nested headers without footers.
+// 5. Truncated mid-line within auto block.
+// Verifies:
+// - UpdateResolversFileWithRanked returns an explicit unterminated block error.
+// - The configuration file on disk is strictly preserved byte-for-byte (atomic write safety).
+// - No user configuration or custom resolvers/CIDRs are lost.
+func TestEmpirical_ResolversUnterminatedBlockFailsafe(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+	}{
+		{
+			name:    "HeaderOnlyEOF",
+			content: AutoRankedHeaderMarker + "\n",
+		},
+		{
+			name:    "HeaderWithRankedAndNoFooter",
+			content: AutoRankedHeaderMarker + "\n1.1.1.1\n8.8.8.8\n",
+		},
+		{
+			name: "HeaderWithUserCommentsAndCIDRNoFooter",
+			content: AutoRankedHeaderMarker + "\n" +
+				"# Production DNS fallback\n" +
+				"10.0.0.0/24:5353\n" +
+				"# Important custom route\n" +
+				"192.168.1.1\n",
+		},
+		{
+			name: "PartialFooterMarkerMissingEnd",
+			content: AutoRankedHeaderMarker + "\n" +
+				"8.8.8.8\n" +
+				"# --- END AUTO-RANKED\n",
+		},
+		{
+			name: "PartialFooterMarkerTypo",
+			content: AutoRankedHeaderMarker + "\n" +
+				"8.8.8.8\n" +
+				"# --- END AUTO-RANKED RESOLVER\n",
+		},
+		{
+			name: "MultipleHeadersNoFooter",
+			content: AutoRankedHeaderMarker + "\n" +
+				"1.1.1.1\n" +
+				AutoRankedHeaderMarker + "\n" +
+				"8.8.8.8\n",
+		},
+		{
+			name: "TruncatedMidLineInAutoBlock",
+			content: AutoRankedHeaderMarker + "\n" +
+				"1.1.1.1\n" +
+				"8.8.",
+		},
+	}
+
+	ranked := []ResolverAddress{
+		{IP: "9.9.9.9", Port: 53},
+		{IP: "149.112.112.112", Port: 53},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "resolvers.txt")
+
+			if err := os.WriteFile(path, []byte(tc.content), 0o644); err != nil {
+				t.Fatalf("WriteFile failed: %v", err)
+			}
+
+			err := UpdateResolversFileWithRanked(path, ranked)
+			if err == nil {
+				t.Fatalf("expected error for %s, got nil", tc.name)
+			}
+			if !strings.Contains(err.Error(), "unterminated managed block") {
+				t.Fatalf("expected unterminated block error for %s, got: %v", tc.name, err)
+			}
+
+			// Verify file content is 100% preserved
+			postBytes, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("ReadFile failed: %v", err)
+			}
+			if string(postBytes) != tc.content {
+				t.Fatalf("file content was corrupted or overwritten on error!\nGot: %q\nWant: %q",
+					string(postBytes), tc.content)
+			}
+		})
+	}
+
+	// Control case: properly terminated file must succeed and preserve user lines
+	t.Run("ProperlyTerminatedControl", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "valid.txt")
+		content := "# Header comment\n" +
+			AutoRankedHeaderMarker + "\n" +
+			"1.1.1.1\n" +
+			AutoRankedFooterMarker + "\n" +
+			"# User custom CIDR\n" +
+			"10.0.0.0/24\n"
+
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("WriteFile failed: %v", err)
+		}
+
+		err := UpdateResolversFileWithRanked(path, ranked)
+		if err != nil {
+			t.Fatalf("UpdateResolversFileWithRanked failed on properly terminated file: %v", err)
+		}
+
+		postBytes, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile failed: %v", err)
+		}
+		postStr := string(postBytes)
+
+		if !strings.Contains(postStr, "9.9.9.9") {
+			t.Fatal("expected ranked resolver 9.9.9.9 in updated file")
+		}
+		if !strings.Contains(postStr, "# User custom CIDR") || !strings.Contains(postStr, "10.0.0.0/24") {
+			t.Fatal("user custom configuration was lost!")
+		}
+	})
+}
+
