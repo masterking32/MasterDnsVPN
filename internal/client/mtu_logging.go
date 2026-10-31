@@ -10,6 +10,7 @@
 package client
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -390,4 +391,122 @@ func (c *Client) appendMTUReactiveAddedServerLine(conn *Connection) {
 		return
 	}
 	c.appendMTULogLine(c.mtuReactiveAddedServerLogFormat, conn, "")
+}
+
+func (c *Client) logMicroBurstCompletion(results []QualifiedResolver, activeCount int) {
+	if !c.mtuInfoEnabled() || len(results) == 0 {
+		return
+	}
+
+	c.log.Infof("%s", strings.Repeat("=", 80))
+	c.log.Infof("<green>⚡ Micro-Burst Throughput Qualification Results:</green>")
+	c.log.Infof("%s", strings.Repeat("=", 80))
+	c.log.Infof(
+		"%-4s %-20s %-12s %-10s %-12s %-10s %-16s",
+		"Rank",
+		"Resolver",
+		"Burst Speed",
+		"Loss %",
+		"Avg RTT",
+		"Score",
+		"Status",
+	)
+	c.log.Infof("%s", strings.Repeat("-", 80))
+
+	for i, r := range results {
+		status := "<yellow>STANDBY</yellow>"
+		if i < activeCount {
+			tier, _ := ResolverQualityTier(r.Score)
+			status = fmt.Sprintf("<green>ACTIVE (%s)</green>", tier)
+		} else if !r.BurstResult.Qualified {
+			status = "<red>REJECTED</red>"
+		}
+
+		speedStr := fmt.Sprintf("%.1f KB/s", r.BurstResult.ThroughputKBps)
+		lossStr := fmt.Sprintf("%.1f%%", r.BurstResult.LossRatio*100)
+		rttStr := formatResolverRTT(r.BurstResult.AverageRTT)
+		scoreStr := fmt.Sprintf("%.1f", r.Score)
+
+		c.log.Infof(
+			"%-4d <cyan>%-20s</cyan> <green>%-12s</green> <yellow>%-10s</yellow> <yellow>%-12s</yellow> <magenta>%-10s</magenta> %s",
+			r.Rank,
+			r.Connection.ResolverLabel,
+			speedStr,
+			lossStr,
+			rttStr,
+			scoreStr,
+			status,
+		)
+	}
+
+	c.log.Infof("%s", strings.Repeat("=", 80))
+	c.log.Infof(
+		"<blue>Active high-speed resolvers selected: <cyan>%d</cyan> of <cyan>%d</cyan> tested</blue>",
+		activeCount,
+		len(results),
+	)
+	c.log.Infof("%s", strings.Repeat("=", 80))
+}
+
+func (c *Client) logResolverReactivated(
+	conn Connection,
+	resolveTime time.Duration,
+	burstResult *BurstProbeResult,
+	activeCount int,
+	totalCount int,
+) {
+	if c == nil || c.log == nil {
+		return
+	}
+
+	resolveStr := "n/a"
+	if resolveTime > 0 {
+		resolveStr = formatResolverRTT(resolveTime)
+	}
+
+	rttStr := "n/a"
+	speedStr := "n/a"
+	lossStr := "0.0%"
+	scoreStr := "n/a"
+
+	downloadMTU := conn.DownloadMTUBytes
+	if downloadMTU <= 0 {
+		downloadMTU = 500
+	}
+
+	rtt := resolveTime
+	lossRatio := 0.0
+
+	if burstResult != nil {
+		if burstResult.AverageRTT > 0 {
+			rtt = burstResult.AverageRTT
+			rttStr = formatResolverRTT(burstResult.AverageRTT)
+		}
+		lossRatio = burstResult.LossRatio
+		lossStr = fmt.Sprintf("%.1f%%", lossRatio*100)
+	}
+
+	if rtt > 0 {
+		if rttStr == "n/a" {
+			rttStr = formatResolverRTT(rtt)
+		}
+		speedKBps, score := CalculateResolverScore(downloadMTU, rtt, lossRatio)
+		speedStr = FormatResolverSpeed(speedKBps)
+		scoreStr = fmt.Sprintf("%.1f", score)
+	}
+
+	c.log.Infof(
+		"<green>\U0001F504 DNS Resolver Reactivated:</green> <cyan>%s</cyan> (<blue>%s</blue>) | MTU: UP <green>%dB</green> / DOWN <green>%dB</green> | Resolve: <yellow>%s</yellow> | RTT: <yellow>%s</yellow> | Speed: <green>%s</green> | Loss: <yellow>%s</yellow> | Score: <magenta>%s</magenta> | Active Pool: <cyan>%d</cyan>/<cyan>%d</cyan>",
+		conn.ResolverLabel,
+		conn.Domain,
+		conn.UploadMTUBytes,
+		conn.DownloadMTUBytes,
+		resolveStr,
+		rttStr,
+		speedStr,
+		lossStr,
+		scoreStr,
+		activeCount,
+		totalCount,
+	)
 }

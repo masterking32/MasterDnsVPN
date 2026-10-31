@@ -86,6 +86,7 @@ type Client struct {
 	sessionResetPending   atomic.Bool
 	runtimeResetPending   atomic.Bool
 	resolverHealthStarted atomic.Bool
+	runtimeStatsStarted   atomic.Bool
 	sessionResetSignal    chan struct{}
 	rxDroppedPackets      atomic.Uint64
 	lastRXDropLogUnix     atomic.Int64
@@ -310,6 +311,7 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		c.streamResolverFailoverCooldown = time.Second
 	}
 
+	c.balancer.SetMaxActiveResolvers(cfg.MaxActiveResolvers)
 	c.balancer.SetStreamFailoverConfig(c.streamResolverFailoverResendThreshold, c.streamResolverFailoverCooldown)
 	c.balancer.SetAutoDisableConfig(
 		cfg.AutoDisableTimeoutServers,
@@ -433,6 +435,12 @@ func (c *Client) Run(ctx context.Context) error {
 				}
 
 				c.ensureLocalDNSCachePersistence(ctx)
+
+				if c.runtimeStatsStarted.CompareAndSwap(false, true) {
+					go c.runRuntimeStatsLoop(ctx)
+				}
+				c.startInteractiveConsoleListener(ctx)
+				c.printRuntimeStatsHint()
 			}
 
 			select {

@@ -259,6 +259,10 @@ func (c *Client) syncSessionPolicyDerivedState() {
 		c.syncedDownloadMTU = min(c.syncedDownloadMTU, c.cfg.MaxDownloadMTU)
 	}
 
+	if c.balancer != nil {
+		c.balancer.SetSessionSynchronizedMTU(c.syncedUploadMTU, c.syncedDownloadMTU)
+	}
+
 	c.closeResolverConnPools()
 
 	if c.asyncCancel != nil {
@@ -580,6 +584,9 @@ func (c *Client) applySyncedMTUState(uploadMTU int, downloadMTU int, uploadChars
 	c.safeUploadMTU = computeSafeUploadMTU(uploadMTU, c.mtuCryptoOverhead)
 	c.maxPackedBlocks = VpnProto.CalculateMaxPackedBlocks(uploadMTU, 80, c.cfg.MaxPacketsPerBatch)
 	c.applySessionCompressionPolicy()
+	if c.balancer != nil {
+		c.balancer.SetSessionSynchronizedMTU(uploadMTU, downloadMTU)
+	}
 	if c.log != nil && c.successMTUChecks {
 		c.log.Infof("\U0001F4CF <green>MTU state applied: UP=%d, DOWN=%d</green>", uploadMTU, downloadMTU)
 	}

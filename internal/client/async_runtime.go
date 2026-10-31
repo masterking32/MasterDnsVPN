@@ -85,6 +85,7 @@ func (c *Client) StopAsyncRuntime() {
 		c.pingManager.Stop()
 	}
 
+	c.SaveRankedResolversToFile()
 	c.resetRuntimeBindings(false)
 }
 

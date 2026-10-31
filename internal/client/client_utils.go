@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"masterdnsvpn-go/internal/arq"
+	"masterdnsvpn-go/internal/config"
 	Enums "masterdnsvpn-go/internal/enums"
 	"masterdnsvpn-go/internal/logger"
 	"masterdnsvpn-go/internal/version"
@@ -594,10 +595,7 @@ func (c *Client) PrintBanner() {
 
 	c.log.Infof("⚖  <cyan>Resolver Balancing, Strategy:</cyan> <yellow>%s (%d)</yellow>", strategyName, c.cfg.ResolverBalancingStrategy)
 
-	domainList := ""
-	if len(c.cfg.Domains) > 0 {
-		domainList = c.cfg.Domains[0]
-	}
+	domainList := strings.Join(c.cfg.Domains, ", ")
 	c.log.Infof("🌐 <cyan>Configured Domains:</cyan> <yellow>%d (%s)</yellow>", len(c.cfg.Domains), domainList)
 	c.log.Infof("📡 <cyan>Loaded Resolvers:</cyan> <yellow>%d endpoints.</yellow>", len(c.cfg.Resolvers))
 }
@@ -651,4 +649,38 @@ func (c *Client) BuildConnectionMap() error {
 	}
 
 	return nil
+}
+
+// SaveRankedResolversToFile persists the top-ranked resolver endpoints to the resolvers file
+// under an auto-ranked header block, preserving all custom user lines below.
+func (c *Client) SaveRankedResolversToFile() {
+	if c == nil || c.balancer == nil || !c.cfg.AutoSaveRankedResolvers {
+		return
+	}
+
+	resolversPath := c.cfg.ResolversPath()
+	if resolversPath == "" {
+		return
+	}
+
+	maxRanked := c.cfg.MaxActiveResolvers * 2
+	if maxRanked < 32 {
+		maxRanked = 32
+	}
+
+	ranked := c.balancer.GetRankedEndpoints(maxRanked)
+	if len(ranked) == 0 {
+		return
+	}
+
+	if err := config.UpdateResolversFileWithRanked(resolversPath, ranked); err != nil {
+		if c.log != nil && c.log.Enabled(logger.LevelWarn) {
+			c.log.Warnf("<yellow>[Resolvers]</yellow> Failed to auto-save ranked resolvers to <cyan>%s</cyan>: %v", resolversPath, err)
+		}
+		return
+	}
+
+	if c.log != nil && c.log.Enabled(logger.LevelDebug) {
+		c.log.Debugf("<green>[Resolvers]</green> Saved %d ranked resolvers to <cyan>%s</cyan>", len(ranked), resolversPath)
+	}
 }
