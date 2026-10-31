@@ -1270,7 +1270,36 @@ func TestEmpirical_RecheckRevokesStandby_NoRaceWithOptimize(t *testing.T) {
 	var illegalPromotions atomic.Int64
 	var optimizeCalls atomic.Int64
 
-	// Concurrently invoke OptimizeActivePool at high frequency from 6 workers
+	// Trigger recheck in background: immediately revokes StandbyEligible and probes closed UDP port
+	recheckStarted := make(chan struct{})
+	var recheckWg sync.WaitGroup
+	recheckWg.Add(1)
+	go func() {
+		defer recheckWg.Done()
+		close(recheckStarted)
+		for i := 0; i < 5; i++ {
+			if stressCtx.Err() != nil {
+				return
+			}
+			client.recheckInactiveResolver(stressCtx, targetConn)
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+
+	<-recheckStarted
+	// Wait until recheck has revoked standby eligibility before in-flight network probe
+	for i := 0; i < 100; i++ {
+		if !balancer.IsConnectionStandbyEligible(deadKey) {
+			break
+		}
+		time.Sleep(1 * time.Millisecond)
+	}
+
+	if balancer.IsConnectionStandbyEligible(deadKey) {
+		t.Fatal("expected standby eligibility to be revoked by recheck")
+	}
+
+	// Concurrently invoke OptimizeActivePool at high frequency from 6 workers while probe is in flight
 	for w := 0; w < 6; w++ {
 		wg.Add(1)
 		go func() {
@@ -1283,7 +1312,7 @@ func TestEmpirical_RecheckRevokesStandby_NoRaceWithOptimize(t *testing.T) {
 					_ = balancer.OptimizeActivePool()
 					optimizeCalls.Add(1)
 
-					// Invariant check: deadKey must NEVER be promoted to active
+					// Invariant check: deadKey must NEVER be promoted to active while probe in flight
 					conn, ok := balancer.GetConnectionByKey(deadKey)
 					if ok && conn.IsValid {
 						illegalPromotions.Add(1)
@@ -1292,20 +1321,6 @@ func TestEmpirical_RecheckRevokesStandby_NoRaceWithOptimize(t *testing.T) {
 			}
 		}()
 	}
-
-	// Trigger recheck concurrently across the stress window
-	var recheckWg sync.WaitGroup
-	recheckWg.Add(1)
-	go func() {
-		defer recheckWg.Done()
-		for i := 0; i < 5; i++ {
-			if stressCtx.Err() != nil {
-				return
-			}
-			client.recheckInactiveResolver(stressCtx, targetConn)
-			time.Sleep(10 * time.Millisecond)
-		}
-	}()
 
 	<-stressCtx.Done()
 	recheckWg.Wait()
