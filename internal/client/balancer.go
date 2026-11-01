@@ -11,9 +11,7 @@ package client
 
 import (
 	"encoding/binary"
-	"math"
 	"net"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -82,27 +80,19 @@ type balancerPendingShard struct {
 }
 
 type Balancer struct {
+	pool             *ResolverPool
 	strategy         int
 	rrCounter        atomic.Uint64
 	totalPacketsSent atomic.Uint64
-	healthRRCounter  atomic.Uint64
 	rngState         atomic.Uint64
 	nextPendingSweep atomic.Int64
 	pendingOverflow  atomic.Bool
 	pendingSize      atomic.Int32
 	pendingEvictRR   atomic.Uint32
 
-	mu                  sync.RWMutex
-	log                 *logger.Logger
-	maxActiveResolvers  int
-	syncedUploadMTU     int
-	syncedDownloadMTU   int
-	connections         []Connection
-	indexByKey          map[string]int
-	activeIDs           []int
-	inactiveIDs         []int
-	stats               []*connectionStats
-	streamRoutes        map[uint16]*balancerStreamRouteState
+	mu           sync.RWMutex
+	log          *logger.Logger
+	streamRoutes map[uint16]*balancerStreamRouteState
 
 	pendingShards [resolverPendingShardCount]balancerPendingShard
 
@@ -130,8 +120,15 @@ type connectionStats struct {
 
 const connectionStatsHalfLifeThreshold = 1000
 
-func NewBalancer(strategy int, log *logger.Logger) *Balancer {
+func NewBalancer(strategy int, log *logger.Logger, pool ...*ResolverPool) *Balancer {
+	var p *ResolverPool
+	if len(pool) > 0 && pool[0] != nil {
+		p = pool[0]
+	} else {
+		p = NewResolverPool(0, log)
+	}
 	b := &Balancer{
+		pool:                    p,
 		strategy:                strategy,
 		log:                     log,
 		streamRoutes:            make(map[uint16]*balancerStreamRouteState),
@@ -145,16 +142,25 @@ func NewBalancer(strategy int, log *logger.Logger) *Balancer {
 	return b
 }
 
+func (b *Balancer) Pool() *ResolverPool {
+	if b == nil {
+		return nil
+	}
+	return b.pool
+}
+
 func (b *Balancer) SetMaxActiveResolvers(maxActive int) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.maxActiveResolvers = maxActive
+	if b == nil || b.pool == nil {
+		return
+	}
+	b.pool.SetMaxActive(maxActive)
 }
 
 func (b *Balancer) MaxActiveResolvers() int {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return b.maxActiveResolvers
+	if b == nil || b.pool == nil {
+		return 0
+	}
+	return b.pool.MaxActive()
 }
 
 func (b *Balancer) SetStreamFailoverConfig(threshold int, cooldown time.Duration) {
@@ -203,15 +209,10 @@ func (b *Balancer) SetResolverDownConfirmHandler(handler func(*Connection, time.
 }
 
 func (b *Balancer) SetConnections(connections []*Connection) {
+	if b == nil {
+		return
+	}
 	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	size := len(connections)
-	b.connections = make([]Connection, 0, size)
-	b.indexByKey = make(map[string]int, size)
-	b.activeIDs = make([]int, 0, size)
-	b.inactiveIDs = make([]int, 0, size)
-	b.stats = make([]*connectionStats, 0, size)
 	for i := range b.pendingShards {
 		shard := &b.pendingShards[i]
 		shard.mu.Lock()
@@ -230,49 +231,32 @@ func (b *Balancer) SetConnections(connections []*Connection) {
 	} else {
 		clear(b.streamRoutes)
 	}
+	b.mu.Unlock()
 
-	for _, conn := range connections {
-		if conn == nil || conn.Key == "" {
-			continue
-		}
-		copied := *conn
-		copied.IsValid = false
-		copied.StandbyEligible = false
-		copied.UploadMTUBytes = 0
-		copied.UploadMTUChars = 0
-		copied.DownloadMTUBytes = 0
-		copied.MTUResolveTime = 0
-		copied.LastHealthCheckAt = time.Time{}
-		idx := len(b.connections)
-		b.connections = append(b.connections, copied)
-		b.indexByKey[copied.Key] = idx
-		b.inactiveIDs = append(b.inactiveIDs, idx)
-		b.stats = append(b.stats, &connectionStats{})
+	if b.pool != nil {
+		b.pool.SetConnections(connections)
 	}
-
 }
 
 func (b *Balancer) ActiveCount() int {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return len(b.activeIDs)
+	if b == nil || b.pool == nil {
+		return 0
+	}
+	return b.pool.ActiveCount()
 }
 
 func (b *Balancer) TotalCount() int {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return len(b.connections)
+	if b == nil || b.pool == nil {
+		return 0
+	}
+	return b.pool.TotalCount()
 }
 
 func (b *Balancer) GetConnectionByKey(key string) (Connection, bool) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-
-	idx, ok := b.indexByKey[key]
-	if !ok || idx < 0 || idx >= len(b.connections) {
+	if b == nil || b.pool == nil {
 		return Connection{}, false
 	}
-	return b.connections[idx], true
+	return b.pool.GetConnectionByKey(key)
 }
 
 func (b *Balancer) SetConnectionValidity(key string, valid bool) bool {
@@ -280,88 +264,146 @@ func (b *Balancer) SetConnectionValidity(key string, valid bool) bool {
 }
 
 func (b *Balancer) SetConnectionValidityWithLog(key string, valid bool, logReactivated bool) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	idx, ok := b.indexByKey[key]
-	if !ok || idx < 0 || idx >= len(b.connections) {
+	if b == nil || b.pool == nil {
 		return false
 	}
-	if b.connections[idx].IsValid == valid {
-		if !valid && b.connections[idx].StandbyEligible {
-			b.connections[idx].StandbyEligible = false
-			b.clearPreferredResolverReferencesLocked(key)
-		} else if valid && b.connections[idx].StandbyEligible {
-			b.connections[idx].StandbyEligible = false
-		}
-		return true
-	}
-
-	b.connections[idx].IsValid = valid
-	if valid {
-		b.connections[idx].StandbyEligible = false
-		if stats := b.stats[idx]; stats != nil {
-			stats.resetWindow()
-		}
-	} else {
-		b.connections[idx].StandbyEligible = false
+	if !valid {
+		b.mu.Lock()
 		b.clearPreferredResolverReferencesLocked(key)
+		b.mu.Unlock()
 	}
-	b.moveConnectionStateLocked(idx, valid)
-
-	return true
+	return b.pool.SetConnectionValidity(key, valid)
 }
 
-// SetConnectionStandbyEligible explicitly sets whether an inactive resolver is eligible
-// for standby promotion during pool optimization. Active connections cannot be marked standby eligible.
 func (b *Balancer) SetConnectionStandbyEligible(key string, eligible bool) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	idx, ok := b.indexByKey[key]
-	if !ok || idx < 0 || idx >= len(b.connections) {
+	if b == nil || b.pool == nil {
 		return false
 	}
-	if b.connections[idx].IsValid {
-		return false
-	}
-	b.connections[idx].StandbyEligible = eligible
-	return true
+	return b.pool.SetConnectionStandbyEligible(key, eligible)
 }
 
-// IsConnectionStandbyEligible reports whether a resolver is currently marked standby eligible.
 func (b *Balancer) IsConnectionStandbyEligible(key string) bool {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-
-	idx, ok := b.indexByKey[key]
-	if !ok || idx < 0 || idx >= len(b.connections) {
+	if b == nil || b.pool == nil {
 		return false
 	}
-	return b.connections[idx].StandbyEligible
+	return b.pool.IsConnectionStandbyEligible(key)
 }
 
-// SetSessionSynchronizedMTU records the active session's negotiated upload and download MTU.
-// Standby candidate promotions in optimizeActivePoolLocked require the candidate's probed
-// MTU to meet or exceed these values.
 func (b *Balancer) SetSessionSynchronizedMTU(uploadMTU, downloadMTU int) {
-	if b == nil {
+	if b == nil || b.pool == nil {
 		return
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.syncedUploadMTU = uploadMTU
-	b.syncedDownloadMTU = downloadMTU
+	b.pool.SetSessionMTU(uploadMTU, downloadMTU)
 }
 
-// SessionSynchronizedMTU returns the currently configured synchronized upload and download MTU.
 func (b *Balancer) SessionSynchronizedMTU() (int, int) {
-	if b == nil {
+	if b == nil || b.pool == nil {
 		return 0, 0
 	}
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return b.syncedUploadMTU, b.syncedDownloadMTU
+	return b.pool.SessionMTU()
+}
+
+func (b *Balancer) ActiveConnections() []Connection {
+	if b == nil || b.pool == nil {
+		return nil
+	}
+	return b.pool.ActiveResolvers()
+}
+
+func (b *Balancer) InactiveConnections() []Connection {
+	if b == nil || b.pool == nil {
+		return nil
+	}
+	return b.pool.InactiveConnections()
+}
+
+func (b *Balancer) AllConnections() []Connection {
+	if b == nil || b.pool == nil {
+		return nil
+	}
+	return b.pool.AllConnections()
+}
+
+func (b *Balancer) SetConnectionMTU(key string, uploadBytes int, uploadChars int, downloadBytes int) bool {
+	if b == nil || b.pool == nil {
+		return false
+	}
+	return b.pool.SetConnectionMTU(key, uploadBytes, uploadChars, downloadBytes)
+}
+
+func (b *Balancer) ApplyMTUProbeResult(key string, uploadBytes int, uploadChars int, downloadBytes int, resolveTime time.Duration, active bool) bool {
+	if b == nil || b.pool == nil {
+		return false
+	}
+	if !active {
+		b.mu.Lock()
+		b.clearPreferredResolverReferencesLocked(key)
+		b.mu.Unlock()
+	}
+	return b.pool.ApplyMTUProbeResult(key, uploadBytes, uploadChars, downloadBytes, resolveTime, active)
+}
+
+func (b *Balancer) OptimizeActivePool() bool {
+	if b == nil || b.pool == nil {
+		return false
+	}
+	return b.pool.Optimize()
+}
+
+func (b *Balancer) GetRankedEndpoints(maxCount int) []config.ResolverAddress {
+	if b == nil || b.pool == nil {
+		return nil
+	}
+	return b.pool.RankedEndpoints(maxCount)
+}
+
+func (b *Balancer) NextInactiveConnectionForHealthCheck(now time.Time, minInterval time.Duration) (Connection, bool) {
+	if b == nil || b.pool == nil {
+		return Connection{}, false
+	}
+	return b.pool.AcquireNextInactiveForRecheck(now, minInterval)
+}
+
+func (b *Balancer) SeedBurstStats(key string, sent, acked int, rtt time.Duration) {
+	if b == nil || b.pool == nil {
+		return
+	}
+	b.pool.SeedBurstStats(key, sent, acked, rtt)
+}
+
+func (b *Balancer) SeedConservativeStats(key string) {
+	if b == nil || b.pool == nil {
+		return
+	}
+	b.pool.SeedConservativeStats(key)
+}
+
+func (b *Balancer) admitQualifiedBatch(results []QualifiedResolver, selected []Connection) {
+	if b == nil || b.pool == nil {
+		return
+	}
+	b.pool.AdmitStartupBatch(results, selected)
+}
+
+func (b *Balancer) finalizeFastStart(qualifiedKeys map[string]struct{}, target int) {
+	if b == nil || b.pool == nil {
+		return
+	}
+	b.pool.FinalizeFastStart(qualifiedKeys, target)
+}
+
+func (b *Balancer) beginConnectionRecheck(key string) bool {
+	if b == nil || b.pool == nil {
+		return false
+	}
+	return b.pool.beginConnectionRecheck(key)
+}
+
+func (b *Balancer) completeConnectionRecheck(result ResolverRecheckResult) (Connection, bool) {
+	if b == nil || b.pool == nil {
+		return Connection{}, false
+	}
+	return b.pool.CompleteRecheck(result)
 }
 
 // ResolverStatsSnapshot captures a point-in-time snapshot of resolver metrics.
@@ -379,9 +421,11 @@ type ResolverStatsSnapshot struct {
 
 // GetStatsSnapshot thread-safely exports current metrics for all loaded resolvers.
 func (b *Balancer) GetStatsSnapshot() []ResolverStatsSnapshot {
-	if b == nil {
+	if b == nil || b.pool == nil {
 		return nil
 	}
+
+	snapshots := b.pool.GetStatsSnapshot()
 
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -400,38 +444,8 @@ func (b *Balancer) GetStatsSnapshot() []ResolverStatsSnapshot {
 		}
 	}
 
-	snapshots := make([]ResolverStatsSnapshot, len(b.connections))
-	for i, conn := range b.connections {
-		var sent, acked, lost, rttSum, rttCount uint64
-		if i < len(b.stats) && b.stats[i] != nil {
-			sent = b.stats[i].sent.Load()
-			acked = b.stats[i].acked.Load()
-			lost = b.stats[i].lost.Load()
-			rttSum = b.stats[i].rttMicrosSum.Load()
-			rttCount = b.stats[i].rttCount.Load()
-		}
-
-		var avgRTT time.Duration
-		if rttCount > 0 {
-			avgRTT = time.Duration(rttSum/rttCount) * time.Microsecond
-		}
-
-		var lossRatio float64
-		if sent > 0 {
-			lossRatio = float64(lost) / float64(sent)
-		}
-
-		snapshots[i] = ResolverStatsSnapshot{
-			Connection:      conn,
-			Sent:            sent,
-			Acked:           acked,
-			Lost:            lost,
-			LossRatio:       lossRatio,
-			AverageRTT:      avgRTT,
-			ActiveStreams:   streamCounts[conn.Key],
-			IsValid:         conn.IsValid,
-			StandbyEligible: conn.StandbyEligible,
-		}
+	for i := range snapshots {
+		snapshots[i].ActiveStreams = streamCounts[snapshots[i].Connection.Key]
 	}
 
 	return snapshots
@@ -440,130 +454,6 @@ func (b *Balancer) GetStatsSnapshot() []ResolverStatsSnapshot {
 // SnapshotResolverStats returns a point-in-time snapshot of metrics for all loaded resolvers.
 func (b *Balancer) SnapshotResolverStats() []ResolverStatsSnapshot {
 	return b.GetStatsSnapshot()
-}
-
-// GetRankedEndpoints returns unique ResolverAddress endpoints sorted in descending
-// performance order based on composite scores, active status, and MTU validity.
-func (b *Balancer) GetRankedEndpoints(maxCount int) []config.ResolverAddress {
-	if b == nil {
-		return nil
-	}
-
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-
-	if len(b.connections) == 0 {
-		return nil
-	}
-
-	type scoredEndpoint struct {
-		addr  config.ResolverAddress
-		score float64
-	}
-
-	seenEndpoints := make(map[string]int) // endpointKey -> index in scored
-	scored := make([]scoredEndpoint, 0, len(b.connections))
-
-	for i, conn := range b.connections {
-		// Only consider connections that have passed MTU discovery or are active or have stats
-		hasStats := false
-		if i < len(b.stats) && b.stats[i] != nil {
-			sent, _, _, _, rttCount := b.stats[i].snapshot()
-			if sent > 0 || rttCount > 0 {
-				hasStats = true
-			}
-		}
-		if !conn.IsValid && conn.UploadMTUBytes <= 0 && conn.DownloadMTUBytes <= 0 && !hasStats {
-			continue
-		}
-
-		score := b.calculateConnectionScoreLocked(i)
-		if conn.IsValid {
-			score += 1000.0 // Active pool members boosted above standbys
-		}
-
-		epKey := formatResolverEndpoint(conn.Resolver, conn.ResolverPort)
-		if existingIdx, exists := seenEndpoints[epKey]; exists {
-			if score > scored[existingIdx].score {
-				scored[existingIdx].score = score
-			}
-			continue
-		}
-
-		seenEndpoints[epKey] = len(scored)
-		scored = append(scored, scoredEndpoint{
-			addr: config.ResolverAddress{
-				IP:   conn.Resolver,
-				Port: conn.ResolverPort,
-			},
-			score: score,
-		})
-	}
-
-	if len(scored) == 0 {
-		return nil
-	}
-
-	sort.Slice(scored, func(i, j int) bool {
-		return scored[i].score > scored[j].score
-	})
-
-	if maxCount > 0 && len(scored) > maxCount {
-		scored = scored[:maxCount]
-	}
-
-	result := make([]config.ResolverAddress, len(scored))
-	for i, s := range scored {
-		result[i] = s.addr
-	}
-	return result
-}
-
-func (b *Balancer) SetConnectionMTU(key string, uploadBytes int, uploadChars int, downloadBytes int) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	idx, ok := b.indexByKey[key]
-	if !ok || idx < 0 || idx >= len(b.connections) {
-		return false
-	}
-
-	b.connections[idx].UploadMTUBytes = uploadBytes
-	b.connections[idx].UploadMTUChars = uploadChars
-	b.connections[idx].DownloadMTUBytes = downloadBytes
-	return true
-}
-
-func (b *Balancer) ApplyMTUProbeResult(key string, uploadBytes int, uploadChars int, downloadBytes int, resolveTime time.Duration, active bool) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	idx, ok := b.indexByKey[key]
-	if !ok || idx < 0 || idx >= len(b.connections) {
-		return false
-	}
-
-	conn := &b.connections[idx]
-	conn.UploadMTUBytes = uploadBytes
-	conn.UploadMTUChars = uploadChars
-	conn.DownloadMTUBytes = downloadBytes
-	conn.MTUResolveTime = resolveTime
-	wasValid := conn.IsValid
-	conn.IsValid = active
-	if active {
-		if stats := b.stats[idx]; stats != nil {
-			stats.resetWindow()
-		}
-	} else {
-		conn.StandbyEligible = false
-		b.clearPreferredResolverReferencesLocked(key)
-	}
-
-	if wasValid != active {
-		b.moveConnectionStateLocked(idx, active)
-	}
-
-	return true
 }
 
 func (b *Balancer) ReportSend(serverKey string) {
@@ -608,17 +498,14 @@ func (b *Balancer) ReportTimeout(serverKey string, now time.Time, window time.Du
 	stats.applyHalfLife()
 
 	totalTimedOut, totalSent := stats.recordWindowTimeout(now, window)
-	b.mu.Lock()
-	conn, ok := b.connectionByKeyLocked(serverKey)
+	conn, ok := b.pool.GetConnectionByKey(serverKey)
 	if !ok || !conn.IsValid {
-		b.mu.Unlock()
 		return false
 	}
 
-	activeCount := len(b.activeIDs)
+	activeCount := b.pool.ActiveCount()
 	minObservations := autoDisableMinObservationsForActiveCount(activeCount, window)
 	if int(totalSent) < minObservations || totalTimedOut != totalSent {
-		b.mu.Unlock()
 		return false
 	}
 
@@ -631,51 +518,48 @@ func (b *Balancer) ReportTimeout(serverKey string, now time.Time, window time.Du
 	}
 
 	if activeCount <= minActive {
-		b.mu.Unlock()
 		return false
 	}
 
+	b.mu.RLock()
 	confirmHandler := b.confirmResolverDown
+	b.mu.RUnlock()
+
 	confirmRequired := confirmHandler != nil && activeCount <= 20
 	if confirmRequired {
-		connCopy := *conn
-		b.mu.Unlock()
-
+		connCopy := conn
 		down := confirmHandler(&connCopy, window)
 
-		b.mu.Lock()
-		conn, ok = b.connectionByKeyLocked(serverKey)
+		conn, ok = b.pool.GetConnectionByKey(serverKey)
 		if !ok || !conn.IsValid {
-			b.mu.Unlock()
 			return false
 		}
 
 		if !down {
 			stats.resetWindow()
-			b.mu.Unlock()
 			return false
 		}
 	}
 
-	conn.IsValid = false
 	stats.resetWindow()
+	b.mu.Lock()
 	b.clearPreferredResolverReferencesLocked(serverKey)
+	b.mu.Unlock()
 
-	if idx, ok := b.indexByKey[serverKey]; ok {
-		b.moveConnectionStateLocked(idx, false)
-	}
+	b.pool.SetConnectionValidity(serverKey, false)
 
-	if b.onResolverDisabled != nil {
-		handler := b.onResolverDisabled
-		handler(conn, "TIMEOUT")
+	b.mu.RLock()
+	handler := b.onResolverDisabled
+	b.mu.RUnlock()
+	if handler != nil {
+		handler(&conn, "TIMEOUT")
 	}
 
 	if b.log != nil {
 		b.log.Warnf("<red>DNS Resolver disabled (100%% Loss): <cyan>%s</cyan> <cyan>%s</cyan>) | <cyan>%s</cyan> | Remaining: <cyan>%d</cyan></red>",
-			conn.ResolverLabel, conn.Domain, conn.Resolver, len(b.activeIDs))
+			conn.ResolverLabel, conn.Domain, conn.Resolver, b.pool.ActiveCount())
 	}
 
-	b.mu.Unlock()
 	return true
 }
 
@@ -814,8 +698,11 @@ func (b *Balancer) TrackResolverSend(
 
 	b.mu.RLock()
 	window := b.autoDisableTimeoutWindow
-	activeCount := len(b.activeIDs)
 	b.mu.RUnlock()
+	activeCount := 0
+	if b.pool != nil {
+		activeCount = b.pool.ActiveCount()
+	}
 	checkInterval := autoDisableCheckIntervalForActiveCount(activeCount, window)
 
 	key := balancerResolverSampleKey{
@@ -947,8 +834,11 @@ func (b *Balancer) CollectExpiredResolverTimeouts(
 	b.mu.RLock()
 	autoDisable := b.autoDisableEnabled
 	window := b.autoDisableTimeoutWindow
-	activeCount := len(b.activeIDs)
 	b.mu.RUnlock()
+	activeCount := 0
+	if b.pool != nil {
+		activeCount = b.pool.ActiveCount()
+	}
 	checkInterval := autoDisableCheckIntervalForActiveCount(activeCount, window)
 
 	if !autoDisable {
@@ -1003,12 +893,7 @@ func (b *Balancer) ResetServerStats(serverKey string) {
 	stats.rttCount.Store(0)
 }
 
-func (b *Balancer) SeedConservativeStats(serverKey string) {
-	stats := b.statsForKey(serverKey)
-	if stats == nil {
-		return
-	}
-
+func (stats *connectionStats) seedConservative() {
 	stats.sent.Store(10)
 	stats.acked.Store(8)
 	stats.lost.Store(0)
@@ -1016,12 +901,7 @@ func (b *Balancer) SeedConservativeStats(serverKey string) {
 	stats.rttCount.Store(0)
 }
 
-func (b *Balancer) SeedBurstStats(serverKey string, sentCount int, ackedCount int, avgRTT time.Duration) {
-	stats := b.statsForKey(serverKey)
-	if stats == nil {
-		return
-	}
-
+func (stats *connectionStats) seedBurst(sentCount int, ackedCount int, avgRTT time.Duration) {
 	if sentCount < 1 {
 		sentCount = 1
 	}
@@ -1046,127 +926,48 @@ func (b *Balancer) SeedBurstStats(serverKey string, sentCount int, ackedCount in
 }
 
 func (b *Balancer) GetBestConnection() (Connection, bool) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-
-	if len(b.activeIDs) == 0 {
+	if b == nil || b.pool == nil {
+		return Connection{}, false
+	}
+	active := b.pool.ActiveResolvers()
+	if len(active) == 0 {
 		return Connection{}, false
 	}
 
 	switch b.strategy {
 	case BalancingRandom:
-		idx := b.activeIDs[b.nextRandom()%uint64(len(b.activeIDs))]
-		return b.connections[idx], true
+		idx := b.nextRandom() % uint64(len(active))
+		return active[idx], true
 	default:
-		if pool, pick, handled := b.strategyCandidatePoolLocked(""); handled {
+		if pool, pick, handled := b.strategyCandidatePoolLocked(active, ""); handled {
 			if len(pool) == 0 {
-				return b.roundRobinBestConnectionLocked()
+				return b.roundRobinBestConnectionLocked(active)
 			}
 			return b.pickFromPoolLocked(pool, pick)
 		}
-		scorer, hasSignal := b.strategyScorerLocked()
+		scorer, hasSignal := b.strategyScorerLocked(active)
 		if scorer == nil {
-			return b.roundRobinBestConnectionLocked()
+			return b.roundRobinBestConnectionLocked(active)
 		}
 
 		if !hasSignal {
-			return b.roundRobinBestConnectionLocked()
+			return b.roundRobinBestConnectionLocked(active)
 		}
 
-		return b.bestScoredConnectionLocked(scorer)
+		return b.bestScoredConnectionLocked(active, scorer)
 	}
 }
 
 func (b *Balancer) GetBestConnectionExcluding(excludeKey string) (Connection, bool) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-
-	if len(b.activeIDs) == 0 {
+	if b == nil || b.pool == nil {
+		return Connection{}, false
+	}
+	active := b.pool.ActiveResolvers()
+	if len(active) == 0 {
 		return Connection{}, false
 	}
 
-	switch b.strategy {
-	case BalancingRandom:
-		ordered := b.rotatedActiveIndicesLocked(1)
-		for _, idx := range ordered {
-			if b.connections[idx].Key == excludeKey {
-				continue
-			}
-			return b.connections[idx], true
-		}
-		return Connection{}, false
-	default:
-		if pool, pick, handled := b.strategyCandidatePoolLocked(excludeKey); handled {
-			if len(pool) == 0 {
-				return b.roundRobinBestConnectionExcludingLocked(excludeKey)
-			}
-			return b.pickFromPoolLocked(pool, pick)
-		}
-		scorer, hasSignal := b.strategyScorerLocked()
-		if scorer == nil {
-			return b.roundRobinBestConnectionExcludingLocked(excludeKey)
-		}
-
-		if !hasSignal {
-			return b.roundRobinBestConnectionExcludingLocked(excludeKey)
-		}
-
-		return b.bestScoredConnectionExcludingLocked(scorer, excludeKey)
-	}
-}
-
-func (b *Balancer) ActiveConnections() []Connection {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return b.connectionsByIDsLocked(b.activeIDs)
-}
-
-func (b *Balancer) InactiveConnections() []Connection {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return b.connectionsByIDsLocked(b.inactiveIDs)
-}
-
-func (b *Balancer) AllConnections() []Connection {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-
-	result := make([]Connection, len(b.connections))
-	copy(result, b.connections)
-	return result
-}
-
-func (b *Balancer) NextInactiveConnectionForHealthCheck(now time.Time, minInterval time.Duration) (Connection, bool) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	n := len(b.inactiveIDs)
-	if n == 0 {
-		return Connection{}, false
-	}
-
-	if minInterval < 0 {
-		minInterval = 0
-	}
-
-	start := roundRobinStartIndex(b.healthRRCounter.Add(1)-1, n)
-	for i := 0; i < n; i++ {
-		idx := b.inactiveIDs[(start+i)%n]
-		if idx < 0 || idx >= len(b.connections) {
-			continue
-		}
-
-		conn := &b.connections[idx]
-		if !conn.LastHealthCheckAt.IsZero() && now.Sub(conn.LastHealthCheckAt) < minInterval {
-			continue
-		}
-
-		conn.LastHealthCheckAt = now
-		conn.StandbyEligible = false
-		return *conn, true
-	}
-
-	return Connection{}, false
+	return b.getBestConnectionExcludingLocked(active, excludeKey)
 }
 
 func (b *Balancer) EnsureStream(streamID uint16) {
@@ -1206,18 +1007,20 @@ func (b *Balancer) NoteStreamProgress(streamID uint16) {
 }
 
 func (b *Balancer) SelectTargets(packetType uint8, streamID uint16, requiredCount int) ([]Connection, error) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
+	if b == nil || b.pool == nil {
+		return nil, ErrNoValidConnections
+	}
+	active := b.pool.ActiveResolvers()
 
-	// 1. Normalize count: 1 <= requiredCount <= len(activeIDs)
-	requiredCount = normalizeRequiredCount(len(b.activeIDs), requiredCount, 1)
+	// 1. Normalize count: 1 <= requiredCount <= len(active)
+	requiredCount = normalizeRequiredCount(len(active), requiredCount, 1)
 	if requiredCount <= 0 {
 		return nil, ErrNoValidConnections
 	}
 
 	// 2. Base case: Single target or non-stream packet is ALWAYS dynamic via balancer
 	if requiredCount == 1 || streamID == 0 || !isBalancerStreamDataLike(packetType) {
-		selected := b.getUniqueConnectionsLocked(requiredCount)
+		selected := b.getUniqueConnectionsLocked(active, requiredCount)
 		if len(selected) == 0 {
 			return nil, ErrNoValidConnections
 		}
@@ -1225,19 +1028,22 @@ func (b *Balancer) SelectTargets(packetType uint8, streamID uint16, requiredCoun
 	}
 
 	// 3. Duplication case: Multi-path stream routing (Preferred + Dynamic Others)
+	b.mu.RLock()
 	state := b.streamRoutes[streamID]
+	b.mu.RUnlock()
+
 	if state == nil {
 		// No state? Fallback to dynamic balancer
-		return b.getUniqueConnectionsLocked(requiredCount), nil
+		return b.getUniqueConnectionsLocked(active, requiredCount), nil
 	}
 
 	state.mu.Lock()
 	defer state.mu.Unlock()
 
 	// Get the sticky preferred resolver for the main path
-	preferred, ok := b.selectPreferredConnectionForStreamLocked(packetType, state)
+	preferred, ok := b.selectPreferredConnectionForStreamLocked(active, packetType, state)
 	if !ok {
-		return b.getUniqueConnectionsLocked(requiredCount), nil
+		return b.getUniqueConnectionsLocked(active, requiredCount), nil
 	}
 
 	// Combine Preferred + Dynamic Others
@@ -1245,7 +1051,7 @@ func (b *Balancer) SelectTargets(packetType uint8, streamID uint16, requiredCoun
 	selected = append(selected, preferred)
 
 	if remaining := requiredCount - 1; remaining > 0 {
-		others := b.getUniqueConnectionsExcludingLocked(remaining, preferred.Key)
+		others := b.getUniqueConnectionsExcludingLocked(active, remaining, preferred.Key)
 		selected = append(selected, others...)
 	}
 
@@ -1264,20 +1070,6 @@ func (b *Balancer) AverageRTT(serverKey string) (time.Duration, bool) {
 	}
 
 	return time.Duration(sum/count) * time.Microsecond, true
-}
-
-func (b *Balancer) connectionsByIDsLocked(ids []int) []Connection {
-	if len(ids) == 0 {
-		return nil
-	}
-	result := make([]Connection, len(ids))
-	for i, idx := range ids {
-		if idx < 0 || idx >= len(b.connections) {
-			continue
-		}
-		result[i] = b.connections[idx]
-	}
-	return result
 }
 
 func (b *Balancer) ensureStreamRouteLocked(streamID uint16) *balancerStreamRouteState {
@@ -1299,7 +1091,7 @@ func isBalancerStreamDataLike(packetType uint8) bool {
 	return packetType == Enums.PACKET_STREAM_DATA || packetType == Enums.PACKET_STREAM_RESEND
 }
 
-func (b *Balancer) selectPreferredConnectionForStreamLocked(packetType uint8, state *balancerStreamRouteState) (Connection, bool) {
+func (b *Balancer) selectPreferredConnectionForStreamLocked(active []Connection, packetType uint8, state *balancerStreamRouteState) (Connection, bool) {
 	if state == nil {
 		return Connection{}, false
 	}
@@ -1307,14 +1099,14 @@ func (b *Balancer) selectPreferredConnectionForStreamLocked(packetType uint8, st
 	// 1. Check for Failover (Streak reached during resend)
 	if packetType == Enums.PACKET_STREAM_RESEND {
 		state.ResendStreak++
-		if current, ok := b.validPreferredConnectionLocked(state); ok {
+		if current, ok := b.validPreferredConnectionLocked(active, state); ok {
 			// Stay on current until threshold or cooldown
 			if state.ResendStreak < b.streamFailoverThreshold || (time.Since(state.LastFailoverAt) < b.streamFailoverCooldown) {
 				return current, true
 			}
 
 			// Failover triggered: Choose absolute best alternate
-			if replacement, ok := b.selectAlternateConnectionLocked(current.Key); ok {
+			if replacement, ok := b.selectAlternateConnectionLocked(active, current.Key); ok {
 				state.PreferredResolverKey = replacement.Key
 				state.ResendStreak = 0
 				state.LastFailoverAt = time.Now()
@@ -1325,7 +1117,7 @@ func (b *Balancer) selectPreferredConnectionForStreamLocked(packetType uint8, st
 	}
 
 	// 2. Return current preferred if it is still valid
-	if current, ok := b.validPreferredConnectionLocked(state); ok {
+	if current, ok := b.validPreferredConnectionLocked(active, state); ok {
 		return current, true
 	}
 
@@ -1335,10 +1127,10 @@ func (b *Balancer) selectPreferredConnectionForStreamLocked(packetType uint8, st
 
 	if state.PreferredResolverKey == "" {
 		// New stream: Use "Top 10 Random" to distribute load
-		replacement, ok = b.selectInitialPreferredConnectionLocked()
+		replacement, ok = b.selectInitialPreferredConnectionLocked(active)
 	} else {
 		// Recovery from dead resolver: Use absolute best alternate
-		replacement, ok = b.selectAlternateConnectionLocked(state.PreferredResolverKey)
+		replacement, ok = b.selectAlternateConnectionLocked(active, state.PreferredResolverKey)
 	}
 
 	if ok {
@@ -1350,35 +1142,93 @@ func (b *Balancer) selectPreferredConnectionForStreamLocked(packetType uint8, st
 	return Connection{}, false
 }
 
-func (b *Balancer) validPreferredConnectionLocked(state *balancerStreamRouteState) (Connection, bool) {
+func (b *Balancer) validPreferredConnectionLocked(active []Connection, state *balancerStreamRouteState) (Connection, bool) {
 	if state == nil || state.PreferredResolverKey == "" {
 		return Connection{}, false
 	}
-	conn, ok := b.connectionByKeyLocked(state.PreferredResolverKey)
-	if !ok || !conn.IsValid || conn.Key == "" {
-		return Connection{}, false
+	for _, conn := range active {
+		if conn.Key == state.PreferredResolverKey && conn.IsValid {
+			return conn, true
+		}
 	}
-	return *conn, true
+	return Connection{}, false
 }
 
-func (b *Balancer) selectAlternateConnectionLocked(excludeKey string) (Connection, bool) {
+func (b *Balancer) selectAlternateConnectionLocked(active []Connection, excludeKey string) (Connection, bool) {
 	if excludeKey != "" {
-		if replacement, ok := b.getBestConnectionExcludingLocked(excludeKey); ok {
+		if replacement, ok := b.getBestConnectionExcludingLocked(active, excludeKey); ok {
 			return replacement, true
 		}
 	}
 
-	selected := b.getUniqueConnectionsLocked(1)
+	selected := b.getUniqueConnectionsLocked(active, 1)
 	if len(selected) == 0 {
 		return Connection{}, false
 	}
 	if excludeKey == "" || selected[0].Key != excludeKey {
 		return selected[0], true
 	}
-	if replacement, ok := b.getBestConnectionExcludingLocked(excludeKey); ok {
+	if replacement, ok := b.getBestConnectionExcludingLocked(active, excludeKey); ok {
 		return replacement, true
 	}
 	return Connection{}, false
+}
+
+func (b *Balancer) selectInitialPreferredConnectionLocked(active []Connection) (Connection, bool) {
+	if len(active) == 0 {
+		return Connection{}, false
+	}
+
+	switch b.strategy {
+	case BalancingRandom, BalancingRoundRobin, BalancingRoundRobinDefault:
+		return b.selectTargetByStrategyLocked(active)
+	default:
+		if pool, pick, handled := b.strategyCandidatePoolLocked(active, ""); handled {
+			if len(pool) == 0 {
+				return b.selectTargetByStrategyLocked(active)
+			}
+			return b.pickFromPoolLocked(pool, pick)
+		}
+		scorer, hasSignal := b.strategyScorerLocked(active)
+		if scorer == nil {
+			return b.selectTargetByStrategyLocked(active)
+		}
+
+		if !hasSignal {
+			return b.selectTargetByStrategyLocked(active)
+		}
+
+		topN := 10
+		if len(active) < topN {
+			topN = len(active)
+		}
+
+		pool := b.selectLowestScoreLocked(active, topN, scorer)
+		if len(pool) == 0 {
+			return b.selectTargetByStrategyLocked(active)
+		}
+
+		return b.pickFromPoolLocked(pool, poolPickRandom)
+	}
+}
+
+func (b *Balancer) getUniqueConnectionsExcludingLocked(active []Connection, requiredCount int, excludeKey string) []Connection {
+	if requiredCount <= 0 || len(active) == 0 {
+		return nil
+	}
+
+	all := b.getUniqueConnectionsLocked(active, requiredCount+1)
+	selected := make([]Connection, 0, requiredCount)
+	for _, conn := range all {
+		if conn.Key == excludeKey {
+			continue
+		}
+		selected = append(selected, conn)
+		if len(selected) >= requiredCount {
+			break
+		}
+	}
+	return selected
 }
 
 func (b *Balancer) clearPreferredResolverReferencesLocked(serverKey string) {
@@ -1398,311 +1248,22 @@ func (b *Balancer) clearPreferredResolverReferencesLocked(serverKey string) {
 	}
 }
 
-// calculateConnectionScoreLocked computes a composite performance score for any resolver.
-// Higher score = better resolver (more throughput, lower loss, lower RTT).
-func (b *Balancer) calculateConnectionScoreLocked(idx int) float64 {
-	if idx < 0 || idx >= len(b.connections) {
-		return 0.0
-	}
-	conn := &b.connections[idx]
-	downloadMTU := conn.DownloadMTUBytes
-	if downloadMTU <= 0 {
-		downloadMTU = 500
-	}
-
-	var sent, lost, rttSum, rttCount uint64
-	if idx < len(b.stats) && b.stats[idx] != nil {
-		sent, _, lost, rttSum, rttCount = b.stats[idx].snapshot()
-	}
-
-	lossRatio := 0.0
-	if sent > 0 {
-		lossRatio = float64(lost) / float64(sent)
-	}
-
-	var avgRTT time.Duration
-	if rttCount > 0 {
-		avgRTT = time.Duration(rttSum/rttCount) * time.Microsecond
-	} else if conn.MTUResolveTime > 0 {
-		avgRTT = conn.MTUResolveTime
-	}
-
-	if avgRTT <= 0 {
-		return 1.0 // Unprobed default neutral low score
-	}
-
-	_, score := CalculateResolverScore(downloadMTU, avgRTT, lossRatio)
-	if score <= 0 {
-		return 1.0
-	}
-	return score
-}
-
-func (b *Balancer) moveConnectionStateLocked(idx int, valid bool) {
-	if !valid {
-		b.connections[idx].IsValid = false
-		b.connections[idx].StandbyEligible = false
-		b.removeActiveIndexLocked(idx)
-		b.addInactiveIndexLocked(idx)
-		b.clearPreferredResolverReferencesLocked(b.connections[idx].Key)
-		return
-	}
-
-	// If already in activeIDs, make sure marked valid
-	for _, activeIdx := range b.activeIDs {
-		if activeIdx == idx {
-			b.connections[idx].IsValid = true
-			b.connections[idx].StandbyEligible = false
-			return
-		}
-	}
-
-	// If maxActiveResolvers is configured (> 0) and the active pool is full:
-	if b.maxActiveResolvers > 0 && len(b.activeIDs) >= b.maxActiveResolvers {
-		candScore := b.calculateConnectionScoreLocked(idx)
-
-		// Find lowest scoring resolver currently in activeIDs
-		worstActiveIdx := -1
-		worstActiveScore := math.MaxFloat64
-		worstActivePos := -1
-
-		for pos, activeIdx := range b.activeIDs {
-			score := b.calculateConnectionScoreLocked(activeIdx)
-			if score < worstActiveScore {
-				worstActiveScore = score
-				worstActiveIdx = activeIdx
-				worstActivePos = pos
-			}
-		}
-
-		// Only displace if the incoming candidate is strictly higher scoring
-		if worstActiveIdx >= 0 && candScore > worstActiveScore {
-			demotedConn := &b.connections[worstActiveIdx]
-			demotedConn.IsValid = false
-			demotedConn.StandbyEligible = true
-			b.activeIDs[worstActivePos] = idx // Replace in activeIDs slice
-			b.addInactiveIndexLocked(worstActiveIdx)
-			b.clearPreferredResolverReferencesLocked(demotedConn.Key)
-
-			b.removeInactiveIndexLocked(idx)
-			b.connections[idx].IsValid = true
-			b.connections[idx].StandbyEligible = false
-
-			if b.log != nil {
-				candConn := &b.connections[idx]
-				b.log.Infof("<green>🔄 DNS Resolver Promoted to Active Pool: %s (%s, score: %.1f) [Demoted: %s, score: %.1f] | Active Pool: %d/%d</green>",
-					candConn.ResolverLabel, candConn.Domain, candScore,
-					demotedConn.ResolverLabel, worstActiveScore,
-					len(b.activeIDs), len(b.connections))
-			}
-			return
-		}
-
-		// Candidate does not beat active resolvers -> Place in Standby pool
-		b.connections[idx].IsValid = false
-		b.connections[idx].StandbyEligible = true
-		b.addInactiveIndexLocked(idx)
-		b.removeActiveIndexLocked(idx)
-		if b.log != nil {
-			candConn := &b.connections[idx]
-			b.log.Debugf("<cyan>⏸ DNS Resolver Added to Standby Pool (Pool Full): %s (%s, score: %.1f) | Active: %d</cyan>",
-				candConn.ResolverLabel, candConn.Domain, candScore, len(b.activeIDs))
-		}
-		return
-	}
-
-	// Active pool has available capacity -> Add to activeIDs
-	b.connections[idx].IsValid = true
-	b.connections[idx].StandbyEligible = false
-	b.removeInactiveIndexLocked(idx)
-	b.addActiveIndexLocked(idx)
-}
-
-// OptimizeActivePool scans active resolvers and replaces degraded ones with better standby candidates.
-func (b *Balancer) OptimizeActivePool() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.optimizeActivePoolLocked()
-}
-
-func (b *Balancer) optimizeActivePoolLocked() bool {
-	if b.maxActiveResolvers <= 0 || len(b.activeIDs) == 0 || len(b.inactiveIDs) == 0 {
-		return false
-	}
-
-	swapped := false
-
-	for i := 0; i < len(b.activeIDs); i++ {
-		activeIdx := b.activeIDs[i]
-		activeScore := b.calculateConnectionScoreLocked(activeIdx)
-
-		// Find best qualified candidate in inactiveIDs
-		bestInactiveIdx := -1
-		bestInactiveScore := -1.0
-		for _, inactIdx := range b.inactiveIDs {
-			conn := &b.connections[inactIdx]
-			if !conn.StandbyEligible {
-				continue
-			}
-			if conn.UploadMTUBytes <= 0 || conn.DownloadMTUBytes <= 0 {
-				continue
-			}
-			if b.syncedUploadMTU > 0 && conn.UploadMTUBytes < b.syncedUploadMTU {
-				continue
-			}
-			if b.syncedDownloadMTU > 0 && conn.DownloadMTUBytes < b.syncedDownloadMTU {
-				continue
-			}
-			score := b.calculateConnectionScoreLocked(inactIdx)
-			if score > bestInactiveScore {
-				bestInactiveScore = score
-				bestInactiveIdx = inactIdx
-			}
-		}
-
-		// Swap if the best standby candidate is meaningfully better (>1.25x active score)
-		if bestInactiveIdx >= 0 && bestInactiveScore > (activeScore*1.25) {
-			demotedConn := &b.connections[activeIdx]
-			promotedConn := &b.connections[bestInactiveIdx]
-
-			demotedConn.IsValid = false
-			demotedConn.StandbyEligible = true
-			b.clearPreferredResolverReferencesLocked(demotedConn.Key)
-
-			promotedConn.IsValid = true
-			promotedConn.StandbyEligible = false
-
-			// Swap IDs
-			b.activeIDs[i] = bestInactiveIdx
-			b.removeInactiveIndexLocked(bestInactiveIdx)
-			b.addInactiveIndexLocked(activeIdx)
-
-			if b.log != nil {
-				b.log.Infof("<yellow>⚡ Active Resolver Swapped (Performance Degradation): %s (Score: %.1f) ➔ Replaced by %s (Score: %.1f)</yellow>",
-					demotedConn.ResolverLabel, activeScore,
-					promotedConn.ResolverLabel, bestInactiveScore)
-			}
-			swapped = true
-		}
-	}
-
-	return swapped
-}
-
-func (b *Balancer) selectInitialPreferredConnectionLocked() (Connection, bool) {
-	if len(b.activeIDs) == 0 {
-		return Connection{}, false
-	}
-
-	switch b.strategy {
-	case BalancingRandom, BalancingRoundRobin, BalancingRoundRobinDefault:
-		return b.selectTargetByStrategyLocked()
-	default:
-		if pool, pick, handled := b.strategyCandidatePoolLocked(""); handled {
-			if len(pool) == 0 {
-				return b.selectTargetByStrategyLocked()
-			}
-			return b.pickFromPoolLocked(pool, pick)
-		}
-		scorer, hasSignal := b.strategyScorerLocked()
-		if scorer == nil {
-			return b.selectTargetByStrategyLocked()
-		}
-
-		if !hasSignal {
-			return b.selectTargetByStrategyLocked()
-		}
-
-		topN := 10
-		if len(b.activeIDs) < topN {
-			topN = len(b.activeIDs)
-		}
-
-		pool := b.selectLowestScoreLocked(topN, scorer)
-		if len(pool) == 0 {
-			return b.selectTargetByStrategyLocked()
-		}
-
-		return b.pickFromPoolLocked(pool, poolPickRandom)
-	}
-}
-
-func (b *Balancer) getUniqueConnectionsExcludingLocked(requiredCount int, excludeKey string) []Connection {
-	if requiredCount <= 0 || len(b.activeIDs) == 0 {
-		return nil
-	}
-
-	all := b.getUniqueConnectionsLocked(requiredCount + 1)
-	selected := make([]Connection, 0, requiredCount)
-	for _, conn := range all {
-		if conn.Key == excludeKey {
-			continue
-		}
-		selected = append(selected, conn)
-		if len(selected) >= requiredCount {
-			break
-		}
-	}
-	return selected
-}
-
-func (b *Balancer) addActiveIndexLocked(idx int) {
-	for _, activeIdx := range b.activeIDs {
-		if activeIdx == idx {
-			return
-		}
-	}
-	b.activeIDs = append(b.activeIDs, idx)
-}
-
-func (b *Balancer) addInactiveIndexLocked(idx int) {
-	for _, inactiveIdx := range b.inactiveIDs {
-		if inactiveIdx == idx {
-			return
-		}
-	}
-	b.inactiveIDs = append(b.inactiveIDs, idx)
-}
-
-func (b *Balancer) removeActiveIndexLocked(idx int) {
-	for i, activeIdx := range b.activeIDs {
-		if activeIdx == idx {
-			b.activeIDs[i] = b.activeIDs[len(b.activeIDs)-1]
-			b.activeIDs = b.activeIDs[:len(b.activeIDs)-1]
-			break
-		}
-	}
-}
-
-func (b *Balancer) removeInactiveIndexLocked(idx int) {
-	for i, inactiveIdx := range b.inactiveIDs {
-		if inactiveIdx == idx {
-			b.inactiveIDs[i] = b.inactiveIDs[len(b.inactiveIDs)-1]
-			b.inactiveIDs = b.inactiveIDs[:len(b.inactiveIDs)-1]
-			break
-		}
-	}
-}
-
 func (b *Balancer) statsForKey(serverKey string) *connectionStats {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-
-	idx, ok := b.indexByKey[serverKey]
-	if !ok || idx < 0 || idx >= len(b.stats) {
+	if b == nil || b.pool == nil {
 		return nil
 	}
-
-	return b.stats[idx]
+	return b.pool.statsForKey(serverKey)
 }
 
 func (b *Balancer) connectionByKeyLocked(serverKey string) (*Connection, bool) {
-	idx, ok := b.indexByKey[serverKey]
-	if !ok || idx < 0 || idx >= len(b.connections) {
+	if b == nil || b.pool == nil {
 		return nil, false
 	}
-
-	return &b.connections[idx], true
+	conn, ok := b.pool.GetConnectionByKey(serverKey)
+	if !ok {
+		return nil, false
+	}
+	return &conn, true
 }
 
 func (s *connectionStats) ensureWindowLocked(now time.Time, window time.Duration) {
@@ -2017,133 +1578,143 @@ func (b *Balancer) pendingLookupForTest(key balancerResolverSampleKey) (balancer
 }
 
 func (b *Balancer) GetUniqueConnections(requiredCount int) []Connection {
-	if b == nil {
+	if b == nil || b.pool == nil {
 		return nil
 	}
-
+	active := b.pool.ActiveResolvers()
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return b.getUniqueConnectionsLocked(requiredCount)
+	return b.getUniqueConnectionsLocked(active, requiredCount)
 }
 
-func (b *Balancer) getUniqueConnectionsLocked(requiredCount int) []Connection {
-	count := normalizeRequiredCount(len(b.activeIDs), requiredCount, 1)
+func (b *Balancer) getUniqueConnectionsLocked(active []Connection, requiredCount int) []Connection {
+	count := normalizeRequiredCount(len(active), requiredCount, 1)
 	if count <= 0 {
 		return nil
 	}
 
 	switch b.strategy {
 	case BalancingRandom:
-		return b.selectRandomLocked(count)
+		return b.selectRandomLocked(active, count)
 	default:
-		if pool, pick, handled := b.strategyCandidatePoolLocked(""); handled {
+		if pool, pick, handled := b.strategyCandidatePoolLocked(active, ""); handled {
 			if len(pool) == 0 {
-				return b.selectRoundRobinLocked(count)
+				return b.selectRoundRobinLocked(active, count)
 			}
 			return b.limitConnectionPoolLocked(pool, count, pick)
 		}
-		scorer, hasSignal := b.strategyScorerLocked()
+		scorer, hasSignal := b.strategyScorerLocked(active)
 		if scorer == nil {
-			return b.selectRoundRobinLocked(count)
+			return b.selectRoundRobinLocked(active, count)
 		}
 
 		if !hasSignal {
-			return b.selectRoundRobinLocked(count)
+			return b.selectRoundRobinLocked(active, count)
 		}
 
-		return b.selectLowestScoreLocked(count, scorer)
+		return b.selectLowestScoreLocked(active, count, scorer)
 	}
 }
 
-func (b *Balancer) selectTargetByStrategyLocked() (Connection, bool) {
-	selected := b.getUniqueConnectionsLocked(1)
+func (b *Balancer) selectTargetByStrategyLocked(active []Connection) (Connection, bool) {
+	selected := b.getUniqueConnectionsLocked(active, 1)
 	if len(selected) == 0 {
 		return Connection{}, false
 	}
 	return selected[0], true
 }
 
-func (b *Balancer) getBestConnectionExcludingLocked(excludeKey string) (Connection, bool) {
+func (b *Balancer) getBestConnectionExcludingLocked(active []Connection, excludeKey string) (Connection, bool) {
 	switch b.strategy {
 	case BalancingRandom:
-		ordered := b.rotatedActiveIndicesLocked(1)
-		for _, idx := range ordered {
-			if b.connections[idx].Key == excludeKey {
+		ordered := b.rotatedActiveConnections(active, 1)
+		for _, conn := range ordered {
+			if conn.Key == excludeKey {
 				continue
 			}
-			return b.connections[idx], true
+			return conn, true
 		}
 		return Connection{}, false
 	default:
-		if pool, pick, handled := b.strategyCandidatePoolLocked(excludeKey); handled {
+		if pool, pick, handled := b.strategyCandidatePoolLocked(active, excludeKey); handled {
 			if len(pool) == 0 {
-				return b.roundRobinBestConnectionExcludingLocked(excludeKey)
+				return b.roundRobinBestConnectionExcludingLocked(active, excludeKey)
 			}
 			return b.pickFromPoolLocked(pool, pick)
 		}
-		scorer, hasSignal := b.strategyScorerLocked()
+		scorer, hasSignal := b.strategyScorerLocked(active)
 		if scorer == nil {
-			return b.roundRobinBestConnectionExcludingLocked(excludeKey)
+			return b.roundRobinBestConnectionExcludingLocked(active, excludeKey)
 		}
 
 		if !hasSignal {
-			return b.roundRobinBestConnectionExcludingLocked(excludeKey)
+			return b.roundRobinBestConnectionExcludingLocked(active, excludeKey)
 		}
 
-		return b.bestScoredConnectionExcludingLocked(scorer, excludeKey)
+		return b.bestScoredConnectionExcludingLocked(active, scorer, excludeKey)
 	}
 }
 
-func (b *Balancer) selectRoundRobinLocked(count int) []Connection {
-	n := len(b.activeIDs)
+func (b *Balancer) selectRoundRobinLocked(active []Connection, count int) []Connection {
+	n := len(active)
+	if n == 0 || count <= 0 {
+		return nil
+	}
 	start := roundRobinStartIndex(b.rrCounter.Add(uint64(count))-uint64(count), n)
 	selected := make([]Connection, count)
 	for i := 0; i < count; i++ {
-		selected[i] = b.connections[b.activeIDs[(start+i)%n]]
+		selected[i] = active[(start+i)%n]
 	}
 	return selected
 }
 
-func (b *Balancer) selectRandomLocked(count int) []Connection {
-	n := len(b.activeIDs)
+func (b *Balancer) selectRandomLocked(active []Connection, count int) []Connection {
+	n := len(active)
 	if count <= 0 || n == 0 {
 		return nil
 	}
 	if count == 1 {
-		idx := b.activeIDs[b.nextRandom()%uint64(n)]
-		return []Connection{b.connections[idx]}
+		idx := b.nextRandom() % uint64(n)
+		return []Connection{active[idx]}
 	}
 
-	indices := append([]int(nil), b.activeIDs...)
+	indices := make([]int, n)
+	for i := 0; i < n; i++ {
+		indices[i] = i
+	}
 	for i := 0; i < count; i++ {
 		j := i + int(b.nextRandom()%uint64(n-i))
 		indices[i], indices[j] = indices[j], indices[i]
 	}
-	return b.connectionsByIndicesLocked(indices[:count])
+	selected := make([]Connection, count)
+	for i := 0; i < count; i++ {
+		selected[i] = active[indices[i]]
+	}
+	return selected
 }
 
-func (b *Balancer) selectLowestScoreLocked(count int, scorer func(int) uint64) []Connection {
-	n := len(b.activeIDs)
+func (b *Balancer) selectLowestScoreLocked(active []Connection, count int, scorer func(conn Connection) uint64) []Connection {
+	n := len(active)
 	if count <= 0 || n == 0 {
 		return nil
 	}
 	if count == 1 {
-		conn, ok := b.bestScoredConnectionLocked(scorer)
+		conn, ok := b.bestScoredConnectionLocked(active, scorer)
 		if ok {
 			return []Connection{conn}
 		}
 		return nil
 	}
 
-	type scoredIdx struct {
-		idx   int
+	type scoredConn struct {
+		conn  Connection
 		score uint64
 	}
 
-	ordered := b.rotatedActiveIndicesLocked(count)
-	scored := make([]scoredIdx, n)
-	for i, idx := range ordered {
-		scored[i] = scoredIdx{idx: idx, score: scorer(idx)}
+	ordered := b.rotatedActiveConnections(active, count)
+	scored := make([]scoredConn, n)
+	for i, conn := range ordered {
+		scored[i] = scoredConn{conn: conn, score: scorer(conn)}
 	}
 
 	for i := 0; i < count && i < n; i++ {
@@ -2156,94 +1727,90 @@ func (b *Balancer) selectLowestScoreLocked(count int, scorer func(int) uint64) [
 		scored[i], scored[minIdx] = scored[minIdx], scored[i]
 	}
 
-	indices := make([]int, count)
+	selected := make([]Connection, count)
 	for i := 0; i < count; i++ {
-		indices[i] = scored[i].idx
-	}
-	return b.connectionsByIndicesLocked(indices)
-}
-
-func (b *Balancer) connectionsByIndicesLocked(indices []int) []Connection {
-	selected := make([]Connection, len(indices))
-	for i, idx := range indices {
-		if idx < 0 || idx >= len(b.connections) {
-			continue
-		}
-		selected[i] = b.connections[idx]
+		selected[i] = scored[i].conn
 	}
 	return selected
 }
 
-func (b *Balancer) bestScoredConnectionLocked(scorer func(int) uint64) (Connection, bool) {
-	ordered := b.rotatedActiveIndicesLocked(1)
+func (b *Balancer) bestScoredConnectionLocked(active []Connection, scorer func(conn Connection) uint64) (Connection, bool) {
+	if len(active) == 0 {
+		return Connection{}, false
+	}
+	ordered := b.rotatedActiveConnections(active, 1)
 	bestIndex := -1
 	var bestScore uint64
-	for _, idx := range ordered {
-		score := scorer(idx)
+	for i, conn := range ordered {
+		score := scorer(conn)
 		if bestIndex == -1 || score < bestScore {
-			bestIndex = idx
+			bestIndex = i
 			bestScore = score
 		}
 	}
 	if bestIndex < 0 {
 		return Connection{}, false
 	}
-	return b.connections[bestIndex], true
+	return ordered[bestIndex], true
 }
 
-func (b *Balancer) bestScoredConnectionExcludingLocked(scorer func(int) uint64, excludeKey string) (Connection, bool) {
-	ordered := b.rotatedActiveIndicesLocked(1)
+func (b *Balancer) bestScoredConnectionExcludingLocked(active []Connection, scorer func(conn Connection) uint64, excludeKey string) (Connection, bool) {
+	if len(active) == 0 {
+		return Connection{}, false
+	}
+	ordered := b.rotatedActiveConnections(active, 1)
 	bestIndex := -1
 	var bestScore uint64
-	for _, idx := range ordered {
-		if b.connections[idx].Key == excludeKey {
+	for i, conn := range ordered {
+		if conn.Key == excludeKey {
 			continue
 		}
-		score := scorer(idx)
+		score := scorer(conn)
 		if bestIndex == -1 || score < bestScore {
-			bestIndex = idx
+			bestIndex = i
 			bestScore = score
 		}
 	}
 	if bestIndex < 0 {
 		return Connection{}, false
 	}
-	return b.connections[bestIndex], true
+	return ordered[bestIndex], true
 }
 
-func (b *Balancer) roundRobinBestConnectionLocked() (Connection, bool) {
-	if len(b.activeIDs) == 0 {
+func (b *Balancer) roundRobinBestConnectionLocked(active []Connection) (Connection, bool) {
+	if len(active) == 0 {
 		return Connection{}, false
 	}
-	pos := roundRobinStartIndex(b.rrCounter.Add(1)-1, len(b.activeIDs))
-	return b.connections[b.activeIDs[pos]], true
+	pos := roundRobinStartIndex(b.rrCounter.Add(1)-1, len(active))
+	return active[pos], true
 }
 
-func (b *Balancer) roundRobinBestConnectionExcludingLocked(excludeKey string) (Connection, bool) {
-	if len(b.activeIDs) == 0 {
+func (b *Balancer) roundRobinBestConnectionExcludingLocked(active []Connection, excludeKey string) (Connection, bool) {
+	if len(active) == 0 {
 		return Connection{}, false
 	}
-	for _, idx := range b.rotatedActiveIndicesLocked(1) {
-		if b.connections[idx].Key == excludeKey {
+	for _, conn := range b.rotatedActiveConnections(active, 1) {
+		if conn.Key == excludeKey {
 			continue
 		}
-		return b.connections[idx], true
+		return conn, true
 	}
 	return Connection{}, false
 }
 
-func (b *Balancer) rotatedActiveIndicesLocked(step int) []int {
-	if len(b.activeIDs) == 0 {
+func (b *Balancer) rotatedActiveConnections(active []Connection, step int) []Connection {
+	n := len(active)
+	if n == 0 {
 		return nil
 	}
 	if step < 1 {
 		step = 1
 	}
 
-	start := roundRobinStartIndex(b.rrCounter.Add(uint64(step))-uint64(step), len(b.activeIDs))
-	ordered := make([]int, len(b.activeIDs))
-	for i := range b.activeIDs {
-		ordered[i] = b.activeIDs[(start+i)%len(b.activeIDs)]
+	start := roundRobinStartIndex(b.rrCounter.Add(uint64(step))-uint64(step), n)
+	ordered := make([]Connection, n)
+	for i := range active {
+		ordered[i] = active[(start+i)%n]
 	}
 	return ordered
 }
@@ -2255,9 +1822,9 @@ func roundRobinStartIndex(counter uint64, n int) int {
 	return int(counter % uint64(n))
 }
 
-func (b *Balancer) hasLossSignalLocked() bool {
-	for _, idx := range b.activeIDs {
-		stats := b.stats[idx]
+func (b *Balancer) hasLossSignalLocked(active []Connection) bool {
+	for _, conn := range active {
+		stats := b.statsForKey(conn.Key)
 		if stats == nil {
 			continue
 		}
@@ -2269,9 +1836,9 @@ func (b *Balancer) hasLossSignalLocked() bool {
 	return false
 }
 
-func (b *Balancer) hasLatencySignalLocked() bool {
-	for _, idx := range b.activeIDs {
-		stats := b.stats[idx]
+func (b *Balancer) hasLatencySignalLocked(active []Connection) bool {
+	for _, conn := range active {
+		stats := b.statsForKey(conn.Key)
 		if stats == nil {
 			continue
 		}
@@ -2283,18 +1850,18 @@ func (b *Balancer) hasLatencySignalLocked() bool {
 	return false
 }
 
-func (b *Balancer) hasHybridSignalLocked() bool {
-	return b.hasLossSignalLocked() || b.hasLatencySignalLocked()
+func (b *Balancer) hasHybridSignalLocked(active []Connection) bool {
+	return b.hasLossSignalLocked(active) || b.hasLatencySignalLocked(active)
 }
 
-func (b *Balancer) strategyScorerLocked() (func(int) uint64, bool) {
+func (b *Balancer) strategyScorerLocked(active []Connection) (func(conn Connection) uint64, bool) {
 	switch b.strategy {
 	case BalancingLeastLoss:
-		return b.lossScoreLocked, b.hasLossSignalLocked()
+		return b.lossScoreLocked, b.hasLossSignalLocked(active)
 	case BalancingLowestLatency:
-		return b.latencyScoreLocked, b.hasLatencySignalLocked()
+		return b.latencyScoreLocked, b.hasLatencySignalLocked(active)
 	case BalancingHybridScore:
-		return b.hybridScoreLocked, b.hasHybridSignalLocked()
+		return b.hybridScoreLocked, b.hasHybridSignalLocked(active)
 	default:
 		return nil, false
 	}
@@ -2307,23 +1874,23 @@ const (
 	poolPickRoundRobin
 )
 
-func (b *Balancer) strategyCandidatePoolLocked(excludeKey string) ([]Connection, balancerPoolPick, bool) {
+func (b *Balancer) strategyCandidatePoolLocked(active []Connection, excludeKey string) ([]Connection, balancerPoolPick, bool) {
 	switch b.strategy {
 	case BalancingLossThenLatency:
-		if !b.hasHybridSignalLocked() {
+		if !b.hasHybridSignalLocked(active) {
 			return nil, poolPickRandom, true
 		}
-		return b.lossThenLatencyCandidatesLocked(excludeKey), poolPickRandom, true
+		return b.lossThenLatencyCandidatesLocked(active, excludeKey), poolPickRandom, true
 	case BalancingLeastLossTopRandom:
-		if !b.hasLossSignalLocked() {
+		if !b.hasLossSignalLocked(active) {
 			return nil, poolPickRandom, true
 		}
-		return b.leastLossTopTierCandidatesLocked(excludeKey), poolPickRandom, true
+		return b.leastLossTopTierCandidatesLocked(active, excludeKey), poolPickRandom, true
 	case BalancingLeastLossTopRoundRobin:
-		if !b.hasLossSignalLocked() {
+		if !b.hasLossSignalLocked(active) {
 			return nil, poolPickRoundRobin, true
 		}
-		return b.leastLossTopTierCandidatesLocked(excludeKey), poolPickRoundRobin, true
+		return b.leastLossTopTierCandidatesLocked(active, excludeKey), poolPickRoundRobin, true
 	default:
 		return nil, poolPickRandom, false
 	}
@@ -2371,36 +1938,37 @@ func (b *Balancer) limitConnectionPoolLocked(pool []Connection, count int, pick 
 	}
 }
 
-func (b *Balancer) lossThenLatencyCandidatesLocked(excludeKey string) []Connection {
+func (b *Balancer) lossThenLatencyCandidatesLocked(active []Connection, excludeKey string) []Connection {
 	type candidate struct {
-		idx     int
+		conn    Connection
 		loss    uint64
 		latency uint64
 		hasRTT  bool
 	}
 
-	if !b.hasHybridSignalLocked() || len(b.activeIDs) == 0 {
+	if !b.hasHybridSignalLocked(active) || len(active) == 0 {
 		return nil
 	}
 
-	candidates := make([]candidate, 0, len(b.activeIDs))
+	candidates := make([]candidate, 0, len(active))
 	bestLoss := ^uint64(0)
-	for _, idx := range b.activeIDs {
-		if excludeKey != "" && b.connections[idx].Key == excludeKey {
+	for _, conn := range active {
+		if excludeKey != "" && conn.Key == excludeKey {
 			continue
 		}
-		loss := b.lossScoreLocked(idx)
-		latency := b.hybridLatencyPenaltyLocked(idx)
+		loss := b.lossScoreLocked(conn)
+		latency := b.hybridLatencyPenaltyLocked(conn)
 		hasRTT := false
-		if idx >= 0 && idx < len(b.stats) && b.stats[idx] != nil {
-			_, _, _, _, count := b.stats[idx].snapshot()
+		stats := b.statsForKey(conn.Key)
+		if stats != nil {
+			_, _, _, _, count := stats.snapshot()
 			hasRTT = count > 0
 		}
 		if loss < bestLoss {
 			bestLoss = loss
 		}
 		candidates = append(candidates, candidate{
-			idx:     idx,
+			conn:    conn,
 			loss:    loss,
 			latency: latency,
 			hasRTT:  hasRTT,
@@ -2434,7 +2002,7 @@ func (b *Balancer) lossThenLatencyCandidatesLocked(excludeKey string) []Connecti
 	if bestLatency == ^uint64(0) {
 		selected := make([]Connection, 0, len(lossShortlist))
 		for _, cand := range lossShortlist {
-			selected = append(selected, b.connections[cand.idx])
+			selected = append(selected, cand.conn)
 		}
 		return selected
 	}
@@ -2445,14 +2013,14 @@ func (b *Balancer) lossThenLatencyCandidatesLocked(excludeKey string) []Connecti
 	selected := make([]Connection, 0, len(lossShortlist))
 	for _, cand := range lossShortlist {
 		if !cand.hasRTT || cand.latency <= latencyCutoff {
-			selected = append(selected, b.connections[cand.idx])
+			selected = append(selected, cand.conn)
 		}
 	}
 	if len(selected) > 0 {
 		return selected
 	}
 
-	return []Connection{b.connections[lossShortlist[0].idx]}
+	return []Connection{lossShortlist[0].conn}
 }
 
 func latencyToleranceForTier(bestLatency uint64) uint64 {
@@ -2470,24 +2038,24 @@ func latencyToleranceForTier(bestLatency uint64) uint64 {
 	return tolerance
 }
 
-func (b *Balancer) leastLossTopTierCandidatesLocked(excludeKey string) []Connection {
+func (b *Balancer) leastLossTopTierCandidatesLocked(active []Connection, excludeKey string) []Connection {
 	type candidate struct {
-		idx  int
+		conn Connection
 		loss uint64
 	}
 
-	if !b.hasLossSignalLocked() || len(b.activeIDs) == 0 {
+	if !b.hasLossSignalLocked(active) || len(active) == 0 {
 		return nil
 	}
 
-	candidates := make([]candidate, 0, len(b.activeIDs))
-	for _, idx := range b.activeIDs {
-		if excludeKey != "" && b.connections[idx].Key == excludeKey {
+	candidates := make([]candidate, 0, len(active))
+	for _, conn := range active {
+		if excludeKey != "" && conn.Key == excludeKey {
 			continue
 		}
 		candidates = append(candidates, candidate{
-			idx:  idx,
-			loss: b.lossScoreLocked(idx),
+			conn: conn,
+			loss: b.lossScoreLocked(conn),
 		})
 	}
 	if len(candidates) == 0 {
@@ -2511,41 +2079,43 @@ func (b *Balancer) leastLossTopTierCandidatesLocked(excludeKey string) []Connect
 
 	selected := make([]Connection, 0, topCount)
 	for i := 0; i < topCount; i++ {
-		selected = append(selected, b.connections[candidates[i].idx])
+		selected = append(selected, candidates[i].conn)
 	}
 	return selected
 }
 
-func (b *Balancer) lossScoreLocked(idx int) uint64 {
-	if idx < 0 || idx >= len(b.stats) || b.stats[idx] == nil {
+func (b *Balancer) lossScoreLocked(conn Connection) uint64 {
+	stats := b.statsForKey(conn.Key)
+	if stats == nil {
 		return 0
 	}
-	sent, _, lost, _, _ := b.stats[idx].snapshot()
+	sent, _, lost, _, _ := stats.snapshot()
 	if sent == 0 || lost == 0 {
 		return 0
 	}
 	return (lost * 1000) / sent
 }
 
-func (b *Balancer) latencyScoreLocked(idx int) uint64 {
-	if idx < 0 || idx >= len(b.stats) || b.stats[idx] == nil {
+func (b *Balancer) latencyScoreLocked(conn Connection) uint64 {
+	stats := b.statsForKey(conn.Key)
+	if stats == nil {
 		return 999000
 	}
-	_, _, _, sum, count := b.stats[idx].snapshot()
+	_, _, _, sum, count := stats.snapshot()
 	if count == 0 {
 		return 999000
 	}
 	return sum / count
 }
 
-func (b *Balancer) hybridScoreLocked(idx int) uint64 {
-	lossPenalty := b.lossScoreLocked(idx)
-	latencyPenalty := b.hybridLatencyPenaltyLocked(idx)
+func (b *Balancer) hybridScoreLocked(conn Connection) uint64 {
+	lossPenalty := b.lossScoreLocked(conn)
+	latencyPenalty := b.hybridLatencyPenaltyLocked(conn)
 	return lossPenalty*8 + latencyPenalty
 }
 
-func (b *Balancer) hybridLatencyPenaltyLocked(idx int) uint64 {
-	latencyMicros := b.latencyScoreLocked(idx)
+func (b *Balancer) hybridLatencyPenaltyLocked(conn Connection) uint64 {
+	latencyMicros := b.latencyScoreLocked(conn)
 	if latencyMicros == 999000 {
 		return 200
 	}

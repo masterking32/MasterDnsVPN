@@ -15,13 +15,11 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
-	"sort"
 	"sync"
 	"time"
 
 	DnsParser "masterdnsvpn-go/internal/dnsparser"
 	Enums "masterdnsvpn-go/internal/enums"
-	"masterdnsvpn-go/internal/logger"
 )
 
 // BurstProbeResult holds the measured metrics from a pipelined micro-burst test.
@@ -192,7 +190,11 @@ func (c *Client) sendPipelinedMicroBurst(
 
 		now := time.Now()
 		packet, err := DnsParser.ExtractVPNResponse(readBuf[:n], useBase64Flag)
-		if err != nil || packet.PacketType != Enums.PACKET_MTU_DOWN_RES || len(packet.Payload) < mtuProbeCodeLength {
+		if err != nil || packet.PacketType != Enums.PACKET_MTU_DOWN_RES || len(packet.Payload) != effectiveDownloadSize || len(packet.Payload) < mtuProbeCodeLength+2 {
+			continue
+		}
+
+		if int(binary.BigEndian.Uint16(packet.Payload[mtuProbeCodeLength:mtuProbeCodeLength+2])) != effectiveDownloadSize {
 			continue
 		}
 
@@ -293,198 +295,19 @@ func calculateBurstScore(result BurstProbeResult) float64 {
 	if speedKBps <= 0 {
 		speedKBps = result.ThroughputKBps
 	}
-	if speedKBps <= 0 {
-		downloadMTU := result.DownloadMTUBytes
-		if downloadMTU <= 0 && result.ReceivedCount > 0 && result.TotalBytesRx > 0 {
-			downloadMTU = result.TotalBytesRx / result.ReceivedCount
-		}
-		if downloadMTU <= 0 {
-			downloadMTU = 500
-		}
-		speedKBps, _ = CalculateResolverScore(downloadMTU, result.AverageRTT, result.LossRatio)
+	downloadMTU := result.DownloadMTUBytes
+	if downloadMTU <= 0 && result.ReceivedCount > 0 && result.TotalBytesRx > 0 {
+		downloadMTU = result.TotalBytesRx / result.ReceivedCount
 	}
 
-	lossRatio := result.LossRatio
-	if lossRatio < 0 {
-		lossRatio = 0
-	} else if lossRatio > 1.0 {
-		lossRatio = 1.0
-	}
-
-	effectiveThroughput := speedKBps * (1.0 - lossRatio)
-	if effectiveThroughput < 0 {
-		effectiveThroughput = 0
-	}
-
-	rttMillis := float64(result.AverageRTT.Milliseconds())
-	latencyPenalty := 1.0 + (rttMillis / 500.0)
-	if latencyPenalty <= 0 {
-		latencyPenalty = 1.0
-	}
-
-	return effectiveThroughput / latencyPenalty
-}
-
-// runMicroBurstQualification runs parallel pipelined bursts across all MTU-tested resolvers,
-// ranks them, and selects the top active candidates.
-func (c *Client) runMicroBurstQualification(ctx context.Context, validConns []Connection, maxActiveLimit ...int) ([]Connection, []QualifiedResolver) {
-	if len(validConns) == 0 {
-		return nil, nil
-	}
-
-	parallelism := c.cfg.MicroBurstParallelism
-	if parallelism < 1 {
-		parallelism = 8
-	}
-	if parallelism > len(validConns) {
-		parallelism = len(validConns)
-	}
-
-	packetCount := c.cfg.MicroBurstPacketCount
-	if packetCount < 2 {
-		packetCount = 6
-	}
-
-	timeout := c.resolverHealthProbeTimeout()
-	results := make([]QualifiedResolver, len(validConns))
-
-	if c.log != nil && c.log.Enabled(logger.LevelInfo) {
-		c.log.Infof("%s", "================================================================================")
-		c.log.Infof("<yellow>⚡ Running Micro-Burst Qualification (%d packets per resolver, parallel=%d)...</yellow>", packetCount, parallelism)
-	}
-
-	jobs := make(chan int, len(validConns))
-	var wg sync.WaitGroup
-
-	for range parallelism {
-		wg.Go(func() {
-			for idx := range jobs {
-				if ctx.Err() != nil {
-					return
-				}
-				conn := validConns[idx]
-				transport, err := newUDPQueryTransport(conn.ResolverLabel)
-				if err != nil {
-					results[idx] = QualifiedResolver{
-						Connection: conn,
-						BurstResult: BurstProbeResult{
-							SentCount:    packetCount,
-							RejectReason: fmt.Sprintf("dial error: %v", err),
-						},
-						Score: 0.0,
-					}
-					continue
-				}
-
-				burstResult := c.sendPipelinedMicroBurst(
-					ctx,
-					conn,
-					transport,
-					packetCount,
-					c.syncedDownloadMTU,
-					c.syncedUploadMTU,
-					timeout,
-				)
-				_ = transport.conn.Close()
-
-				score := calculateBurstScore(burstResult)
-				results[idx] = QualifiedResolver{
-					Connection:  conn,
-					BurstResult: burstResult,
-					Score:       score,
-				}
-			}
-		})
-	}
-
-	for i := range validConns {
-		jobs <- i
-	}
-	close(jobs)
-	wg.Wait()
-
-	// Sort by Score descending, with Loss and RTT tie-breaking
-	sort.Slice(results, func(i, j int) bool {
-		if results[i].Score != results[j].Score {
-			return results[i].Score > results[j].Score
-		}
-		if results[i].BurstResult.LossRatio != results[j].BurstResult.LossRatio {
-			return results[i].BurstResult.LossRatio < results[j].BurstResult.LossRatio
-		}
-		return results[i].BurstResult.AverageRTT < results[j].BurstResult.AverageRTT
+	ev := EvaluateResolver(ResolverMetrics{
+		DownloadMTUBytes: downloadMTU,
+		RTT:              result.AverageRTT,
+		LossRatio:        result.LossRatio,
+		ThroughputKBps:   speedKBps,
 	})
-
-	for i := range results {
-		results[i].Rank = i + 1
+	if math.IsNaN(ev.CompositeScore) || ev.CompositeScore <= 0 {
+		return 0.0
 	}
-
-	// Filter qualified vs standby/disqualified
-	qualifiedConns := make([]Connection, 0, len(results))
-	for _, r := range results {
-		if r.BurstResult.Qualified {
-			qualifiedConns = append(qualifiedConns, r.Connection)
-		}
-	}
-
-	// If no resolver qualified under strict criteria, keep qualifiedConns empty so caller reports ErrNoValidConnections
-	if len(qualifiedConns) == 0 {
-		if c.log != nil && c.log.Enabled(logger.LevelWarn) {
-			c.log.Warnf("<yellow>⚠️ No resolvers met burst qualification criteria.</yellow>")
-		}
-	}
-
-	// Apply MaxActiveResolvers limit
-	maxActive := c.cfg.MaxActiveResolvers
-	if len(maxActiveLimit) > 0 {
-		limit := maxActiveLimit[0]
-		if limit < 0 {
-			limit = 0
-		}
-		if maxActive <= 0 || limit < maxActive {
-			maxActive = limit
-		}
-	}
-	if maxActive >= 0 && len(qualifiedConns) > maxActive {
-		qualifiedConns = qualifiedConns[:maxActive]
-	}
-
-	// Seed Balancer connection stats and validity
-	activeMap := make(map[string]bool, len(qualifiedConns))
-	for _, conn := range qualifiedConns {
-		activeMap[conn.Key] = true
-	}
-
-	// Phase 1: Seed burst stats for all qualified candidates
-	for _, r := range results {
-		if r.BurstResult.Qualified {
-			c.balancer.SeedBurstStats(
-				r.Connection.Key,
-				r.BurstResult.SentCount,
-				r.BurstResult.ReceivedCount,
-				r.BurstResult.AverageRTT,
-			)
-		}
-	}
-
-	// Phase 2: Deactivate unselected candidates first to clear active pool capacity
-	for _, r := range results {
-		if !activeMap[r.Connection.Key] {
-			c.balancer.SetConnectionValidity(r.Connection.Key, false)
-		}
-	}
-
-	// Phase 3: Admit qualified winners into active pool in ranked order
-	for _, conn := range qualifiedConns {
-		c.balancer.SetConnectionValidity(conn.Key, true)
-	}
-
-	// Phase 4: Mark remaining qualified candidates as standby eligible
-	for _, r := range results {
-		if !activeMap[r.Connection.Key] && r.BurstResult.Qualified {
-			c.balancer.SetConnectionStandbyEligible(r.Connection.Key, true)
-		}
-	}
-
-	c.logMicroBurstCompletion(results, len(qualifiedConns))
-	return qualifiedConns, results
+	return ev.CompositeScore
 }

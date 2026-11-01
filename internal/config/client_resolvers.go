@@ -8,7 +8,6 @@
 package config
 
 import (
-	"bufio"
 	"fmt"
 	"net/netip"
 	"os"
@@ -42,51 +41,106 @@ func LoadClientResolvers(filename string) ([]ResolverAddress, map[string]int, er
 		return nil, nil, err
 	}
 
-	file, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, nil, fmt.Errorf("resolver file not found: %s", path)
+		return nil, nil, fmt.Errorf("read resolver file %s: %w", path, err)
 	}
-	defer file.Close()
+	userLines, rankedLines, err := splitResolverFile(string(data))
+	if err != nil {
+		return nil, nil, fmt.Errorf("read resolver file %s: %w", path, err)
+	}
+	endpoints, resolverMap := parseResolverLines(userLines)
+	if len(endpoints) == 0 {
+		return nil, nil, fmt.Errorf("no valid resolvers found in %s", path)
+	}
+	ranked, _ := parseResolverLines(rankedLines)
+	ordered := filterRankedResolvers(ranked, endpoints)
+	seen := make(map[ResolverAddress]bool, len(ordered))
+	for _, endpoint := range ordered {
+		seen[endpoint] = true
+	}
+	for _, endpoint := range endpoints {
+		if !seen[endpoint] {
+			ordered = append(ordered, endpoint)
+		}
+	}
+	return ordered, resolverMap, nil
+}
 
-	endpoints := make([]ResolverAddress, 0, 64)
-	resolverMap := make(map[string]int, 64)
-	seenIPs := make(map[string]struct{}, 64)
+// Managed rankings are hints; only entries outside the block authorize endpoints.
+func splitResolverFile(data string) (user, ranked []string, err error) {
+	inBlock := false
+	for _, line := range strings.Split(data, "\n") {
+		switch strings.TrimSpace(line) {
+		case AutoRankedHeaderMarker:
+			if inBlock {
+				return nil, nil, fmt.Errorf("unterminated managed block before nested header")
+			}
+			inBlock = true
+		case AutoRankedFooterMarker:
+			if !inBlock {
+				return nil, nil, fmt.Errorf("unexpected managed block footer")
+			}
+			inBlock = false
+		default:
+			if inBlock {
+				ranked = append(ranked, line)
+			} else {
+				user = append(user, line)
+			}
+		}
+	}
+	if inBlock {
+		return nil, nil, fmt.Errorf("unterminated managed block: missing footer marker %q", AutoRankedFooterMarker)
+	}
+	return user, ranked, nil
+}
 
-	scanner := bufio.NewScanner(file)
-	lineNum := 0
-	for scanner.Scan() {
-		lineNum++
-		line := strings.TrimSpace(scanner.Text())
+func parseResolverLines(lines []string) ([]ResolverAddress, map[string]int) {
+	endpoints := make([]ResolverAddress, 0, len(lines))
+	resolverMap := make(map[string]int)
+	seenIPs := make(map[string]struct{})
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-
 		target, port, err := parseResolverEntry(line)
 		if err != nil {
 			continue
 		}
-
 		if !target.isPrefix {
 			addResolver(&endpoints, resolverMap, seenIPs, target.addr.String(), port)
 			continue
 		}
-
-		usableHosts, ok := usableHostCount(target.prefix)
-		if !ok || usableHosts > maxResolverHosts {
+		count, ok := usableHostCount(target.prefix)
+		if !ok || count > maxResolverHosts {
 			continue
 		}
-
 		appendPrefixResolvers(&endpoints, resolverMap, seenIPs, target.prefix, port)
 	}
+	return endpoints, resolverMap
+}
 
-	if err := scanner.Err(); err != nil {
-		return nil, nil, fmt.Errorf("failed to read resolver file %s: %w", path, err)
+func filterRankedResolvers(ranked, configured []ResolverAddress) []ResolverAddress {
+	allowed := make(map[ResolverAddress]bool, len(configured))
+	for _, r := range configured {
+		allowed[r] = true
 	}
-	if len(endpoints) == 0 {
-		return nil, nil, fmt.Errorf("no valid resolvers found in %s", path)
+	result := make([]ResolverAddress, 0, len(ranked))
+	for _, r := range ranked {
+		if r.Port == 0 {
+			r.Port = defaultResolverPort
+		}
+		if addr, err := netip.ParseAddr(r.IP); err == nil {
+			r.IP = addr.Unmap().String()
+		}
+		if allowed[r] {
+			result = append(result, r)
+			delete(allowed, r)
+		}
 	}
-
-	return endpoints, resolverMap, nil
+	return result
 }
 
 // FormatResolverAddressForFile formats a ResolverAddress for standard text configuration.
@@ -110,7 +164,7 @@ func FormatResolverAddressForFile(addr ResolverAddress) string {
 // UpdateResolversFileWithRanked updates or prepends the auto-ranked best resolvers block
 // at the top of the resolvers file while preserving all custom lines, comments, and subnets below.
 func UpdateResolversFileWithRanked(filePath string, ranked []ResolverAddress) error {
-	if filePath == "" || len(ranked) == 0 {
+	if filePath == "" {
 		return nil
 	}
 
@@ -126,27 +180,13 @@ func UpdateResolversFileWithRanked(filePath string, ranked []ResolverAddress) er
 			return err
 		}
 	} else {
-		lines := strings.Split(string(data), "\n")
-		inAutoBlock := false
-		for _, line := range lines {
-			trimmed := strings.TrimSpace(line)
-			if trimmed == AutoRankedHeaderMarker {
-				inAutoBlock = true
-				continue
-			}
-			if trimmed == AutoRankedFooterMarker {
-				inAutoBlock = false
-				continue
-			}
-			if inAutoBlock {
-				continue
-			}
-			userLines = append(userLines, line)
-		}
-		if inAutoBlock {
-			return fmt.Errorf("unterminated managed block in %s: missing footer marker %q", path, AutoRankedFooterMarker)
+		userLines, _, err = splitResolverFile(string(data))
+		if err != nil {
+			return fmt.Errorf("update resolver file %s: %w", path, err)
 		}
 	}
+	configured, _ := parseResolverLines(userLines)
+	ranked = filterRankedResolvers(ranked, configured)
 
 	// Trim leading and trailing empty lines from userLines for clean formatting
 	for len(userLines) > 0 && strings.TrimSpace(userLines[0]) == "" {
@@ -182,10 +222,9 @@ func UpdateResolversFileWithRanked(filePath string, ranked []ResolverAddress) er
 	if err := os.WriteFile(tmpFile, []byte(buf.String()), 0o644); err != nil {
 		return err
 	}
+	defer os.Remove(tmpFile)
 	return os.Rename(tmpFile, path)
 }
-
-
 
 func addResolver(endpoints *[]ResolverAddress, resolverMap map[string]int, seenIPs map[string]struct{}, ip string, port int) {
 	if _, exists := seenIPs[ip]; exists {

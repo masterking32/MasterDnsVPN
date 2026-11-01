@@ -125,12 +125,12 @@ func TestLogResolverReactivatedFormatting(t *testing.T) {
 	}
 
 	burstResult := &BurstProbeResult{
-		SentCount:       6,
-		ReceivedCount:   6,
-		LossRatio:       0.0,
-		ThroughputKBps:  195.4,
-		AverageRTT:      24 * time.Millisecond,
-		Qualified:       true,
+		SentCount:      6,
+		ReceivedCount:  6,
+		LossRatio:      0.0,
+		ThroughputKBps: 195.4,
+		AverageRTT:     24 * time.Millisecond,
+		Qualified:      true,
 	}
 
 	// Test with burstResult
@@ -142,7 +142,7 @@ func TestLogResolverReactivatedFormatting(t *testing.T) {
 
 func TestRuntimeStatsLoopTerminatesOnContextDone(t *testing.T) {
 	cfg := config.DefaultClientConfig()
-	cfg.RuntimeStatsIntervalSeconds = 0.05 // 50ms for fast test
+	cfg.RuntimeStatsIntervalSeconds = 60.0
 
 	c := New(cfg, nil, nil)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -153,7 +153,6 @@ func TestRuntimeStatsLoopTerminatesOnContextDone(t *testing.T) {
 		close(done)
 	}()
 
-	time.Sleep(100 * time.Millisecond)
 	cancel()
 
 	select {
@@ -167,7 +166,7 @@ func TestRuntimeStatsLoopTerminatesOnContextDone(t *testing.T) {
 func TestClientSaveRankedResolversToFile(t *testing.T) {
 	dir := t.TempDir()
 	resolversPath := filepath.Join(dir, "client_resolvers.txt")
-	_ = os.WriteFile(resolversPath, []byte("# User custom\n10.0.0.1\n"), 0o644)
+	_ = os.WriteFile(resolversPath, []byte("# User custom\n10.0.0.1\n1.1.1.1\n8.8.8.8\n"), 0o644)
 
 	cfg := config.DefaultClientConfig()
 	cfg.ResolversFilePath = resolversPath
@@ -218,46 +217,18 @@ func TestClientSaveRankedResolversToFile(t *testing.T) {
 	}
 }
 
-func TestRuntimeStatsLoopExecutesPoolOptimizationWhenIntervalZero(t *testing.T) {
+func TestRuntimeStatsLoopDisabled(t *testing.T) {
 	cfg := config.DefaultClientConfig()
-	cfg.RuntimeStatsIntervalSeconds = 0.0 // disabled stats logging
-
+	cfg.RuntimeStatsIntervalSeconds = 0
 	c := New(cfg, nil, nil)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	done := make(chan struct{})
 	go func() {
-		c.runRuntimeStatsLoop(ctx)
+		c.runRuntimeStatsLoop(context.Background())
 		close(done)
 	}()
-
-	time.Sleep(50 * time.Millisecond)
 	select {
 	case <-done:
-		t.Fatal("expected runRuntimeStatsLoop to stay alive for periodic pool optimization when interval is 0")
-	default:
-		// Succeeded: goroutine is running
-	}
-
-	cancel()
-	select {
-	case <-done:
-		// Clean termination
-	case <-time.After(1 * time.Second):
-		t.Fatal("runRuntimeStatsLoop did not terminate within deadline")
+	case <-time.After(time.Second):
+		t.Fatal("disabled statistics loop did not exit")
 	}
 }
-
-func TestRuntimeStatsStartedCompareAndSwapGuard(t *testing.T) {
-	cfg := config.DefaultClientConfig()
-	c := New(cfg, nil, nil)
-
-	if !c.runtimeStatsStarted.CompareAndSwap(false, true) {
-		t.Fatal("expected first CompareAndSwap to succeed")
-	}
-	if c.runtimeStatsStarted.CompareAndSwap(false, true) {
-		t.Fatal("expected subsequent CompareAndSwap to return false across session reset")
-	}
-}
-

@@ -553,7 +553,7 @@ Example:
 192.168.10.0/24:5300
 ```
 
-> 💡 **Smart Warm-Start:** The client preserves the exact line order of `client_resolvers.txt`. When `AUTO_SAVE_RANKED_RESOLVERS = true`, the client automatically tracks and persists the proven fastest resolvers at the top inside a managed header block. All custom comments, formatting, and subnets below the block remain untouched. FastStart uses these top entries to connect in <150ms on subsequent launches.
+> 💡 **Smart Warm-Start:** The client preserves the exact line order of `client_resolvers.txt`. When `AUTO_SAVE_RANKED_RESOLVERS = true`, the client automatically tracks and persists the proven fastest resolvers at the top inside a managed header block. All custom comments, formatting, and subnets below the block remain untouched. Entries outside the managed block define the allowed resolvers; cached rankings only reorder matching IP-and-port entries, so removing a resolver or changing its port takes effect on the next load. FastStart uses these top entries to connect in <150ms on subsequent launches.
 
 ---
 
@@ -675,7 +675,8 @@ These settings are critical on the server:
 
 | Parameter | Sample Value | Allowed Values / Real Behavior | Full Explanation |
 | :--- | :--- | :--- | :--- |
-| `RUNTIME_STATS_INTERVAL_SECONDS` | `60.0` | `1.0..86400.0` (or `0` = disabled) | Interval in seconds between periodic console performance table logs when tunnel traffic is active.<br>Setting to `0` disables periodic logging.<br>Pressing `'s'` + Enter (or Enter) in the console always triggers an immediate live stats dump on demand regardless of the timer. |
+| `INTERACTIVE_STATS_ENABLED` | `false` | `true/false` | Opts in to reading stdin for stats hotkeys. Enable only in an attended foreground console; leave disabled for services, background jobs, and piped input. |
+| `RUNTIME_STATS_INTERVAL_SECONDS` | `60.0` | `1.0..86400.0` (or `0` = disabled) | Interval in seconds between periodic console performance table logs when tunnel traffic is active.<br>Setting to `0` disables periodic logging.<br>Resolver pool optimization runs independently every 60 seconds and saves ranked resolvers when the pool changes (if auto-save is enabled).<br>When `INTERACTIVE_STATS_ENABLED = true`, pressing `'s'` + Enter (or Enter) triggers an immediate stats dump regardless of the timer. |
 
 ### 3.4.9) 🧵 Runtime Workers, Queues, and Timers
 

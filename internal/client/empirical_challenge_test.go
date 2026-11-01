@@ -61,7 +61,7 @@ func TestEmpirical_ProbeConnectionMTU_Cancellation(t *testing.T) {
 	}
 
 	delays := []time.Duration{
-		0,                   // Pre-canceled
+		0, // Pre-canceled
 		10 * time.Millisecond,
 		25 * time.Millisecond,
 		50 * time.Millisecond,
@@ -159,10 +159,10 @@ func TestEmpirical_OptimizeActivePool_DegradedAndPartialMTU(t *testing.T) {
 	b.SetConnectionMTU("act-degraded-2", 150, 150, 1000)
 	b.SetConnectionMTU("act-degraded-3", 150, 150, 1000)
 
-	b.SetConnectionMTU("inact-disabled", 200, 200, 1200)  // Meets MTU, but will have StandbyEligible=false
-	b.SetConnectionMTU("stby-low-upload", 120, 120, 1200) // Upload 120 < 150
+	b.SetConnectionMTU("inact-disabled", 200, 200, 1200)   // Meets MTU, but will have StandbyEligible=false
+	b.SetConnectionMTU("stby-low-upload", 120, 120, 1200)  // Upload 120 < 150
 	b.SetConnectionMTU("stby-low-download", 160, 160, 800) // Download 800 < 1000
-	b.SetConnectionMTU("stby-zero-mtu", 0, 0, 0)          // Zero MTU
+	b.SetConnectionMTU("stby-zero-mtu", 0, 0, 0)           // Zero MTU
 	b.SetConnectionMTU("stby-qualified-1", 150, 150, 1000) // Meets MTU
 	b.SetConnectionMTU("stby-qualified-2", 180, 180, 1100) // Meets MTU
 
@@ -438,81 +438,6 @@ func TestEmpirical_RapidValidityFlipsStress(t *testing.T) {
 	}
 }
 
-// TestEmpirical_MicroBurst_ActivePoolFullPromotion tests whether micro-burst qualification
-// properly promotes qualified candidate resolvers when the active pool is already full of
-// lower-performing active resolvers.
-// Because calculateConnectionScoreLocked evaluates the candidate's score when SetConnectionValidity
-// is called, calling SetConnectionValidity BEFORE SeedBurstStats evaluates unseeded stats (score 1.0),
-// causing the superior candidate to be placed in the standby pool instead of active pool!
-func TestEmpirical_MicroBurst_ActivePoolFullPromotion(t *testing.T) {
-	domain := "v.example.com"
-	conn0, port0, _ := startMockSelectivelyDroppingMTUDNSListener(t, domain, -1)
-	defer conn0.Close()
-	conn1, port1, _ := startMockSelectivelyDroppingMTUDNSListener(t, domain, -1)
-	defer conn1.Close()
-
-	cfg := config.DefaultClientConfig()
-	cfg.Domains = []string{domain}
-	cfg.Resolvers = []config.ResolverAddress{
-		{IP: "127.0.0.1", Port: port0},
-		{IP: "127.0.0.1", Port: port1},
-	}
-	cfg.MicroBurstTestEnabled = true
-	cfg.MicroBurstPacketCount = 6
-	cfg.MaxActiveResolvers = 2
-
-	client := createTestFastStartClient(t, cfg)
-	balancer := client.balancer
-	balancer.SetMaxActiveResolvers(2)
-
-	// Pre-populate balancer with 2 older active resolvers with moderate score (RTT 80ms)
-	oldConns := []*Connection{
-		{Key: "old-1", Resolver: "8.8.8.8", ResolverPort: 53, Domain: domain, ResolverLabel: "8.8.8.8:53"},
-		{Key: "old-2", Resolver: "8.8.4.4", ResolverPort: 53, Domain: domain, ResolverLabel: "8.8.4.4:53"},
-		{Key: "new-burst-super", Resolver: "127.0.0.1", ResolverPort: port0, Domain: domain, ResolverLabel: fmt.Sprintf("127.0.0.1:%d", port0)},
-	}
-	balancer.SetConnections(oldConns)
-	balancer.SetConnectionMTU("old-1", 150, 150, 1000)
-	balancer.SetConnectionMTU("old-2", 150, 150, 1000)
-	balancer.SetConnectionMTU("new-burst-super", 150, 150, 1000)
-
-	// Seed old-1 and old-2 with moderate scores (80ms RTT, 0% loss -> score around 12)
-	balancer.SeedBurstStats("old-1", 10, 10, 80*time.Millisecond)
-	balancer.SetConnectionValidity("old-1", true)
-
-	balancer.SeedBurstStats("old-2", 10, 10, 80*time.Millisecond)
-	balancer.SetConnectionValidity("old-2", true)
-
-	if balancer.ActiveCount() != 2 {
-		t.Fatalf("expected 2 active connections initially, got %d", balancer.ActiveCount())
-	}
-
-	// Now run micro-burst qualification on new-burst-super (which has ~0-5ms RTT against localhost)
-	candidateConn := Connection{
-		Key:           "new-burst-super",
-		Resolver:      "127.0.0.1",
-		ResolverPort:  port0,
-		Domain:        domain,
-		ResolverLabel: fmt.Sprintf("127.0.0.1:%d", port0),
-	}
-
-	qualified, _ := client.runMicroBurstQualification(context.Background(), []Connection{candidateConn})
-	if len(qualified) == 0 {
-		t.Fatalf("expected new-burst-super to qualify in micro-burst")
-	}
-
-	// Verify if new-burst-super was promoted into active pool
-	cSuper, ok := balancer.GetConnectionByKey("new-burst-super")
-	if !ok {
-		t.Fatal("new-burst-super not found in balancer")
-	}
-
-	if !cSuper.IsValid {
-		t.Fatalf("BUG CONFIRMED: new-burst-super qualified in micro-burst (top ranked) but was NOT promoted to active (IsValid=false, StandbyEligible=%v) because SetConnectionValidity was called before SeedBurstStats!",
-			cSuper.StandbyEligible)
-	}
-}
-
 // TestEmpirical_ActiveStandbyMutualExclusivity isolates Bug 2:
 // Balancer allows SetConnectionStandbyEligible(key, true) to succeed on an ACTIVE connection,
 // putting the connection into a contradictory state where IsValid=true and StandbyEligible=true.
@@ -653,146 +578,6 @@ func TestEmpirical_RuntimeStats_MonotonicCounterGating(t *testing.T) {
 	currentSentTotal := b.TotalPacketsSent()
 	if currentSentTotal <= lastSentTotal {
 		t.Fatalf("gating failed: currentSentTotal (%d) <= lastSentTotal (%d)", currentSentTotal, lastSentTotal)
-	}
-}
-
-// TestEmpirical_MicroBurst_ActivePoolSaturationAdmission tests the 4-phase micro-burst pool admission
-// under active pool saturation (MaxActiveResolvers limit):
-// Phase 1: Seed burst stats for all qualified candidates.
-// Phase 2: Deactivate unselected candidates first to clear active pool capacity.
-// Phase 3: Admit qualified winners into active pool in ranked order.
-// Phase 4: Mark remaining qualified candidates as standby eligible.
-func TestEmpirical_MicroBurst_ActivePoolSaturationAdmission(t *testing.T) {
-	domain := "burst-saturation.example.com"
-	server1, addr1 := startMockBurstServer(t, domain, 0, 0) // fast 0ms
-	defer server1.Close()
-	server2, addr2 := startMockBurstServer(t, domain, 0, 5*time.Millisecond) // fast 5ms
-	defer server2.Close()
-	server3, addr3 := startMockBurstServer(t, domain, 0, 20*time.Millisecond) // qualified but slower
-	defer server3.Close()
-	server4, addr4 := startMockBurstServer(t, domain, 2, 0) // drops after 2 queries -> fails qualification
-	defer server4.Close()
-
-	portFromAddr := func(addr string) int {
-		var p int
-		_, _ = fmt.Sscanf(addr, "127.0.0.1:%d", &p)
-		return p
-	}
-
-	p1 := portFromAddr(addr1)
-	p2 := portFromAddr(addr2)
-	p3 := portFromAddr(addr3)
-	p4 := portFromAddr(addr4)
-
-	cfg := config.DefaultClientConfig()
-	cfg.Domains = []string{domain}
-	cfg.Resolvers = []config.ResolverAddress{
-		{IP: "127.0.0.1", Port: p1},
-		{IP: "127.0.0.1", Port: p2},
-		{IP: "127.0.0.1", Port: p3},
-		{IP: "127.0.0.1", Port: p4},
-	}
-	cfg.MicroBurstTestEnabled = true
-	cfg.MicroBurstPacketCount = 6
-	cfg.MaxActiveResolvers = 2 // Active pool can ONLY hold 2 resolvers!
-
-	client := createTestFastStartClient(t, cfg)
-	balancer := client.balancer
-	balancer.SetMaxActiveResolvers(2)
-
-	// Pre-populate balancer with 2 older active resolvers
-	old1 := &Connection{Key: "old-act-1", Resolver: "8.8.8.8", ResolverPort: 53, Domain: domain, ResolverLabel: "8.8.8.8:53"}
-	old2 := &Connection{Key: "old-act-2", Resolver: "8.8.4.4", ResolverPort: 53, Domain: domain, ResolverLabel: "8.8.4.4:53"}
-	c1 := &Connection{Key: "cand-1", Resolver: "127.0.0.1", ResolverPort: p1, Domain: domain, ResolverLabel: addr1}
-	c2 := &Connection{Key: "cand-2", Resolver: "127.0.0.1", ResolverPort: p2, Domain: domain, ResolverLabel: addr2}
-	c3 := &Connection{Key: "cand-3", Resolver: "127.0.0.1", ResolverPort: p3, Domain: domain, ResolverLabel: addr3}
-	c4 := &Connection{Key: "cand-4", Resolver: "127.0.0.1", ResolverPort: p4, Domain: domain, ResolverLabel: addr4}
-
-	allConns := []*Connection{old1, old2, c1, c2, c3, c4}
-	balancer.SetConnections(allConns)
-	for _, c := range allConns {
-		balancer.SetConnectionMTU(c.Key, 150, 150, 1000)
-	}
-
-	// Make old1 and old2 active initially
-	balancer.SeedBurstStats("old-act-1", 10, 10, 100*time.Millisecond)
-	balancer.SetConnectionValidity("old-act-1", true)
-	balancer.SeedBurstStats("old-act-2", 10, 10, 100*time.Millisecond)
-	balancer.SetConnectionValidity("old-act-2", true)
-
-	if balancer.ActiveCount() != 2 {
-		t.Fatalf("expected 2 active connections initially, got %d", balancer.ActiveCount())
-	}
-
-	// Run micro-burst qualification on the 4 candidates with MaxActiveResolvers = 2
-	candidateConns := []Connection{*c1, *c2, *c3, *c4}
-	qualified, _ := client.runMicroBurstQualification(context.Background(), candidateConns, 2)
-
-	if len(qualified) != 2 {
-		t.Fatalf("expected exactly 2 qualified winners admitted to active pool, got %d", len(qualified))
-	}
-
-	// 1. Verify winners are cand-1 and cand-2
-	if qualified[0].Key != "cand-1" || qualified[1].Key != "cand-2" {
-		t.Fatalf("expected winners to be cand-1 and cand-2 in ranked order, got %s and %s",
-			qualified[0].Key, qualified[1].Key)
-	}
-
-	// 2. Verify active pool count is strictly <= MaxActiveResolvers (2)
-	if balancer.ActiveCount() != 2 {
-		t.Fatalf("expected active count to remain <= 2, got %d", balancer.ActiveCount())
-	}
-
-	// 3. Verify cand-1 and cand-2 are active and NOT standby eligible
-	for _, key := range []string{"cand-1", "cand-2"} {
-		conn, ok := balancer.GetConnectionByKey(key)
-		if !ok {
-			t.Fatalf("connection %s missing from balancer", key)
-		}
-		if !conn.IsValid {
-			t.Fatalf("expected winner %s to be active (IsValid=true)", key)
-		}
-		if conn.StandbyEligible {
-			t.Fatalf("active winner %s must have StandbyEligible=false", key)
-		}
-	}
-
-	// 4. Verify cand-3 is qualified but unselected -> placed on Standby (IsValid=false, StandbyEligible=true)
-	conn3, ok := balancer.GetConnectionByKey("cand-3")
-	if !ok {
-		t.Fatal("connection cand-3 missing from balancer")
-	}
-	if conn3.IsValid {
-		t.Fatal("unselected candidate cand-3 should NOT be active")
-	}
-	if !conn3.StandbyEligible {
-		t.Fatal("unselected qualified candidate cand-3 MUST be marked StandbyEligible=true")
-	}
-
-	// 5. Verify cand-4 failed qualification -> IsValid=false, StandbyEligible=false
-	conn4, ok := balancer.GetConnectionByKey("cand-4")
-	if !ok {
-		t.Fatal("connection cand-4 missing from balancer")
-	}
-	if conn4.IsValid || conn4.StandbyEligible {
-		t.Fatalf("disqualified candidate cand-4 should be inactive and not standby eligible, got IsValid=%v StandbyEligible=%v",
-			conn4.IsValid, conn4.StandbyEligible)
-	}
-
-	// 6. Verify old unselected resolvers were deactivated
-	connOld1, _ := balancer.GetConnectionByKey("old-act-1")
-	connOld2, _ := balancer.GetConnectionByKey("old-act-2")
-	if connOld1.IsValid || connOld2.IsValid {
-		t.Fatalf("expected old unselected resolvers to be deactivated, got old1=%v old2=%v",
-			connOld1.IsValid, connOld2.IsValid)
-	}
-
-	// 7. Verify stats seeding in Phase 1: all qualified candidates (cand-1, cand-2, cand-3) have non-zero seeded stats
-	for _, key := range []string{"cand-1", "cand-2", "cand-3"} {
-		stats := balancer.statsForKey(key)
-		if stats == nil || stats.sent.Load() == 0 || stats.acked.Load() == 0 {
-			t.Fatalf("expected connection %s to have seeded burst stats", key)
-		}
 	}
 }
 
@@ -1340,4 +1125,3 @@ func TestEmpirical_RecheckRevokesStandby_NoRaceWithOptimize(t *testing.T) {
 		t.Fatal("dead resolver must have StandbyEligible=false after recheck failure")
 	}
 }
-

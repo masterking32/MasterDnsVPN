@@ -286,7 +286,12 @@ RECHECK_BURST_PACKET_COUNT = 4
 # Interval in seconds between periodic runtime performance table logs.
 # Only prints when tunnel traffic has been processed during the interval.
 # Set to 0 to disable periodic logs while keeping keypress inspection enabled.
+# Resolver pool optimization runs independently every 60 seconds.
 RUNTIME_STATS_INTERVAL_SECONDS = 60.0
+
+# Opt in to reading stdin for stats hotkeys (s + Enter or Enter).
+# Enable only for an attended foreground console; keep false for services and pipes.
+INTERACTIVE_STATS_ENABLED = false
 
 # ------------------------------------------------------------------------------
 # 7) Runtime Workers, Queues, and Timers

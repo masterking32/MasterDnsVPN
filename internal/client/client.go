@@ -37,6 +37,7 @@ type Client struct {
 	log      *logger.Logger
 	codec    *security.Codec
 	balancer *Balancer
+	pool     *ResolverPool
 
 	successMTUChecks  bool
 	udpBufferPool     sync.Pool
@@ -72,24 +73,24 @@ type Client struct {
 	streamResolverFailoverCooldown        time.Duration
 
 	// Session States
-	sessionID             uint8
-	sessionCookie         uint8
-	responseMode          uint8
-	sessionReady          bool
-	initStateMu           sync.Mutex
-	sessionInitReady      bool
-	sessionInitBase64     bool
-	sessionInitPayload    []byte
-	sessionInitVerify     [4]byte
-	sessionInitCursor     int
-	sessionInitBusyUnix   atomic.Int64
-	sessionResetPending   atomic.Bool
-	runtimeResetPending   atomic.Bool
-	resolverHealthStarted atomic.Bool
-	runtimeStatsStarted   atomic.Bool
-	sessionResetSignal    chan struct{}
-	rxDroppedPackets      atomic.Uint64
-	lastRXDropLogUnix     atomic.Int64
+	sessionID                  uint8
+	sessionCookie              uint8
+	responseMode               uint8
+	sessionReady               bool
+	initStateMu                sync.Mutex
+	sessionInitReady           bool
+	sessionInitBase64          bool
+	sessionInitPayload         []byte
+	sessionInitVerify          [4]byte
+	sessionInitCursor          int
+	sessionInitBusyUnix        atomic.Int64
+	sessionResetPending        atomic.Bool
+	runtimeResetPending        atomic.Bool
+	resolverHealthStarted      atomic.Bool
+	runtimeStatsStarted        atomic.Bool
+	sessionResetSignal         chan struct{}
+	rxDroppedPackets           atomic.Uint64
+	lastRXDropLogUnix          atomic.Int64
 
 	// Async Runtime Workers & Channels
 	asyncWG              sync.WaitGroup
@@ -245,11 +246,15 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		responseMode = mtuProbeBase64Reply
 	}
 
+	pool := NewResolverPool(cfg.MaxActiveResolvers, log)
+	balancer := NewBalancer(cfg.ResolverBalancingStrategy, log, pool)
+
 	c := &Client{
 		cfg:                 cfg,
 		log:                 log,
 		codec:               codec,
-		balancer:            NewBalancer(cfg.ResolverBalancingStrategy, log),
+		balancer:            balancer,
+		pool:                pool,
 		uploadCompression:   uint8(cfg.UploadCompressionType),
 		downloadCompression: uint8(cfg.DownloadCompressionType),
 		mtuCryptoOverhead:   mtuCryptoOverhead(cfg.DataEncryptionMethod),
@@ -317,6 +322,12 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		cfg.AutoDisableTimeoutServers,
 		time.Duration(cfg.AutoDisableTimeoutWindowSeconds*float64(time.Second)),
 	)
+
+	if c.pool != nil {
+		c.pool.SetOnPoolChanged(func() {
+			c.SaveRankedResolversToFile()
+		})
+	}
 
 	c.balancer.SetResolverDisabledHandler(func(conn *Connection, cause string) {
 		c.appendMTURemovedServerLine(conn, cause)

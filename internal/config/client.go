@@ -76,6 +76,7 @@ type ClientConfig struct {
 	MaxBurstLossRatio                     float64           `toml:"MAX_BURST_LOSS_RATIO"`
 	RecheckBurstTestEnabled               bool              `toml:"RECHECK_BURST_TEST_ENABLED"`
 	RecheckBurstPacketCount               int               `toml:"RECHECK_BURST_PACKET_COUNT"`
+	InteractiveStatsEnabled               bool              `toml:"INTERACTIVE_STATS_ENABLED"`
 	RuntimeStatsIntervalSeconds           float64           `toml:"RUNTIME_STATS_INTERVAL_SECONDS"`
 	RX_TX_Workers                         int               `toml:"RX_TX_WORKERS"`
 	LegacyTunnelReaderWorkers             int               `toml:"TUNNEL_READER_WORKERS"`

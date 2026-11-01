@@ -654,7 +654,7 @@ func (c *Client) BuildConnectionMap() error {
 // SaveRankedResolversToFile persists the top-ranked resolver endpoints to the resolvers file
 // under an auto-ranked header block, preserving all custom user lines below.
 func (c *Client) SaveRankedResolversToFile() {
-	if c == nil || c.balancer == nil || !c.cfg.AutoSaveRankedResolvers {
+	if c == nil || (c.balancer == nil && c.pool == nil) || !c.cfg.AutoSaveRankedResolvers {
 		return
 	}
 
@@ -668,11 +668,12 @@ func (c *Client) SaveRankedResolversToFile() {
 		maxRanked = 32
 	}
 
-	ranked := c.balancer.GetRankedEndpoints(maxRanked)
-	if len(ranked) == 0 {
-		return
+	var ranked []config.ResolverAddress
+	if c.pool != nil {
+		ranked = c.pool.RankedEndpoints(maxRanked)
+	} else if c.balancer != nil {
+		ranked = c.balancer.GetRankedEndpoints(maxRanked)
 	}
-
 	if err := config.UpdateResolversFileWithRanked(resolversPath, ranked); err != nil {
 		if c.log != nil && c.log.Enabled(logger.LevelWarn) {
 			c.log.Warnf("<yellow>[Resolvers]</yellow> Failed to auto-save ranked resolvers to <cyan>%s</cyan>: %v", resolversPath, err)

@@ -215,8 +215,8 @@ func TestUpdateResolversFileWithRankedPreservesCommentsAndSubnets(t *testing.T) 
 	if loaded[1].IP != "1.1.1.1" || loaded[1].Port != 53 {
 		t.Errorf("expected 2nd resolver to be 1.1.1.1:53, got %+v", loaded[1])
 	}
-	if loaded[2].IP != "8.8.8.8" || loaded[2].Port != 53 {
-		t.Errorf("expected 3rd resolver to be 8.8.8.8:53, got %+v", loaded[2])
+	if loaded[2].IP != "192.168.10.1" || loaded[2].Port != 5300 {
+		t.Errorf("expected remaining configured subnet host 192.168.10.1:5300, got %+v", loaded[2])
 	}
 
 	// 3. Test updating again replaces the existing block rather than duplicating it
@@ -310,7 +310,6 @@ func TestResolversFileReadErrorPreservation(t *testing.T) {
 		}
 	}
 }
-
 
 func TestWriteRankedResolversFile_UnterminatedBlockReturnsError(t *testing.T) {
 	dir := t.TempDir()
@@ -460,12 +459,11 @@ func TestEmpirical_ResolversUnterminatedBlockFailsafe(t *testing.T) {
 		}
 		postStr := string(postBytes)
 
-		if !strings.Contains(postStr, "9.9.9.9") {
-			t.Fatal("expected ranked resolver 9.9.9.9 in updated file")
+		if strings.Contains(postStr, "9.9.9.9") {
+			t.Fatal("unconfigured ranked resolver must not be added")
 		}
 		if !strings.Contains(postStr, "# User custom CIDR") || !strings.Contains(postStr, "10.0.0.0/24") {
 			t.Fatal("user custom configuration was lost!")
 		}
 	})
 }
-

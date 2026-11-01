@@ -60,6 +60,7 @@ func startMockMTUDNSListener(t *testing.T, domain string) (*net.UDPConn, int, *a
 
 func createTestFastStartClient(t *testing.T, cfg config.ClientConfig) *Client {
 	t.Helper()
+	cfg.AutoSaveRankedResolvers = false
 	codec, err := security.NewCodec(cfg.DataEncryptionMethod, cfg.EncryptionKey)
 	if err != nil {
 		t.Fatalf("client codec init failed: %v", err)
@@ -257,7 +258,7 @@ func TestFastStartEarlyExit(t *testing.T) {
 	cfg.Domains = []string{domain}
 	cfg.Resolvers = resolvers
 	cfg.RecheckInactiveServersEnabled = true
-	cfg.RX_TX_Workers = 1     // target is 1 valid resolver
+	cfg.RX_TX_Workers = 1      // target is 1 valid resolver
 	cfg.MTUTestParallelism = 4 // configured parallelism is 4
 	cfg.MinUploadMTU = 100
 	cfg.MaxUploadMTU = 200
@@ -445,12 +446,12 @@ func TestRunInitialMTUTests_BurstRetryScanning(t *testing.T) {
 	cfg.RecheckInactiveServersEnabled = true // FastStart mode
 	cfg.MicroBurstTestEnabled = true         // Micro-burst qualification enabled
 	cfg.MicroBurstPacketCount = 6
-	cfg.RX_TX_Workers = 2                    // Target is 2 burst-qualified resolvers
+	cfg.RX_TX_Workers = 2 // Target is 2 burst-qualified resolvers
 	cfg.MTUTestParallelism = 2
 	cfg.MinUploadMTU = 100
-	cfg.MaxUploadMTU = 100                   // Single query upload MTU probe
+	cfg.MaxUploadMTU = 100 // Single query upload MTU probe
 	cfg.MinDownloadMTU = 300
-	cfg.MaxDownloadMTU = 300                 // Single query download MTU probe
+	cfg.MaxDownloadMTU = 300 // Single query download MTU probe
 	cfg.MTUTestRetries = 1
 	cfg.MTUTestTimeout = 0.5
 

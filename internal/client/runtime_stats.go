@@ -111,13 +111,7 @@ func (c *Client) DumpRuntimeStats(reason string) {
 		if s.AverageRTT > 0 {
 			rttStr = formatResolverRTT(s.AverageRTT)
 		}
-		speedStr, scoreStr := calculateResolverRuntimeSpeedAndScore(s)
-
-		scoreVal := 0.0
-		if scoreStr != "n/a" {
-			_, _ = fmt.Sscanf(scoreStr, "%f", &scoreVal)
-		}
-		tier, _ := ResolverQualityTier(scoreVal)
+		speedStr, scoreStr, tier := calculateResolverRuntimeSpeedAndScore(s)
 		statusStr := fmt.Sprintf("ACTIVE (%s)", tier)
 
 		c.log.Infof(
@@ -155,13 +149,7 @@ func (c *Client) DumpRuntimeStats(reason string) {
 			if s.AverageRTT > 0 {
 				rttStr = formatResolverRTT(s.AverageRTT)
 			}
-			speedStr, scoreStr := calculateResolverRuntimeSpeedAndScore(s)
-
-			scoreVal := 0.0
-			if scoreStr != "n/a" {
-				_, _ = fmt.Sscanf(scoreStr, "%f", &scoreVal)
-			}
-			tier, _ := ResolverQualityTier(scoreVal)
+			speedStr, scoreStr, tier := calculateResolverRuntimeSpeedAndScore(s)
 			statusStr := fmt.Sprintf("STANDBY (%s)", tier)
 
 			c.log.Infof(
@@ -182,7 +170,7 @@ func (c *Client) DumpRuntimeStats(reason string) {
 
 	c.log.Infof("%s", separator)
 	c.log.Infof(
-		"<blue>Total Tunnel Traffic: Sent <cyan>%d</cyan> pkts | Acked <green>%d</green> | Lost <yellow>%d</yellow> (<yellow>%.1f%%</yellow>) | Active Streams: <cyan>%d</cyan></blue>",
+		"<blue>Resolver Samples (include probes; decay over time): Sent <cyan>%d</cyan> pkts | Acked <green>%d</green> | Lost <yellow>%d</yellow> (<yellow>%.1f%%</yellow>) | Active Streams: <cyan>%d</cyan></blue>",
 		totalSent,
 		totalAcked,
 		totalLost,
@@ -192,27 +180,32 @@ func (c *Client) DumpRuntimeStats(reason string) {
 	c.log.Infof("%s", separator)
 }
 
-func calculateResolverRuntimeSpeedAndScore(s ResolverStatsSnapshot) (string, string) {
+func calculateResolverRuntimeSpeedAndScore(s ResolverStatsSnapshot) (string, string, string) {
 	rtt := s.AverageRTT
 	if rtt <= 0 {
 		rtt = s.Connection.MTUResolveTime
 	}
 
 	if rtt <= 0 {
-		return "n/a", "n/a"
+		tier, _ := ResolverQualityTier(0.0)
+		return "n/a", "n/a", tier
 	}
 
-	speedKBps, score := CalculateResolverScore(s.Connection.DownloadMTUBytes, rtt, s.LossRatio)
-	speedStr := FormatResolverSpeed(speedKBps)
-	scoreStr := fmt.Sprintf("%.1f", score)
+	ev := EvaluateResolver(ResolverMetrics{
+		DownloadMTUBytes: s.Connection.DownloadMTUBytes,
+		RTT:              rtt,
+		LossRatio:        s.LossRatio,
+	})
+	speedStr := FormatResolverSpeed(ev.ThroughputKBps)
+	scoreStr := fmt.Sprintf("%.1f", ev.CompositeScore)
 
-	return speedStr, scoreStr
+	return speedStr, scoreStr, ev.Tier
 }
 
-// runRuntimeStatsLoop runs a periodic background checker that optimizes the active pool
-// and optionally logs performance stats whenever tunnel traffic has been processed.
+// runRuntimeStatsLoop logs performance stats when tunnel traffic has been processed.
+// Resolver maintenance runs independently, including when periodic logs are disabled.
 func (c *Client) runRuntimeStatsLoop(ctx context.Context) {
-	if c == nil {
+	if c == nil || c.cfg.RuntimeStatsIntervalSeconds <= 0 {
 		return
 	}
 
@@ -234,14 +227,7 @@ func (c *Client) runRuntimeStatsLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// Periodically evaluate and optimize the active pool (swap degraded resolvers with better standbys)
 			if c.balancer != nil {
-				if c.balancer.OptimizeActivePool() {
-					c.SaveRankedResolversToFile()
-				}
-			}
-
-			if c.cfg.RuntimeStatsIntervalSeconds > 0 && c.balancer != nil {
 				currentSentTotal := c.balancer.TotalPacketsSent()
 				if currentSentTotal > lastSentTotal {
 					lastSentTotal = currentSentTotal
@@ -269,7 +255,7 @@ func (c *Client) calculateTotalSentPackets() uint64 {
 
 // printRuntimeStatsHint prints a startup reminder on how to view live stats.
 func (c *Client) printRuntimeStatsHint() {
-	if c == nil || c.log == nil {
+	if c == nil || !c.cfg.InteractiveStatsEnabled || c.log == nil {
 		return
 	}
 	statsHintOnce.Do(func() {
@@ -277,10 +263,10 @@ func (c *Client) printRuntimeStatsHint() {
 	})
 }
 
-// startInteractiveConsoleListener starts a background listener on standard input
+// startInteractiveConsoleListener starts an explicitly opted-in listener on standard input
 // that triggers an on-demand performance dump when the user presses 's' or Enter.
 func (c *Client) startInteractiveConsoleListener(ctx context.Context) {
-	if c == nil {
+	if c == nil || !c.cfg.InteractiveStatsEnabled || ctx.Err() != nil {
 		return
 	}
 

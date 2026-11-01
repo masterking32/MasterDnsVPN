@@ -741,6 +741,7 @@ DOMAINS = ["example.com"]
 DATA_ENCRYPTION_METHOD = 1
 ENCRYPTION_KEY = "test-secret"
 RUNTIME_STATS_INTERVAL_SECONDS = 45.0
+INTERACTIVE_STATS_ENABLED = true
 `), 0o644); err != nil {
 		t.Fatalf("WriteFile config failed: %v", err)
 	}
@@ -753,8 +754,10 @@ RUNTIME_STATS_INTERVAL_SECONDS = 45.0
 		t.Fatalf("LoadClientConfig returned error: %v", err)
 	}
 
+	if !cfg.InteractiveStatsEnabled {
+		t.Fatal("interactive stats opt-in was not loaded")
+	}
 	if cfg.RuntimeStatsIntervalSeconds != 45.0 {
 		t.Fatalf("unexpected RuntimeStatsIntervalSeconds: got=%v want=45.0", cfg.RuntimeStatsIntervalSeconds)
 	}
 }
-

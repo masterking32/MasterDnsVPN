@@ -8,7 +8,9 @@ package client
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
+	DnsParser "masterdnsvpn-go/internal/dnsparser"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -244,7 +246,19 @@ func TestSendPipelinedMicroBurstDetectsRateLimiting(t *testing.T) {
 	}
 }
 
-func TestRunMicroBurstQualificationRankingAndSelection(t *testing.T) {
+func TestDiscoveryEngine_UDPQualificationRankingAndSelection(t *testing.T) {
+	// Exercise the production qualification implementation with real UDP probes.
+	// Keep MTU discovery outside this fixture: its drop counter measures burst queries.
+	newEngine := func(c *Client) *DiscoveryEngine {
+		c.pool.SetOnPoolChanged(nil)
+		c.pool.SetSessionMTU(c.syncedUploadMTU, c.syncedDownloadMTU)
+		return NewDiscoveryEngine(DiscoveryConfig{
+			MicroBurstParallelism: c.cfg.MicroBurstParallelism,
+			MicroBurstPacketCount: c.cfg.MicroBurstPacketCount,
+			MicroBurstTimeout:     250 * time.Millisecond,
+			MaxActiveResolvers:    c.cfg.MaxActiveResolvers,
+		}, NewUDPResolverProber(c), c.pool, nil)
+	}
 	server1, addr1 := startMockBurstServer(t, "example.com", 0, 0) // fast
 	defer server1.Close()
 	server2, addr2 := startMockBurstServer(t, "example.com", 0, 10*time.Millisecond) // slower
@@ -295,7 +309,7 @@ func TestRunMicroBurstQualificationRankingAndSelection(t *testing.T) {
 	}
 	c.balancer.SetConnections(ptrs)
 
-	activeConns, ranked := c.runMicroBurstQualification(context.Background(), conns)
+	activeConns, ranked := newEngine(c).runMicroBurstQualification(context.Background(), conns, 0)
 
 	if len(activeConns) != 2 {
 		t.Fatalf("expected 2 active connections, got %d", len(activeConns))
@@ -322,24 +336,30 @@ func TestRunMicroBurstQualificationRankingAndSelection(t *testing.T) {
 		t.Fatalf("expected balancer active count 2, got %d", c.balancer.ActiveCount())
 	}
 
-	// Subtest 1: Strict Zero Loss (MAX_BURST_LOSS_RATIO = 0.0)
-	t.Run("StrictZeroLoss", func(t *testing.T) {
-		cfgZero := cfg
-		cfgZero.MaxBurstLossRatio = 0.0
-		cZero := New(cfgZero, nil, codec)
-		cZero.syncedDownloadMTU = 400
-		cZero.syncedUploadMTU = 100
-		cZero.balancer.SetConnections(ptrs)
-
-		// conns has server1 (0% loss), server2 (0% loss), server3 (lossy)
-		activeZero, rankedZero := cZero.runMicroBurstQualification(context.Background(), conns)
-		if len(activeZero) != 2 {
-			t.Fatalf("expected 2 active connections under strict zero loss, got %d", len(activeZero))
-		}
-		for _, r := range rankedZero {
-			if r.Connection.Key == "r3|53|example.com" && r.BurstResult.Qualified {
-				t.Fatal("expected lossy candidate to be disqualified under MaxBurstLossRatio = 0.0")
-			}
+	// One lost response out of six is allowed at 20%, but not at zero loss.
+	// Fresh listeners ensure previous bursts cannot exhaust the drop counter.
+	t.Run("LossThreshold", func(t *testing.T) {
+		for _, maxLoss := range []float64{0.20, 0.0} {
+			t.Run(fmt.Sprintf("max-loss-%.2f", maxLoss), func(t *testing.T) {
+				server, addr := startMockBurstServer(t, "example.com", 5, 0)
+				defer server.Close()
+				lossCfg := cfg
+				lossCfg.MaxBurstLossRatio = maxLoss
+				lossCfg.MinBurstThroughputKBps = 0
+				lossCfg.MicroBurstPacketCount = 6
+				client := New(lossCfg, nil, codec)
+				client.syncedDownloadMTU, client.syncedUploadMTU = 400, 100
+				candidate := Connection{Key: "partial-loss", Domain: "example.com", ResolverLabel: addr}
+				client.balancer.SetConnections([]*Connection{&candidate})
+				active, ranked := newEngine(client).runMicroBurstQualification(context.Background(), []Connection{candidate}, 0)
+				if len(ranked) != 1 || ranked[0].BurstResult.ReceivedCount != 5 {
+					t.Fatalf("expected exactly five of six responses: %+v", ranked)
+				}
+				wantQualified := maxLoss > 0
+				if ranked[0].BurstResult.Qualified != wantQualified || (len(active) == 1) != wantQualified || (client.pool.ActiveCount() == 1) != wantQualified {
+					t.Fatalf("loss threshold %.2f: result=%+v active=%d", maxLoss, ranked[0].BurstResult, len(active))
+				}
+			})
 		}
 	})
 
@@ -353,7 +373,7 @@ func TestRunMicroBurstQualificationRankingAndSelection(t *testing.T) {
 		cStrict.syncedUploadMTU = 100
 		cStrict.balancer.SetConnections(ptrs)
 
-		activeStrict, _ := cStrict.runMicroBurstQualification(context.Background(), conns)
+		activeStrict, _ := newEngine(cStrict).runMicroBurstQualification(context.Background(), conns, 0)
 		if len(activeStrict) != 0 {
 			t.Fatalf("expected 0 active connections when none qualify, got %d", len(activeStrict))
 		}
@@ -431,5 +451,58 @@ func TestSendPipelinedMicroBurstDeterministicTimestampPairing(t *testing.T) {
 	}
 	if result.BurstThroughputKBps <= 0 {
 		t.Fatalf("expected positive BurstThroughputKBps, got %v", result.BurstThroughputKBps)
+	}
+}
+
+func TestStartupQualificationRejectsMalformedBurst(t *testing.T) {
+	for _, mode := range []string{"short", "wrong-declared-size"} {
+		t.Run(mode, func(t *testing.T) {
+			serverConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer serverConn.Close()
+			codec, _ := security.NewCodec(0, "")
+			serverCfg := config.DefaultServerConfig()
+			serverCfg.Domain = []string{"example.com"}
+			serverCfg.DataEncryptionMethod = 0
+			server := udpserver.New(serverCfg, nil, codec)
+			go func() {
+				buf := make([]byte, 4096)
+				for {
+					n, remote, err := serverConn.ReadFromUDP(buf)
+					if err != nil {
+						return
+					}
+					response := server.HandlePacket(buf[:n])
+					packet, err := DnsParser.ExtractVPNResponse(response, false)
+					if err != nil {
+						continue
+					}
+					if mode == "short" {
+						packet.Payload = packet.Payload[:4]
+					} else {
+						binary.BigEndian.PutUint16(packet.Payload[4:6], 499)
+					}
+					response, err = DnsParser.BuildVPNResponsePacket(buf[:n], "example.com", packet, false)
+					if err == nil {
+						_, _ = serverConn.WriteToUDP(response, remote)
+					}
+				}
+			}()
+			cfg := config.DefaultClientConfig()
+			cfg.DataEncryptionMethod = 0
+			cfg.AutoSaveRankedResolvers = false
+			c := New(cfg, nil, codec)
+			transport, err := c.newUDPQueryTransport(context.Background(), serverConn.LocalAddr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer transport.conn.Close()
+			result := c.sendPipelinedMicroBurst(context.Background(), Connection{Domain: "example.com"}, transport, 2, 500, 100, 100*time.Millisecond)
+			if result.Qualified || result.ReceivedCount != 0 || result.TotalBytesRx != 0 {
+				t.Fatalf("malformed replies counted: %+v", result)
+			}
+		})
 	}
 }

@@ -335,260 +335,114 @@ func (c *Client) optimizeMTUResolvers(connections []Connection) ([]Connection, i
 	return summarizeValidMTUConnections(trulyFinalConns)
 }
 
-func (c *Client) RunInitialMTUTests(ctx context.Context) error {
-	if c.balancer == nil {
-		return ErrNoValidConnections
+func (c *Client) newDiscoveryConfig() DiscoveryConfig {
+	totalConns := 0
+	if c.pool != nil {
+		totalConns = c.pool.TotalCount()
+	} else if c.balancer != nil {
+		totalConns = c.balancer.TotalCount()
 	}
 
-	scanConnections := c.balancer.AllConnections()
-	if len(scanConnections) == 0 {
-		return ErrNoValidConnections
+	uniqueEndpoints := make(map[string]struct{})
+	var conns []Connection
+	if c.pool != nil {
+		conns = c.pool.AllConnections()
+	} else if c.balancer != nil {
+		conns = c.balancer.AllConnections()
 	}
-
-	fastStart := c.cfg.RecheckInactiveServersEnabled
-
-	// Count total unique resolver endpoints in scanConnections
-	uniqueEndpoints := make(map[string]struct{}, len(scanConnections))
-	for _, conn := range scanConnections {
+	for _, conn := range conns {
 		uniqueEndpoints[conn.ResolverLabel] = struct{}{}
 	}
-	totalUniqueResolvers := len(uniqueEndpoints)
+	if len(uniqueEndpoints) == 0 {
+		for _, r := range c.cfg.Resolvers {
+			uniqueEndpoints[fmt.Sprintf("%s:%d", r.IP, r.Port)] = struct{}{}
+		}
+	}
+	totalUnique := len(uniqueEndpoints)
 
-	targetValidResolvers := totalUniqueResolvers
+	targetResolvers := totalUnique
+	fastStart := c.cfg.RecheckInactiveServersEnabled
 	if fastStart {
 		minRequired := c.cfg.RX_TX_Workers
 		if minRequired < 1 {
 			minRequired = 1
 		}
-		targetValidResolvers = min(totalUniqueResolvers, minRequired)
+		targetResolvers = min(totalUnique, minRequired)
 	}
 
-	uploadCaps := c.precomputeUploadCaps()
-	// Retain full configured probe parallelism during FastStart; rely on context cancellation
-	workerCount := min(max(1, c.cfg.EffectiveMTUTestParallelism()), len(scanConnections))
+	parallelism := c.cfg.EffectiveMTUTestParallelism()
+	if parallelism < 1 {
+		parallelism = 1
+	}
+	if totalConns > 0 && parallelism > totalConns {
+		parallelism = totalConns
+	}
+
+	burstCount := c.cfg.MicroBurstPacketCount
+	if burstCount < 2 {
+		burstCount = 6
+	}
+
+	burstParallelism := c.cfg.MicroBurstParallelism
+	if burstParallelism < 1 {
+		burstParallelism = 8
+	}
+
+	return DiscoveryConfig{
+		FastStart:             fastStart,
+		TargetResolvers:       targetResolvers,
+		Parallelism:           parallelism,
+		MaxActiveResolvers:    c.cfg.MaxActiveResolvers,
+		MicroBurstEnabled:     c.cfg.MicroBurstTestEnabled,
+		MicroBurstPacketCount: burstCount,
+		MicroBurstParallelism: burstParallelism,
+		MicroBurstTimeout:     c.resolverHealthProbeTimeout(),
+		Domains:               c.cfg.Domains,
+		UploadCaps:            c.precomputeUploadCaps(),
+	}
+}
+
+func (c *Client) RunInitialMTUTests(ctx context.Context) error {
+	if c.balancer == nil && c.pool == nil {
+		return ErrNoValidConnections
+	}
+
+	var scanConnections []Connection
+	if c.balancer != nil {
+		scanConnections = c.balancer.AllConnections()
+	} else if c.pool != nil {
+		scanConnections = c.pool.AllConnections()
+	}
+	if len(scanConnections) == 0 {
+		return ErrNoValidConnections
+	}
+
+	cfg := c.newDiscoveryConfig()
+	workerCount := min(max(1, cfg.Parallelism), len(scanConnections))
 	c.logMTUStart(workerCount)
 	c.prepareMTUSuccessOutputFile()
 
-	counters := &mtuScanCounters{}
-	testedKeys := make(map[string]bool, len(scanConnections))
-	qualifiedKeys := make(map[string]struct{})
-	qualifiedEndpoints := make(map[string]struct{}, targetValidResolvers)
-	disqualifiedEndpoints := make(map[string]struct{})
-
-	for {
-		if err := ctx.Err(); err != nil {
-			return nil
-		}
-
-		if fastStart && len(qualifiedEndpoints) >= targetValidResolvers {
-			break
-		}
-
-		// Check if all candidate connections are exhausted
-		allTested := true
-		for _, conn := range scanConnections {
-			if !testedKeys[conn.Key] {
-				if _, disq := disqualifiedEndpoints[conn.ResolverLabel]; disq {
-					testedKeys[conn.Key] = true
-				} else {
-					allTested = false
-				}
-			}
-		}
-		if allTested {
-			break
-		}
-
-		needed := targetValidResolvers - len(qualifiedEndpoints)
-		if !fastStart || needed < 1 {
-			needed = totalUniqueResolvers
-		}
-
-		batchCtx, cancelBatch := context.WithCancel(ctx)
-		batchUniqueValid := &atomic.Int32{}
-		var batchMu sync.Mutex
-		batchEndpoints := make(map[string]struct{})
-		var batchValidConns []Connection
-
-		recordBatchValid := func(conn Connection) {
-			batchMu.Lock()
-			defer batchMu.Unlock()
-			batchValidConns = append(batchValidConns, conn)
-			if _, alreadyQual := qualifiedEndpoints[conn.ResolverLabel]; !alreadyQual {
-				if _, exists := batchEndpoints[conn.ResolverLabel]; !exists {
-					batchEndpoints[conn.ResolverLabel] = struct{}{}
-					if batchUniqueValid.Add(1) >= int32(needed) && fastStart {
-						cancelBatch()
-					}
-				}
-			}
-		}
-
-		if workerCount <= 1 {
-			for idx := range scanConnections {
-				if batchCtx.Err() != nil {
-					break
-				}
-				conn := scanConnections[idx]
-				if testedKeys[conn.Key] {
-					continue
-				}
-				if _, disq := disqualifiedEndpoints[conn.ResolverLabel]; disq {
-					testedKeys[conn.Key] = true
-					continue
-				}
-
-				completed := c.runConnectionMTUTest(batchCtx, conn, idx+1, len(scanConnections), uploadCaps[conn.Domain], counters)
-				if !completed {
-					break
-				}
-				testedKeys[conn.Key] = true
-				if acceptedConn, ok := c.balancer.GetConnectionByKey(conn.Key); ok && (acceptedConn.IsValid || acceptedConn.StandbyEligible) {
-					recordBatchValid(acceptedConn)
-				}
-			}
-		} else {
-			jobs := make(chan int)
-			var wg sync.WaitGroup
-			var testedMu sync.Mutex
-
-			for range workerCount {
-				wg.Go(func() {
-					for idx := range jobs {
-						if batchCtx.Err() != nil {
-							return
-						}
-						conn := scanConnections[idx]
-						completed := c.runConnectionMTUTest(batchCtx, conn, idx+1, len(scanConnections), uploadCaps[conn.Domain], counters)
-						if !completed {
-							return
-						}
-						testedMu.Lock()
-						testedKeys[conn.Key] = true
-						testedMu.Unlock()
-
-						if acceptedConn, ok := c.balancer.GetConnectionByKey(conn.Key); ok && (acceptedConn.IsValid || acceptedConn.StandbyEligible) {
-							recordBatchValid(acceptedConn)
-						}
-					}
-				})
-			}
-
-		dispatchLoop:
-			for idx := range scanConnections {
-				if fastStart && batchUniqueValid.Load() >= int32(needed) {
-					cancelBatch()
-					break dispatchLoop
-				}
-				conn := scanConnections[idx]
-				testedMu.Lock()
-				alreadyTested := testedKeys[conn.Key]
-				testedMu.Unlock()
-				if alreadyTested {
-					continue
-				}
-				if _, disq := disqualifiedEndpoints[conn.ResolverLabel]; disq {
-					testedMu.Lock()
-					testedKeys[conn.Key] = true
-					testedMu.Unlock()
-					continue
-				}
-
-				select {
-				case <-batchCtx.Done():
-					break dispatchLoop
-				case jobs <- idx:
-				}
-			}
-			close(jobs)
-			wg.Wait()
-		}
-		cancelBatch()
-
-		if err := ctx.Err(); err != nil {
-			return nil
-		}
-
-		if len(batchValidConns) == 0 {
-			continue
-		}
-
-		if !c.cfg.MicroBurstTestEnabled {
-			for _, conn := range batchValidConns {
-				qualifiedEndpoints[conn.ResolverLabel] = struct{}{}
-			}
-			continue
-		}
-
-		// Micro-burst qualification enabled:
-		// Optimize and sync MTU state with current valid connections before running burst
-		activeConns := c.balancer.ActiveConnections()
-		validConns, minUpload, minDownload, minUploadChars := c.optimizeMTUResolvers(activeConns)
-		if len(validConns) > 0 {
-			c.applySyncedMTUState(minUpload, minDownload, minUploadChars)
-		}
-
-		neededUnique := targetValidResolvers - len(qualifiedEndpoints)
-		if neededUnique < 0 {
-			neededUnique = 0
-		}
-		domainCount := len(c.cfg.Domains)
-		if domainCount < 1 {
-			domainCount = 1
-		}
-		maxBurstActive := neededUnique * domainCount
-		if c.cfg.MaxActiveResolvers > 0 && maxBurstActive > c.cfg.MaxActiveResolvers {
-			maxBurstActive = c.cfg.MaxActiveResolvers
-		}
-
-		burstQualified, results := c.runMicroBurstQualification(ctx, batchValidConns, maxBurstActive)
-		qualifiedMap := make(map[string]bool, len(burstQualified))
-		for _, q := range burstQualified {
-			qualifiedMap[q.Key] = true
-			qualifiedKeys[q.Key] = struct{}{}
-			qualifiedEndpoints[q.ResolverLabel] = struct{}{}
-		}
-		for _, r := range results {
-			if !r.BurstResult.Qualified {
-				disqualifiedEndpoints[r.Connection.ResolverLabel] = struct{}{}
-			}
-		}
+	prober := NewUDPResolverProber(c)
+	pool := c.pool
+	if pool == nil && c.balancer != nil {
+		pool = c.balancer.pool
 	}
 
-	if fastStart {
-		if c.cfg.MicroBurstTestEnabled {
-			for _, conn := range c.balancer.ActiveConnections() {
-				if _, qual := qualifiedKeys[conn.Key]; !qual {
-					c.balancer.SetConnectionValidity(conn.Key, false)
-					c.balancer.SetConnectionStandbyEligible(conn.Key, false)
-				}
-			}
+	engine := NewDiscoveryEngine(cfg, prober, pool, c.log)
+	if err := engine.Run(ctx, scanConnections); err != nil {
+		if errors.Is(err, context.Canceled) || (ctx != nil && ctx.Err() != nil) {
+			return nil
 		}
-		activeEndpoints := make(map[string]bool)
-		for _, conn := range c.balancer.ActiveConnections() {
-			activeEndpoints[conn.ResolverLabel] = true
-		}
-		if len(activeEndpoints) > targetValidResolvers {
-			keptEndpoints := make(map[string]bool, targetValidResolvers)
-			for _, conn := range c.balancer.ActiveConnections() {
-				if c.cfg.MicroBurstTestEnabled {
-					if _, qual := qualifiedKeys[conn.Key]; !qual {
-						c.balancer.SetConnectionValidity(conn.Key, false)
-						c.balancer.SetConnectionStandbyEligible(conn.Key, false)
-						continue
-					}
-				}
-				if len(keptEndpoints) < targetValidResolvers || keptEndpoints[conn.ResolverLabel] {
-					keptEndpoints[conn.ResolverLabel] = true
-				} else {
-					c.balancer.SetConnectionValidity(conn.Key, false)
-					c.balancer.SetConnectionStandbyEligible(conn.Key, true)
-				}
-			}
-		}
+		return err
 	}
 
-	activeConns := c.balancer.ActiveConnections()
+	var activeConns []Connection
+	if c.balancer != nil {
+		activeConns = c.balancer.ActiveConnections()
+	} else if pool != nil {
+		activeConns = pool.ActiveResolvers()
+	}
+
 	validConns, minUpload, minDownload, minUploadChars := c.optimizeMTUResolvers(activeConns)
 	if len(validConns) == 0 {
 		if c.log != nil {
@@ -601,7 +455,7 @@ func (c *Client) RunInitialMTUTests(ctx context.Context) error {
 	c.appendMTUUsageSeparatorOnce()
 	c.logMTUCompletion(validConns)
 
-	if fastStart && len(validConns) < len(scanConnections) {
+	if cfg.FastStart && len(validConns) < len(scanConnections) {
 		remaining := len(scanConnections) - len(validConns)
 		if c.log != nil {
 			c.log.Infof("⚡ <green>FastStart:</green> Initial connection ready with <cyan>%d</cyan> resolver(s). Background recheck will discover and test remaining <cyan>%d</cyan> resolver(s).", len(validConns), remaining)
@@ -631,6 +485,10 @@ func (c *Client) runResolverHealthLoop(ctx context.Context) {
 			c.now(),
 			c.tunnelPacketTimeout,
 		)
+
+		if c.balancer != nil {
+			c.balancer.OptimizeActivePool()
+		}
 
 		if c.cfg.RecheckInactiveServersEnabled {
 			c.runResolverHealthBatch(ctx, recheckInterval, parallelism)
@@ -843,24 +701,34 @@ func (c *Client) recheckInactiveResolver(ctx context.Context, conn Connection) {
 		return
 	}
 
-	// Revoke standby eligibility before probing so failed/degraded candidates cannot be promoted
-	c.balancer.SetConnectionStandbyEligible(conn.Key, false)
+	// Exclude this candidate from promotion for the entire network probe.
+	if !c.balancer.beginConnectionRecheck(conn.Key) {
+		return
+	}
+	completed := false
+	defer func() {
+		if !completed {
+			// An interrupted or failed recheck must not remain eligible for
+			// promotion or leave the candidate in StateRechecking.
+			c.balancer.completeConnectionRecheck(resolverRecheckResult{Connection: conn})
+		}
+	}()
 
 	transport, err := c.newUDPQueryTransport(ctx, conn.ResolverLabel)
 	if err != nil {
 		return
 	}
 	defer transport.conn.Close()
+	stopCancellation := context.AfterFunc(ctx, func() {
+		_ = transport.conn.Close()
+	})
+	defer stopCancellation()
 
 	ok, resolveTime := c.recheckResolverUploadMTU(ctx, conn, transport)
 	if !ok {
-		c.balancer.SetConnectionValidity(conn.Key, false)
-		c.balancer.SetConnectionStandbyEligible(conn.Key, false)
 		return
 	}
 	if !c.recheckResolverDownloadMTU(ctx, conn, transport) {
-		c.balancer.SetConnectionValidity(conn.Key, false)
-		c.balancer.SetConnectionStandbyEligible(conn.Key, false)
 		return
 	}
 
@@ -869,15 +737,6 @@ func (c *Client) recheckInactiveResolver(ctx context.Context, conn Connection) {
 	conn.UploadMTUChars = c.encodedCharsForPayload(uploadMTU)
 	conn.DownloadMTUBytes = downloadMTU
 	conn.MTUResolveTime = resolveTime
-
-	if !c.balancer.SetConnectionMTU(
-		conn.Key,
-		conn.UploadMTUBytes,
-		conn.UploadMTUChars,
-		conn.DownloadMTUBytes,
-	) {
-		return
-	}
 
 	var burstPtr *BurstProbeResult
 	if c.cfg.RecheckBurstTestEnabled {
@@ -895,23 +754,17 @@ func (c *Client) recheckInactiveResolver(ctx context.Context, conn Connection) {
 			uploadMTU,
 			probeTimeout,
 		)
-		if !burstResult.Qualified {
-			c.balancer.SetConnectionValidity(conn.Key, false)
-			c.balancer.SetConnectionStandbyEligible(conn.Key, false)
-			return
-		}
-		c.balancer.SeedBurstStats(conn.Key, burstResult.SentCount, burstResult.ReceivedCount, burstResult.AverageRTT)
 		burstPtr = &burstResult
-	} else {
-		c.balancer.SeedConservativeStats(conn.Key)
 	}
 
-	if !c.balancer.SetConnectionValidity(conn.Key, true) {
+	if ctx.Err() != nil {
 		return
 	}
-
-	actualConn, ok := c.balancer.GetConnectionByKey(conn.Key)
-	if !ok {
+	actualConn, ok := c.balancer.completeConnectionRecheck(resolverRecheckResult{
+		Connection: conn, MTUVerified: true, Burst: burstPtr,
+	})
+	completed = true
+	if !ok || (burstPtr != nil && !burstPtr.Qualified) {
 		return
 	}
 
@@ -1071,6 +924,7 @@ func (c *Client) runConnectionMTUTest(ctx context.Context, conn Connection, serv
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
+			completed = true
 			c.applyMTUDecision(conn.Key, mtuDecision{})
 			if c.log != nil {
 				c.log.Errorf(

@@ -422,7 +422,7 @@ func (c *Client) logMicroBurstCompletion(results []QualifiedResolver, activeCoun
 			status = "<red>REJECTED</red>"
 		}
 
-		speedStr := fmt.Sprintf("%.1f KB/s", r.BurstResult.ThroughputKBps)
+		speedStr := fmt.Sprintf("%.1f KB/s", r.BurstResult.BurstThroughputKBps)
 		lossStr := fmt.Sprintf("%.1f%%", r.BurstResult.LossRatio*100)
 		rttStr := formatResolverRTT(r.BurstResult.AverageRTT)
 		scoreStr := fmt.Sprintf("%.1f", r.Score)
