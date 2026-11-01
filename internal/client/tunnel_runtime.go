@@ -138,10 +138,18 @@ func (c *Client) sendOneWayDNSQuery(resolver Connection, packet []byte, deadline
 // getUDPConn retrieves a UDP connection from the pool for the specified resolver.
 // If no connection is available in the pool, it dials a new one.
 func (c *Client) getUDPConn(ctx context.Context, resolverLabel string) (*net.UDPConn, error) {
+	// The session init's client policy sync rewrites c.cfg under initStateMu
+	// and closes these pools, while a session init racer that starts late
+	// creates its pool again. Read the size under initStateMu, before taking
+	// resolverConnsMu: the sync takes resolverConnsMu while it holds initStateMu.
+	c.initStateMu.Lock()
+	poolSize := c.cfg.EffectiveResolverUDPConnectionPoolSize()
+	c.initStateMu.Unlock()
+
 	c.resolverConnsMu.Lock()
 	pool, ok := c.resolverConns[resolverLabel]
 	if !ok {
-		pool = make(chan pooledUDPConn, c.cfg.EffectiveResolverUDPConnectionPoolSize())
+		pool = make(chan pooledUDPConn, poolSize)
 		c.resolverConns[resolverLabel] = pool
 	}
 	c.resolverConnsMu.Unlock()

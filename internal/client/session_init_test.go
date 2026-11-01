@@ -2,6 +2,7 @@ package client
 
 import (
 	"bytes"
+	"context"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -418,4 +419,64 @@ func TestInitializeSessionRequestRacersDoNotRaceWithAppliedAnswer(t *testing.T) 
 		return true
 	}, "expected every racing session init query to be answered")
 	time.Sleep(50 * time.Millisecond)
+}
+
+// A session init racer that starts after the first answer was applied finds
+// the resolver pools closed by the client policy sync and sizes a new pool
+// from c.cfg, while the sync is still writing c.cfg: an upload MTU under 100
+// turns upload compression off there. Run with -race.
+func TestLateSessionInitRacerDoesNotRaceWithClientPolicySync(t *testing.T) {
+	c, resolver := newSessionInitTestClient(t, sessionInitTestConfig())
+	c.syncedUploadMTU = 90
+
+	conn, initPayload, verifyCode, err := c.nextSessionInitAttempt()
+	if err != nil {
+		t.Fatalf("nextSessionInitAttempt returned error: %v", err)
+	}
+	answerSessionInitQueries(resolver, verifyCode, false)
+	query, err := c.buildSessionQuery(conn.Domain, Enums.PACKET_SESSION_INIT, initPayload)
+	if err != nil {
+		t.Fatalf("buildSessionQuery returned error: %v", err)
+	}
+
+	// The racers that went first left a pool for the resolver.
+	udpConn, err := c.getUDPConn(context.Background(), conn.ResolverLabel)
+	if err != nil {
+		t.Fatalf("getUDPConn returned error: %v", err)
+	}
+	c.putUDPConn(conn.ResolverLabel, udpConn)
+	poolOpen := func() bool {
+		c.resolverConnsMu.Lock()
+		defer c.resolverConnsMu.Unlock()
+		_, ok := c.resolverConns[conn.ResolverLabel]
+		return ok
+	}
+
+	racerDone := make(chan struct{})
+	go func() {
+		defer close(racerDone)
+		deadline := time.Now().Add(2 * time.Second)
+		for poolOpen() {
+			if time.Now().After(deadline) {
+				t.Error("expected the client policy sync to close the resolver pools")
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		if _, err := c.exchangeDNSOverConnection(conn, query, false, c.mtuTestTimeout*3); err != nil {
+			t.Errorf("late racer exchange returned error: %v", err)
+		}
+	}()
+
+	err = c.applySessionInitPacket(VpnProto.Packet{
+		PacketType: Enums.PACKET_SESSION_ACCEPT,
+		Payload:    sessionAcceptTestPayload(verifyCode),
+	}, initPayload, verifyCode)
+	<-racerDone
+	if err != nil {
+		t.Fatalf("applySessionInitPacket returned error: %v", err)
+	}
+	if c.cfg.UploadCompressionType != int(compression.TypeOff) {
+		t.Fatalf("expected upload compression off below 100 bytes, got=%d", c.cfg.UploadCompressionType)
+	}
 }
