@@ -768,3 +768,84 @@ func TestDiscoveryEngine_ReserveDistinctEndpointsQuotaWithSlowerCandidate(t *tes
 		t.Fatalf("unresponsive endpoints should not be active, got: %v", activeEndpoints)
 	}
 }
+
+func TestDiscoveryEngine_FastStartEnforcesDiversityPerBatchBeforeCompletion(t *testing.T) {
+	// Scenario:
+	// Capacity = 3, TargetResolvers = 3, Parallelism = 2 (batch size 2).
+	// Batch 1: A:d1 (fast), B:d1 (medium).
+	// Batch 2: C:d2 (medium), A:d2 (fast, faster than B:d1).
+	// Batch 3: D:d1, E:d1 (unresponsive).
+	// When Batch 2 admits C:d2 and A:d2, A:d2 could displace B:d1, reducing active unique endpoints
+	// to {A, C}. Per-batch diversity enforcement must run Optimize(target) immediately after
+	// Batch 2 admission to restore B:d1 from standby before checking FastStart completion,
+	// avoiding scanning the remaining unresponsive candidates in Batch 3.
+	pool := NewResolverPool(3, nil)
+
+	connA1 := Connection{Key: "A:d1", Resolver: "1.1.1.1", ResolverPort: 53, ResolverLabel: "1.1.1.1:53", Domain: "d1.com", DownloadMTUBytes: 500, UploadMTUBytes: 200}
+	connB1 := Connection{Key: "B:d1", Resolver: "2.2.2.2", ResolverPort: 53, ResolverLabel: "2.2.2.2:53", Domain: "d1.com", DownloadMTUBytes: 500, UploadMTUBytes: 200}
+	connC2 := Connection{Key: "C:d2", Resolver: "3.3.3.3", ResolverPort: 53, ResolverLabel: "3.3.3.3:53", Domain: "d2.com", DownloadMTUBytes: 500, UploadMTUBytes: 200}
+	connA2 := Connection{Key: "A:d2", Resolver: "1.1.1.1", ResolverPort: 53, ResolverLabel: "1.1.1.1:53", Domain: "d2.com", DownloadMTUBytes: 500, UploadMTUBytes: 200}
+	connD1 := Connection{Key: "D:d1", Resolver: "4.4.4.4", ResolverPort: 53, ResolverLabel: "4.4.4.4:53", Domain: "d1.com", DownloadMTUBytes: 500, UploadMTUBytes: 200}
+	connE1 := Connection{Key: "E:d1", Resolver: "5.5.5.5", ResolverPort: 53, ResolverLabel: "5.5.5.5:53", Domain: "d2.com", DownloadMTUBytes: 500, UploadMTUBytes: 200}
+
+	pool.SetConnections([]*Connection{&connA1, &connB1, &connC2, &connA2, &connD1, &connE1})
+	pool.SetSessionMTU(100, 300)
+
+	cfg := DiscoveryConfig{
+		FastStart:             true,
+		TargetResolvers:       3,
+		Parallelism:           2,
+		MaxActiveResolvers:    3,
+		MicroBurstEnabled:     true,
+		MicroBurstPacketCount: 6,
+		MicroBurstParallelism: 2,
+		MicroBurstTimeout:     time.Second,
+		Domains:               []string{"d1.com", "d2.com"},
+	}
+
+	prober := NewFakeResolverProber()
+	// Batch 1
+	prober.SetBurstResponse("A:d1", BurstProbeResult{SentCount: 6, ReceivedCount: 6, LossRatio: 0, AverageRTT: 10 * time.Millisecond, BurstThroughputKBps: 300, Qualified: true})
+	prober.SetBurstResponse("B:d1", BurstProbeResult{SentCount: 6, ReceivedCount: 6, LossRatio: 0, AverageRTT: 30 * time.Millisecond, BurstThroughputKBps: 150, Qualified: true})
+
+	// Batch 2: A:d2 is faster than B:d1
+	prober.SetBurstResponse("C:d2", BurstProbeResult{SentCount: 6, ReceivedCount: 6, LossRatio: 0, AverageRTT: 35 * time.Millisecond, BurstThroughputKBps: 140, Qualified: true})
+	prober.SetBurstResponse("A:d2", BurstProbeResult{SentCount: 6, ReceivedCount: 6, LossRatio: 0, AverageRTT: 15 * time.Millisecond, BurstThroughputKBps: 280, Qualified: true})
+
+	// Batch 3: Unresponsive candidates (should NOT be probed if FastStart completes after Batch 2)
+	prober.SetMTUResponse("D:d1", MTUProbeResult{Success: false, RejectReason: "mtu failure"})
+	prober.SetMTUResponse("E:d1", MTUProbeResult{Success: false, RejectReason: "mtu failure"})
+
+	engine := NewDiscoveryEngine(cfg, prober, pool, nil)
+	ctx := context.Background()
+	if err := engine.Run(ctx, []Connection{connA1, connB1, connC2, connA2, connD1, connE1}); err != nil {
+		t.Fatalf("engine.Run() failed: %v", err)
+	}
+
+	t.Logf("Probed MTU keys: %v", prober.ProbedMTUKeys())
+	t.Logf("Probed Burst keys: %v", prober.ProbedBurstKeys())
+	for _, c := range pool.AllConnections() {
+		t.Logf("Conn: %s, IsValid: %v, StandbyEligible: %v", c.Key, c.IsValid, c.StandbyEligible)
+	}
+
+	// Verify that Batch 3 candidates were never probed
+	for _, key := range prober.ProbedMTUKeys() {
+		if key == "D:d1" || key == "E:d1" {
+			t.Fatalf("unresponsive candidate %s was probed: FastStart failed to complete after Batch 2", key)
+		}
+	}
+
+	active := pool.ActiveResolvers()
+	if len(active) != 3 {
+		t.Fatalf("expected exactly 3 active resolvers, got %d", len(active))
+	}
+
+	activeEndpoints := make(map[string]bool)
+	for _, c := range active {
+		activeEndpoints[c.ResolverLabel] = true
+	}
+
+	if !activeEndpoints["1.1.1.1:53"] || !activeEndpoints["2.2.2.2:53"] || !activeEndpoints["3.3.3.3:53"] {
+		t.Fatalf("expected active pool to have all 3 distinct endpoints (1.1.1.1, 2.2.2.2, 3.3.3.3), got: %v", activeEndpoints)
+	}
+}

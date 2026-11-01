@@ -305,6 +305,7 @@ func (e *DiscoveryEngine) Run(ctx context.Context, candidateSets ...[]Connection
 			for _, conn := range batchValidConns {
 				qualifiedKeys[conn.Key] = struct{}{}
 			}
+			_ = e.pool.Optimize(targetValidResolvers)
 			qualifiedEndpoints = make(map[string]struct{})
 			for _, conn := range e.pool.ActiveResolvers() {
 				qualifiedEndpoints[conn.ResolverLabel] = struct{}{}
@@ -331,6 +332,7 @@ func (e *DiscoveryEngine) Run(ctx context.Context, candidateSets ...[]Connection
 				qualifiedKeys[r.Connection.Key] = struct{}{}
 			}
 		}
+		_ = e.pool.Optimize(targetValidResolvers)
 		qualifiedEndpoints = make(map[string]struct{})
 		for _, conn := range e.pool.ActiveResolvers() {
 			qualifiedEndpoints[conn.ResolverLabel] = struct{}{}

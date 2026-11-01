@@ -253,10 +253,14 @@ func (p *ResolverPool) SetConnectionValidity(key string, valid bool) bool {
 	return ok
 }
 
-func (p *ResolverPool) setConnectionValidityLocked(key string, valid bool) bool {
+func (p *ResolverPool) setConnectionValidityLocked(key string, valid bool, allowDiversityOverride ...bool) bool {
 	idx, ok := p.indexByKey[key]
 	if !ok || idx < 0 || idx >= len(p.candidates) {
 		return false
+	}
+	override := false
+	if len(allowDiversityOverride) > 0 {
+		override = allowDiversityOverride[0]
 	}
 	cand := &p.candidates[idx]
 	if cand.conn.IsValid == valid {
@@ -281,7 +285,7 @@ func (p *ResolverPool) setConnectionValidityLocked(key string, valid bool) bool 
 		cand.conn.StandbyEligible = false
 		cand.state = StateInactive
 	}
-	p.moveConnectionStateLocked(idx, valid)
+	p.moveConnectionStateLocked(idx, valid, override)
 
 	return true
 }
@@ -420,7 +424,7 @@ func (p *ResolverPool) AdmitStartupBatch(results []QualifiedResolver, selected [
 		}
 	}
 	for _, conn := range selected {
-		p.setConnectionValidityLocked(conn.Key, true)
+		p.setConnectionValidityLocked(conn.Key, true, true)
 	}
 	for _, result := range results {
 		idx, ok := p.indexByKey[result.Connection.Key]
@@ -601,7 +605,7 @@ func (p *ResolverPool) CompleteRecheck(result ResolverRecheckResult) (Connection
 			cand.burstThroughputKBps = throughput
 		}
 	}
-	p.setConnectionValidityLocked(cand.conn.Key, qualified)
+	p.setConnectionValidityLocked(cand.conn.Key, qualified, false)
 	retConn := cand.conn
 
 	cb := p.onPoolChanged
@@ -1024,7 +1028,11 @@ func (p *ResolverPool) calculateConnectionScoreLocked(idx int) float64 {
 	return ev.CompositeScore
 }
 
-func (p *ResolverPool) moveConnectionStateLocked(idx int, valid bool) {
+func (p *ResolverPool) moveConnectionStateLocked(idx int, valid bool, allowDiversityOverride ...bool) {
+	override := false
+	if len(allowDiversityOverride) > 0 {
+		override = allowDiversityOverride[0]
+	}
 	cand := &p.candidates[idx]
 	if !valid {
 		cand.conn.IsValid = false
@@ -1055,10 +1063,10 @@ func (p *ResolverPool) moveConnectionStateLocked(idx int, valid bool) {
 			endpointCounts[p.candidates[activeIdx].conn.ResolverLabel]++
 		}
 
-		// If incoming candidate introduces a new distinct endpoint, and active pool
-		// contains duplicate pairings of an existing endpoint, displace the lowest
-		// scoring duplicate pairing to preserve endpoint diversity.
-		if endpointCounts[candEndpoint] == 0 {
+		// Forced diversity override is restricted to startup admission (AdmitStartupBatch).
+		// During background recovery or runtime operations, admitting a slower endpoint
+		// regardless of score leads to active membership churn when Optimize() demotes it.
+		if override && endpointCounts[candEndpoint] == 0 {
 			worstDupIdx := -1
 			worstDupScore := math.MaxFloat64
 			worstDupPos := -1
