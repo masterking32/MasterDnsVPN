@@ -270,8 +270,9 @@ func (c *Client) exchangeUDPQuery(transport *udpQueryTransport, packet []byte, t
 	return c.exchangeUDPQueryWithConn(transport.conn, packet, timeout)
 }
 
-// exchangeDNSOverConnection sends a DNS query and returns the extracted VPN packet.
-func (c *Client) exchangeDNSOverConnection(conn Connection, query []byte, timeout time.Duration) (VpnProto.Packet, error) {
+// exchangeDNSOverConnection sends a DNS query and returns the extracted VPN packet,
+// decoding the answer as base64 when base64Reply is set.
+func (c *Client) exchangeDNSOverConnection(conn Connection, query []byte, base64Reply bool, timeout time.Duration) (VpnProto.Packet, error) {
 	udpConn, err := c.getUDPConn(context.Background(), conn.ResolverLabel)
 	if err != nil {
 		return VpnProto.Packet{}, err
@@ -285,7 +286,7 @@ func (c *Client) exchangeDNSOverConnection(conn Connection, query []byte, timeou
 
 	c.putUDPConn(conn.ResolverLabel, udpConn)
 
-	packet, err := dnsparser.ExtractVPNResponse(response, c.responseMode == mtuProbeBase64Reply)
+	packet, err := dnsparser.ExtractVPNResponse(response, base64Reply)
 	if err != nil {
 		return VpnProto.Packet{}, err
 	}
