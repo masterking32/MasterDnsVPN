@@ -56,7 +56,7 @@ func (c *Client) DumpRuntimeStats(reason string) {
 
 		if s.IsValid {
 			activeSnapshots = append(activeSnapshots, s)
-		} else {
+		} else if s.StandbyEligible {
 			standbySnapshots = append(standbySnapshots, s)
 		}
 	}

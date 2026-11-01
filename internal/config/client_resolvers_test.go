@@ -295,6 +295,10 @@ func TestResolversFileReadErrorPreservation(t *testing.T) {
 		_ = os.Chmod(filePath, 0o000)
 		defer os.Chmod(filePath, 0o644)
 
+		if _, testReadErr := os.ReadFile(filePath); testReadErr == nil {
+			t.Skip("skipping permission denial test: process has privileged permissions that permit reading 000 files")
+		}
+
 		err := UpdateResolversFileWithRanked(filePath, ranked)
 		if err == nil {
 			t.Fatal("expected UpdateResolversFileWithRanked to fail on unreadable file")

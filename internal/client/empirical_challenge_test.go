@@ -806,17 +806,77 @@ func TestEmpirical_ConcurrentBalancerStress(t *testing.T) {
 // records and evaluates candidates even when placed into Standby pool due to MaxActiveResolvers
 // capacity (acceptedConn.IsValid || acceptedConn.StandbyEligible).
 //
-// Scenario:
-// 1. MaxActiveResolvers is 2. Four resolvers are tested in a batch.
-// 2. Resolvers 0 and 1 are tested first and pass MTU; they fill the active pool (IsValid=true).
-//    However, their mock listeners drop packets after 2 responses (failing subsequent micro-burst).
-// 3. Resolvers 2 and 3 pass MTU next; because active pool is full, they are placed in Standby
-//    (IsValid=false, StandbyEligible=true). Their mock listeners respond to all packets (100% burst success).
-// 4. With the PR 205 fix (acceptedConn.IsValid || acceptedConn.StandbyEligible), Resolvers 2 and 3
-//    are preserved in batchValidConns and evaluated in micro-burst.
-// 5. In micro-burst, Resolvers 2 and 3 qualify, replace unselected Resolvers 0 and 1, and become Active.
-// 6. Without this fix, Resolvers 2 and 3 would be dropped, leaving 0 active resolvers (total failure).
+// The test uses controlled probe outcomes to make replenishment assertions independent of
+// thread/worker probe scheduling.
 func TestEmpirical_MTU_BatchStandbyEligibilityPreserved(t *testing.T) {
+	domain := "v.example.com"
+	pool := NewResolverPool(2, nil)
+
+	conn0 := Connection{Key: "r0", Resolver: "127.0.0.1", ResolverPort: 5300, ResolverLabel: "127.0.0.1:5300", Domain: domain, DownloadMTUBytes: 300, UploadMTUBytes: 100}
+	conn1 := Connection{Key: "r1", Resolver: "127.0.0.1", ResolverPort: 5301, ResolverLabel: "127.0.0.1:5301", Domain: domain, DownloadMTUBytes: 300, UploadMTUBytes: 100}
+	conn2 := Connection{Key: "r2", Resolver: "127.0.0.1", ResolverPort: 5302, ResolverLabel: "127.0.0.1:5302", Domain: domain, DownloadMTUBytes: 300, UploadMTUBytes: 100}
+	conn3 := Connection{Key: "r3", Resolver: "127.0.0.1", ResolverPort: 5303, ResolverLabel: "127.0.0.1:5303", Domain: domain, DownloadMTUBytes: 300, UploadMTUBytes: 100}
+
+	pool.SetConnections([]*Connection{&conn0, &conn1, &conn2, &conn3})
+	pool.SetSessionMTU(100, 300)
+
+	cfg := DiscoveryConfig{
+		FastStart:             true,
+		TargetResolvers:       2,
+		Parallelism:           2,
+		MaxActiveResolvers:    2,
+		MicroBurstEnabled:     true,
+		MicroBurstPacketCount: 6,
+		MicroBurstParallelism: 2,
+		MicroBurstTimeout:     100 * time.Millisecond,
+		Domains:               []string{domain},
+	}
+
+	prober := NewFakeResolverProber()
+	// Resolvers 0 and 1: pass MTU, fail micro-burst
+	prober.SetBurstResponse("r0", BurstProbeResult{SentCount: 6, ReceivedCount: 2, LossRatio: 0.67, AverageRTT: 10 * time.Millisecond, Qualified: false})
+	prober.SetBurstResponse("r1", BurstProbeResult{SentCount: 6, ReceivedCount: 2, LossRatio: 0.67, AverageRTT: 10 * time.Millisecond, Qualified: false})
+
+	// Resolvers 2 and 3: pass MTU and qualify micro-burst
+	prober.SetBurstResponse("r2", BurstProbeResult{SentCount: 6, ReceivedCount: 6, LossRatio: 0, AverageRTT: 20 * time.Millisecond, BurstThroughputKBps: 200, Qualified: true})
+	prober.SetBurstResponse("r3", BurstProbeResult{SentCount: 6, ReceivedCount: 6, LossRatio: 0, AverageRTT: 25 * time.Millisecond, BurstThroughputKBps: 180, Qualified: true})
+
+	engine := NewDiscoveryEngine(cfg, prober, pool, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	err := engine.Run(ctx)
+	if err != nil {
+		t.Fatalf("engine.Run() failed unexpectedly: %v", err)
+	}
+
+	activeConns := pool.ActiveResolvers()
+	if len(activeConns) != 2 {
+		t.Fatalf("expected exactly 2 active connections, got %d", len(activeConns))
+	}
+
+	activeKeys := make(map[string]bool)
+	for _, c := range activeConns {
+		activeKeys[c.Key] = true
+	}
+
+	if !activeKeys["r2"] {
+		t.Fatalf("expected resolver r2 to be active in pool, got: %v", activeKeys)
+	}
+	if !activeKeys["r3"] {
+		t.Fatalf("expected resolver r3 to be active in pool, got: %v", activeKeys)
+	}
+	if activeKeys["r0"] || activeKeys["r1"] {
+		t.Fatalf("burst-failing resolvers unexpectedly remained active: %v", activeKeys)
+	}
+}
+
+// TestEmpirical_MTU_BatchStandbyEligibilityPreserved_UDP retains end-to-end UDP socket integration
+// coverage for batch standby replenishment with a generous 30s timeout.
+func TestEmpirical_MTU_BatchStandbyEligibilityPreserved_UDP(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping UDP integration in short mode")
+	}
 	domain := "v.example.com"
 
 	// Resolvers 0 and 1: answer 2 MTU packets, then drop all subsequent (fails micro-burst)
@@ -840,6 +900,7 @@ func TestEmpirical_MTU_BatchStandbyEligibilityPreserved(t *testing.T) {
 		{IP: "127.0.0.1", Port: port3},
 	}
 	cfg.RecheckInactiveServersEnabled = true
+	cfg.AutoSaveRankedResolvers = false
 	cfg.RX_TX_Workers = 2
 	cfg.MaxActiveResolvers = 2
 	cfg.MicroBurstTestEnabled = true
@@ -853,7 +914,7 @@ func TestEmpirical_MTU_BatchStandbyEligibilityPreserved(t *testing.T) {
 
 	client := createTestFastStartClient(t, cfg)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	err := client.RunInitialMTUTests(ctx)

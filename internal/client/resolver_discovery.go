@@ -340,7 +340,7 @@ func (e *DiscoveryEngine) Run(ctx context.Context, candidateSets ...[]Connection
 	}
 
 	// Fill qualified vacancies before applying the startup endpoint quota.
-	_ = e.pool.Optimize()
+	_ = e.pool.Optimize(targetValidResolvers)
 
 	// Phase 7: FastStart Finalization
 	finalCap := targetValidResolvers
@@ -517,8 +517,38 @@ func (e *DiscoveryEngine) runMicroBurstQualification(
 		maxActive = maxActiveLimit
 	}
 	selected := qualifiedConns
-	if maxActive > 0 && len(selected) > maxActive {
-		selected = selected[:maxActive]
+	if maxActive > 0 && len(qualifiedConns) > maxActive {
+		quota := e.cfg.TargetResolvers
+		if quota <= 0 || quota > maxActive {
+			quota = maxActive
+		}
+
+		selected = make([]Connection, 0, maxActive)
+		selectedKeys := make(map[string]bool, maxActive)
+		selectedEndpoints := make(map[string]bool, maxActive)
+
+		// First pass: reserve distinct endpoints up to quota
+		for _, conn := range qualifiedConns {
+			if len(selected) >= maxActive {
+				break
+			}
+			if !selectedEndpoints[conn.ResolverLabel] && len(selectedEndpoints) < quota {
+				selected = append(selected, conn)
+				selectedKeys[conn.Key] = true
+				selectedEndpoints[conn.ResolverLabel] = true
+			}
+		}
+
+		// Second pass: fill remaining capacity with best remaining candidates
+		for _, conn := range qualifiedConns {
+			if len(selected) >= maxActive {
+				break
+			}
+			if !selectedKeys[conn.Key] {
+				selected = append(selected, conn)
+				selectedKeys[conn.Key] = true
+			}
+		}
 	}
 
 	e.pool.AdmitStartupBatch(results, selected)

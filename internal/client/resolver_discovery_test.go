@@ -698,3 +698,73 @@ func TestDiscoveryEngine_OnMTUSuccessCallback(t *testing.T) {
 		}
 	}
 }
+
+func TestDiscoveryEngine_ReserveDistinctEndpointsQuotaWithSlowerCandidate(t *testing.T) {
+	// Scenario:
+	// Two faster pairings on Endpoint A (A:d1, A:d2).
+	// A slower qualified pairing on Endpoint B (B:d1).
+	// Additional unresponsive candidates (C:d1 fails MTU, D:d1 fails burst).
+	// TargetResolvers = 2, MaxActiveResolvers = 2 (capacity 2).
+	// Selection and optimization must honor the unique-endpoint quota within capacity,
+	// admitting both A and B, rather than letting A's two faster pairings crowd out B.
+	pool := NewResolverPool(2, nil)
+
+	connA1 := Connection{Key: "A:d1", Resolver: "1.1.1.1", ResolverPort: 53, ResolverLabel: "1.1.1.1:53", Domain: "d1.com", DownloadMTUBytes: 500, UploadMTUBytes: 200}
+	connA2 := Connection{Key: "A:d2", Resolver: "1.1.1.1", ResolverPort: 53, ResolverLabel: "1.1.1.1:53", Domain: "d2.com", DownloadMTUBytes: 500, UploadMTUBytes: 200}
+	connB1 := Connection{Key: "B:d1", Resolver: "2.2.2.2", ResolverPort: 53, ResolverLabel: "2.2.2.2:53", Domain: "d1.com", DownloadMTUBytes: 500, UploadMTUBytes: 200}
+	connC1 := Connection{Key: "C:d1", Resolver: "3.3.3.3", ResolverPort: 53, ResolverLabel: "3.3.3.3:53", Domain: "d1.com", DownloadMTUBytes: 500, UploadMTUBytes: 200}
+	connD1 := Connection{Key: "D:d1", Resolver: "4.4.4.4", ResolverPort: 53, ResolverLabel: "4.4.4.4:53", Domain: "d2.com", DownloadMTUBytes: 500, UploadMTUBytes: 200}
+
+	pool.SetConnections([]*Connection{&connA1, &connA2, &connB1, &connC1, &connD1})
+	pool.SetSessionMTU(100, 300)
+
+	cfg := DiscoveryConfig{
+		FastStart:             true,
+		TargetResolvers:       2,
+		Parallelism:           2,
+		MaxActiveResolvers:    2,
+		MicroBurstEnabled:     true,
+		MicroBurstPacketCount: 6,
+		MicroBurstParallelism: 2,
+		MicroBurstTimeout:     time.Second,
+		Domains:               []string{"d1.com", "d2.com"},
+	}
+
+	prober := NewFakeResolverProber()
+	// Two fast pairings on endpoint A
+	prober.SetBurstResponse("A:d1", BurstProbeResult{SentCount: 6, ReceivedCount: 6, LossRatio: 0, AverageRTT: 10 * time.Millisecond, BurstThroughputKBps: 300, Qualified: true})
+	prober.SetBurstResponse("A:d2", BurstProbeResult{SentCount: 6, ReceivedCount: 6, LossRatio: 0, AverageRTT: 12 * time.Millisecond, BurstThroughputKBps: 280, Qualified: true})
+
+	// Slower qualified pairing on endpoint B
+	prober.SetBurstResponse("B:d1", BurstProbeResult{SentCount: 6, ReceivedCount: 6, LossRatio: 0, AverageRTT: 45 * time.Millisecond, BurstThroughputKBps: 120, Qualified: true})
+
+	// Unresponsive candidates
+	prober.SetMTUResponse("C:d1", MTUProbeResult{Success: false, RejectReason: "mtu timeout"})
+	prober.SetBurstResponse("D:d1", BurstProbeResult{SentCount: 6, ReceivedCount: 0, LossRatio: 1.0, Qualified: false})
+
+	engine := NewDiscoveryEngine(cfg, prober, pool, nil)
+	ctx := context.Background()
+	if err := engine.Run(ctx); err != nil {
+		t.Fatalf("engine.Run() failed: %v", err)
+	}
+
+	active := pool.ActiveResolvers()
+	if len(active) != 2 {
+		t.Fatalf("expected exactly 2 active resolvers, got %d", len(active))
+	}
+
+	activeEndpoints := make(map[string]bool)
+	for _, c := range active {
+		activeEndpoints[c.ResolverLabel] = true
+	}
+
+	if !activeEndpoints["1.1.1.1:53"] {
+		t.Fatalf("expected endpoint 1.1.1.1:53 to be active, got: %v", activeEndpoints)
+	}
+	if !activeEndpoints["2.2.2.2:53"] {
+		t.Fatalf("expected endpoint 2.2.2.2:53 to be active, got: %v", activeEndpoints)
+	}
+	if activeEndpoints["3.3.3.3:53"] || activeEndpoints["4.4.4.4:53"] {
+		t.Fatalf("unresponsive endpoints should not be active, got: %v", activeEndpoints)
+	}
+}

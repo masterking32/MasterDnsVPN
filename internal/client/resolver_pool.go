@@ -585,6 +585,7 @@ func (p *ResolverPool) CompleteRecheck(result ResolverRecheckResult) (Connection
 		cand.conn.UploadMTUBytes = result.Connection.UploadMTUBytes
 		cand.conn.UploadMTUChars = result.Connection.UploadMTUChars
 		cand.conn.DownloadMTUBytes = result.Connection.DownloadMTUBytes
+		cand.conn.MTUResolveTime = result.Connection.MTUResolveTime
 	}
 	qualified := result.MTUVerified && p.supportsSessionMTULocked(cand.conn) && (result.Burst == nil || result.Burst.Qualified)
 	if qualified {
@@ -614,12 +615,18 @@ func (p *ResolverPool) CompleteRecheck(result ResolverRecheckResult) (Connection
 
 // Optimize fills vacant slots with qualified standby resolvers, then replaces
 // degraded active resolvers with meaningfully better standby candidates (>1.25x).
-func (p *ResolverPool) Optimize() bool {
+// When targetEndpoints is specified (> 0), it also swaps duplicate active pairings
+// for unrepresented standby endpoints to satisfy the unique-endpoint quota.
+func (p *ResolverPool) Optimize(targetEndpoints ...int) bool {
 	if p == nil {
 		return false
 	}
 	p.mu.Lock()
-	swapped := p.optimizeLocked()
+	target := 0
+	if len(targetEndpoints) > 0 {
+		target = targetEndpoints[0]
+	}
+	swapped := p.optimizeLocked(target)
 	cb := p.onPoolChanged
 	p.mu.Unlock()
 
@@ -658,7 +665,7 @@ func (p *ResolverPool) bestStandbyLocked() (int, float64) {
 	return bestInactiveIdx, bestInactiveScore
 }
 
-func (p *ResolverPool) optimizeLocked() bool {
+func (p *ResolverPool) optimizeLocked(target int) bool {
 	if len(p.inactiveIDs) == 0 {
 		return false
 	}
@@ -673,6 +680,83 @@ func (p *ResolverPool) optimizeLocked() bool {
 		swapped = true
 	}
 
+	if target > 0 {
+		for {
+			endpointCounts := make(map[string]int)
+			for _, activeIdx := range p.activeIDs {
+				endpointCounts[p.candidates[activeIdx].conn.ResolverLabel]++
+			}
+			uniqueCount := len(endpointCounts)
+			if uniqueCount >= target {
+				break
+			}
+
+			// Find candidate from standby whose endpoint is not in endpointCounts
+			bestUnrepStandbyIdx := -1
+			bestUnrepStandbyScore := -1.0
+			for _, inactIdx := range p.inactiveIDs {
+				if inactIdx < 0 || inactIdx >= len(p.candidates) {
+					continue
+				}
+				cand := &p.candidates[inactIdx]
+				if cand.state != StateStandby || !cand.conn.StandbyEligible || !p.supportsSessionMTULocked(cand.conn) {
+					continue
+				}
+				if endpointCounts[cand.conn.ResolverLabel] == 0 {
+					score := p.calculateConnectionScoreLocked(inactIdx)
+					if score > bestUnrepStandbyScore {
+						bestUnrepStandbyScore = score
+						bestUnrepStandbyIdx = inactIdx
+					}
+				}
+			}
+			if bestUnrepStandbyIdx < 0 {
+				break
+			}
+
+			// Find lowest-scoring duplicate active connection to demote
+			worstDupIdx := -1
+			worstDupScore := math.MaxFloat64
+			worstDupPos := -1
+			for pos, activeIdx := range p.activeIDs {
+				lbl := p.candidates[activeIdx].conn.ResolverLabel
+				if endpointCounts[lbl] > 1 {
+					score := p.calculateConnectionScoreLocked(activeIdx)
+					if score < worstDupScore {
+						worstDupScore = score
+						worstDupIdx = activeIdx
+						worstDupPos = pos
+					}
+				}
+			}
+			if worstDupIdx < 0 {
+				break
+			}
+
+			demotedCand := &p.candidates[worstDupIdx]
+			promotedCand := &p.candidates[bestUnrepStandbyIdx]
+
+			demotedCand.conn.IsValid = false
+			demotedCand.conn.StandbyEligible = true
+			demotedCand.state = StateStandby
+
+			promotedCand.conn.IsValid = true
+			promotedCand.conn.StandbyEligible = false
+			promotedCand.state = StateActive
+
+			p.activeIDs[worstDupPos] = bestUnrepStandbyIdx
+			p.removeInactiveIndexLocked(bestUnrepStandbyIdx)
+			p.addInactiveIndexLocked(worstDupIdx)
+
+			if p.log != nil {
+				p.log.Infof("<yellow>⚡ Active Resolver Swapped (Endpoint Diversity Quota): %s (Score: %.1f) ➔ Replaced by %s (Score: %.1f)</yellow>",
+					demotedCand.conn.ResolverLabel, worstDupScore,
+					promotedCand.conn.ResolverLabel, bestUnrepStandbyScore)
+			}
+			swapped = true
+		}
+	}
+
 	for i := 0; i < len(p.activeIDs); i++ {
 		activeIdx := p.activeIDs[i]
 		activeScore := p.calculateConnectionScoreLocked(activeIdx)
@@ -681,6 +765,22 @@ func (p *ResolverPool) optimizeLocked() bool {
 
 		// Swap if the best standby candidate is meaningfully better (>1.25x active score)
 		if bestInactiveIdx >= 0 && bestInactiveScore > (activeScore*1.25) {
+			if target > 0 {
+				demotedEndpoint := p.candidates[activeIdx].conn.ResolverLabel
+				promotedEndpoint := p.candidates[bestInactiveIdx].conn.ResolverLabel
+				if demotedEndpoint != promotedEndpoint {
+					activeEndpointCounts := make(map[string]int)
+					for _, aIdx := range p.activeIDs {
+						activeEndpointCounts[p.candidates[aIdx].conn.ResolverLabel]++
+					}
+					if activeEndpointCounts[demotedEndpoint] <= 1 && activeEndpointCounts[promotedEndpoint] > 0 {
+						if len(activeEndpointCounts)-1 < target {
+							continue
+						}
+					}
+				}
+			}
+
 			demotedCand := &p.candidates[activeIdx]
 			promotedCand := &p.candidates[bestInactiveIdx]
 
@@ -948,6 +1048,55 @@ func (p *ResolverPool) moveConnectionStateLocked(idx int, valid bool) {
 	// If maxActive is configured (> 0) and the active pool is full:
 	if p.maxActive > 0 && len(p.activeIDs) >= p.maxActive {
 		candScore := p.calculateConnectionScoreLocked(idx)
+		candEndpoint := cand.conn.ResolverLabel
+
+		endpointCounts := make(map[string]int)
+		for _, activeIdx := range p.activeIDs {
+			endpointCounts[p.candidates[activeIdx].conn.ResolverLabel]++
+		}
+
+		// If incoming candidate introduces a new distinct endpoint, and active pool
+		// contains duplicate pairings of an existing endpoint, displace the lowest
+		// scoring duplicate pairing to preserve endpoint diversity.
+		if endpointCounts[candEndpoint] == 0 {
+			worstDupIdx := -1
+			worstDupScore := math.MaxFloat64
+			worstDupPos := -1
+
+			for pos, activeIdx := range p.activeIDs {
+				lbl := p.candidates[activeIdx].conn.ResolverLabel
+				if endpointCounts[lbl] > 1 {
+					score := p.calculateConnectionScoreLocked(activeIdx)
+					if score < worstDupScore {
+						worstDupScore = score
+						worstDupIdx = activeIdx
+						worstDupPos = pos
+					}
+				}
+			}
+
+			if worstDupIdx >= 0 {
+				demotedCand := &p.candidates[worstDupIdx]
+				demotedCand.conn.IsValid = false
+				demotedCand.conn.StandbyEligible = true
+				demotedCand.state = StateStandby
+				p.activeIDs[worstDupPos] = idx
+				p.addInactiveIndexLocked(worstDupIdx)
+
+				p.removeInactiveIndexLocked(idx)
+				cand.conn.IsValid = true
+				cand.conn.StandbyEligible = false
+				cand.state = StateActive
+
+				if p.log != nil {
+					p.log.Infof("<green>🔄 DNS Resolver Promoted to Active Pool (Endpoint Diversity): %s (%s, score: %.1f) [Demoted duplicate: %s, score: %.1f] | Active Pool: %d/%d</green>",
+						cand.conn.ResolverLabel, cand.conn.Domain, candScore,
+						demotedCand.conn.ResolverLabel, worstDupScore,
+						len(p.activeIDs), len(p.candidates))
+				}
+				return
+			}
+		}
 
 		// Find lowest scoring resolver currently in activeIDs
 		worstActiveIdx := -1

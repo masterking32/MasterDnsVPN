@@ -23,6 +23,7 @@ func TestGetStatsSnapshotAndDump(t *testing.T) {
 	cfg.Domains = []string{"example.com"}
 	cfg.DataEncryptionMethod = 0
 	cfg.RuntimeStatsIntervalSeconds = 60.0
+	cfg.AutoSaveRankedResolvers = false
 
 	log := logger.New("TestLogger", "DEBUG")
 	c := New(cfg, log, nil)
@@ -107,6 +108,107 @@ func TestGetStatsSnapshotAndDump(t *testing.T) {
 	c.balancer.ReportSend("8.8.8.8|53|example.com")
 	if c.balancer.TotalPacketsSent() != 2 {
 		t.Fatalf("expected 2 TotalPacketsSent, got %d", c.balancer.TotalPacketsSent())
+	}
+}
+
+func TestDumpRuntimeStats_FilterStandbyEligibility(t *testing.T) {
+	// Tests active, standby, failed, and rechecking candidates.
+	// Only StandbyEligible candidates should enter the STANDBY diagnostics table.
+	// Disabled/failed resolvers with historical traffic must NOT appear as STANDBY.
+	cfg := config.DefaultClientConfig()
+	cfg.Domains = []string{"example.com"}
+	cfg.AutoSaveRankedResolvers = false
+
+	output, err := os.CreateTemp(t.TempDir(), "dump_stats")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer output.Close()
+
+	original := os.Stdout
+	os.Stdout = output
+	log := logger.New("stats-eligibility-test", "INFO")
+	os.Stdout = original
+
+	c := New(cfg, log, nil)
+
+	conns := []Connection{
+		{Domain: "example.com", Resolver: "10.0.0.1", ResolverPort: 53, ResolverLabel: "10.0.0.1:53", Key: "active-conn", IsValid: true},
+		{Domain: "example.com", Resolver: "10.0.0.2", ResolverPort: 53, ResolverLabel: "10.0.0.2:53", Key: "standby-conn", IsValid: false},
+		{Domain: "example.com", Resolver: "10.0.0.3", ResolverPort: 53, ResolverLabel: "10.0.0.3:53", Key: "failed-conn", IsValid: false},
+		{Domain: "example.com", Resolver: "10.0.0.4", ResolverPort: 53, ResolverLabel: "10.0.0.4:53", Key: "recheck-conn", IsValid: false},
+	}
+	ptrs := make([]*Connection, len(conns))
+	for i := range conns {
+		ptrs[i] = &conns[i]
+	}
+	c.balancer.SetConnections(ptrs)
+
+	// Set validity & eligibility
+	c.balancer.SetConnectionValidity("active-conn", true)
+	c.balancer.SetConnectionStandbyEligible("standby-conn", true)
+	c.balancer.SetConnectionStandbyEligible("failed-conn", false)
+	c.balancer.beginConnectionRecheck("recheck-conn")
+
+	// Historical traffic on all resolvers
+	c.balancer.SeedBurstStats("active-conn", 100, 100, 10*time.Millisecond)
+	c.balancer.SeedBurstStats("standby-conn", 40, 40, 15*time.Millisecond)
+	c.balancer.SeedBurstStats("failed-conn", 80, 20, 80*time.Millisecond)
+	c.balancer.SeedBurstStats("recheck-conn", 30, 30, 25*time.Millisecond)
+
+	snapshots := c.balancer.GetStatsSnapshot()
+	if len(snapshots) != 4 {
+		t.Fatalf("expected 4 snapshots, got %d", len(snapshots))
+	}
+	for _, s := range snapshots {
+		switch s.Connection.Key {
+		case "active-conn":
+			if !s.IsValid || s.StandbyEligible {
+				t.Fatalf("unexpected state for active-conn: valid=%v standby=%v", s.IsValid, s.StandbyEligible)
+			}
+		case "standby-conn":
+			if s.IsValid || !s.StandbyEligible {
+				t.Fatalf("unexpected state for standby-conn: valid=%v standby=%v", s.IsValid, s.StandbyEligible)
+			}
+		case "failed-conn":
+			if s.IsValid || s.StandbyEligible {
+				t.Fatalf("unexpected state for failed-conn: valid=%v standby=%v", s.IsValid, s.StandbyEligible)
+			}
+		case "recheck-conn":
+			if s.IsValid || s.StandbyEligible {
+				t.Fatalf("unexpected state for recheck-conn: valid=%v standby=%v", s.IsValid, s.StandbyEligible)
+			}
+		}
+	}
+
+	os.Stdout = output
+	c.DumpRuntimeStats("EligibilityCheck")
+	os.Stdout = original
+
+	data, err := os.ReadFile(output.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputStr := string(data)
+
+	// 10.0.0.1:53 should appear as ACTIVE
+	if !strings.Contains(outputStr, "10.0.0.1:53") || !strings.Contains(outputStr, "ACTIVE") {
+		t.Fatalf("expected active resolver 10.0.0.1:53 in active table, got:\n%s", outputStr)
+	}
+
+	// 10.0.0.2:53 should appear as STANDBY
+	if !strings.Contains(outputStr, "10.0.0.2:53") || !strings.Contains(outputStr, "STANDBY") {
+		t.Fatalf("expected eligible standby resolver 10.0.0.2:53 in standby table, got:\n%s", outputStr)
+	}
+
+	// 10.0.0.3:53 (failed) has historical traffic, but should NOT appear as STANDBY
+	if strings.Contains(outputStr, "10.0.0.3:53") {
+		t.Fatalf("failed resolver 10.0.0.3:53 unexpectedly appeared in standby table:\n%s", outputStr)
+	}
+
+	// 10.0.0.4:53 (rechecking) has historical traffic, but should NOT appear as STANDBY
+	if strings.Contains(outputStr, "10.0.0.4:53") {
+		t.Fatalf("rechecking resolver 10.0.0.4:53 unexpectedly appeared in standby table:\n%s", outputStr)
 	}
 }
 

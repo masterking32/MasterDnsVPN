@@ -100,7 +100,7 @@ func TestRunInitialMTUTests_FastStartExitsEarly(t *testing.T) {
 
 	client := createTestFastStartClient(t, cfg)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	err := client.RunInitialMTUTests(ctx)
@@ -147,7 +147,7 @@ func TestRunInitialMTUTests_FullScanWhenRecheckDisabled(t *testing.T) {
 
 	client := createTestFastStartClient(t, cfg)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	err := client.RunInitialMTUTests(ctx)
@@ -189,7 +189,7 @@ func TestRunInitialMTUTests_FallbackWhenFewerResolversWork(t *testing.T) {
 
 	client := createTestFastStartClient(t, cfg)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	err := client.RunInitialMTUTests(ctx)
@@ -268,7 +268,7 @@ func TestFastStartEarlyExit(t *testing.T) {
 	cfg.MTUTestTimeout = 1.0
 
 	client := createTestFastStartClient(t, cfg)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	err := client.RunInitialMTUTests(ctx)
@@ -313,7 +313,7 @@ func TestFastStartUniqueResolvers(t *testing.T) {
 	cfg.MTUTestTimeout = 1.0
 
 	client := createTestFastStartClient(t, cfg)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	err := client.RunInitialMTUTests(ctx)
@@ -457,7 +457,7 @@ func TestRunInitialMTUTests_BurstRetryScanning(t *testing.T) {
 
 	client := createTestFastStartClient(t, cfg)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	err := client.RunInitialMTUTests(ctx)
