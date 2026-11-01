@@ -45,9 +45,10 @@ func (s CandidateState) String() string {
 
 // poolCandidate encapsulates a connection pairing, its lifecycle state, and performance stats.
 type poolCandidate struct {
-	conn  Connection
-	state CandidateState
-	stats *connectionStats
+	conn                Connection
+	state               CandidateState
+	stats               *connectionStats
+	burstThroughputKBps float64
 }
 
 // ResolverRecheckResult carries probe verification results for recheck evaluation.
@@ -405,6 +406,11 @@ func (p *ResolverPool) AdmitStartupBatch(results []QualifiedResolver, selected [
 		if ok && result.BurstResult.Qualified {
 			burst := result.BurstResult
 			p.candidates[idx].stats.seedBurst(burst.SentCount, burst.ReceivedCount, burst.AverageRTT)
+			throughput := burst.BurstThroughputKBps
+			if throughput <= 0 {
+				throughput = burst.ThroughputKBps
+			}
+			p.candidates[idx].burstThroughputKBps = throughput
 		}
 	}
 	// Release capacity before admitting winners, then retain qualified overflow.
@@ -587,6 +593,11 @@ func (p *ResolverPool) CompleteRecheck(result ResolverRecheckResult) (Connection
 		} else {
 			burst := result.Burst
 			cand.stats.seedBurst(burst.SentCount, burst.ReceivedCount, burst.AverageRTT)
+			throughput := burst.BurstThroughputKBps
+			if throughput <= 0 {
+				throughput = burst.ThroughputKBps
+			}
+			cand.burstThroughputKBps = throughput
 		}
 	}
 	p.setConnectionValidityLocked(cand.conn.Key, qualified)
@@ -905,6 +916,7 @@ func (p *ResolverPool) calculateConnectionScoreLocked(idx int) float64 {
 		DownloadMTUBytes: downloadMTU,
 		RTT:              avgRTT,
 		LossRatio:        lossRatio,
+		ThroughputKBps:   cand.burstThroughputKBps,
 	})
 	if math.IsNaN(ev.CompositeScore) || ev.CompositeScore < 0 {
 		return 0

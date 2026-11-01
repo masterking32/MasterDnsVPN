@@ -399,6 +399,9 @@ func (c *Client) newDiscoveryConfig() DiscoveryConfig {
 		MicroBurstTimeout:     c.resolverHealthProbeTimeout(),
 		Domains:               c.cfg.Domains,
 		UploadCaps:            c.precomputeUploadCaps(),
+		OnMTUSuccess: func(conn Connection) {
+			c.appendMTUSuccessLine(&conn)
+		},
 	}
 }
 

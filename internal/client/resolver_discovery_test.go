@@ -561,3 +561,140 @@ func TestDiscoveryEngine_MicroBurstDisabled(t *testing.T) {
 		t.Fatalf("expected 2 active resolvers, got: %d", pool.ActiveCount())
 	}
 }
+
+func TestDiscoveryEngine_PreserveQualifiedStandbyOnOptimize(t *testing.T) {
+	// Setup 3 candidates: conn-1, conn-2, conn-3.
+	// TargetResolvers = 2, MaxActiveResolvers = 2.
+	// All 3 qualify in bursts. conn-1 & conn-2 are active winners, conn-3 is standby.
+	// Optimize can promote standby conn-3.
+	// FinalizeFastStart must recognize conn-3 as qualified (in qualifiedKeys)
+	// and NOT deactivate it as unqualified.
+	pool := NewResolverPool(2, nil)
+	conn1 := Connection{Key: "conn-1", Resolver: "1.1.1.1", ResolverPort: 53, ResolverLabel: "1.1.1.1:53", Domain: "example.com", DownloadMTUBytes: 500, UploadMTUBytes: 200}
+	conn2 := Connection{Key: "conn-2", Resolver: "2.2.2.2", ResolverPort: 53, ResolverLabel: "2.2.2.2:53", Domain: "example.com", DownloadMTUBytes: 500, UploadMTUBytes: 200}
+	conn3 := Connection{Key: "conn-3", Resolver: "3.3.3.3", ResolverPort: 53, ResolverLabel: "3.3.3.3:53", Domain: "example.com", DownloadMTUBytes: 500, UploadMTUBytes: 200}
+	pool.SetConnections([]*Connection{&conn1, &conn2, &conn3})
+	pool.SetSessionMTU(100, 300)
+
+	cfg := DiscoveryConfig{
+		FastStart:             true,
+		TargetResolvers:       2,
+		Parallelism:           3,
+		MaxActiveResolvers:    2,
+		MicroBurstEnabled:     true,
+		MicroBurstPacketCount: 6,
+		MicroBurstParallelism: 3,
+		MicroBurstTimeout:     time.Second,
+		Domains:               []string{"example.com"},
+	}
+
+	prober := NewFakeResolverProber()
+	prober.SetBurstResponse("conn-1", BurstProbeResult{SentCount: 6, ReceivedCount: 6, LossRatio: 0, AverageRTT: 20 * time.Millisecond, BurstThroughputKBps: 200, Qualified: true})
+	prober.SetBurstResponse("conn-2", BurstProbeResult{SentCount: 6, ReceivedCount: 6, LossRatio: 0, AverageRTT: 25 * time.Millisecond, BurstThroughputKBps: 180, Qualified: true})
+	prober.SetBurstResponse("conn-3", BurstProbeResult{SentCount: 6, ReceivedCount: 6, LossRatio: 0, AverageRTT: 15 * time.Millisecond, BurstThroughputKBps: 220, Qualified: true})
+
+	engine := NewDiscoveryEngine(cfg, prober, pool, nil)
+	ctx := context.Background()
+	if err := engine.Run(ctx, []Connection{conn1, conn2, conn3}); err != nil {
+		t.Fatalf("engine.Run() failed: %v", err)
+	}
+
+	if pool.ActiveCount() != 2 {
+		t.Fatalf("expected 2 active resolvers after FinalizeFastStart, got %d", pool.ActiveCount())
+	}
+}
+
+func TestDiscoveryEngine_CountAdmittedEndpointsFastStartQuota(t *testing.T) {
+	// Endpoint A has 2 domain connections: conn-A1 (d1), conn-A2 (d2).
+	// Endpoint B has 1 domain connection: conn-B1 (d1).
+	// TargetResolvers = 2 (quota requires 2 unique endpoints), MaxActiveResolvers = 2.
+	// If batch 1 probes conn-A1 & conn-A2, both occupy the 2 slots.
+	// But that's only ONE unique endpoint (A).
+	// Discovery must NOT stop; it must continue to probe conn-B1 in the next batch
+	// to satisfy the 2-endpoint quota.
+	pool := NewResolverPool(2, nil)
+	connA1 := Connection{Key: "A:d1", Resolver: "1.1.1.1", ResolverPort: 53, ResolverLabel: "1.1.1.1:53", Domain: "d1.com", DownloadMTUBytes: 500, UploadMTUBytes: 200}
+	connA2 := Connection{Key: "A:d2", Resolver: "1.1.1.1", ResolverPort: 53, ResolverLabel: "1.1.1.1:53", Domain: "d2.com", DownloadMTUBytes: 500, UploadMTUBytes: 200}
+	connB1 := Connection{Key: "B:d1", Resolver: "2.2.2.2", ResolverPort: 53, ResolverLabel: "2.2.2.2:53", Domain: "d1.com", DownloadMTUBytes: 500, UploadMTUBytes: 200}
+	pool.SetConnections([]*Connection{&connA1, &connA2, &connB1})
+	pool.SetSessionMTU(100, 300)
+
+	cfg := DiscoveryConfig{
+		FastStart:             true,
+		TargetResolvers:       2,
+		Parallelism:           2,
+		MaxActiveResolvers:    2,
+		MicroBurstEnabled:     true,
+		MicroBurstPacketCount: 6,
+		MicroBurstParallelism: 2,
+		MicroBurstTimeout:     time.Second,
+		Domains:               []string{"d1.com", "d2.com"},
+	}
+
+	prober := NewFakeResolverProber()
+	prober.SetBurstResponse("A:d1", BurstProbeResult{SentCount: 6, ReceivedCount: 6, LossRatio: 0, AverageRTT: 20 * time.Millisecond, BurstThroughputKBps: 200, Qualified: true})
+	prober.SetBurstResponse("A:d2", BurstProbeResult{SentCount: 6, ReceivedCount: 6, LossRatio: 0, AverageRTT: 20 * time.Millisecond, BurstThroughputKBps: 200, Qualified: true})
+	prober.SetBurstResponse("B:d1", BurstProbeResult{SentCount: 6, ReceivedCount: 6, LossRatio: 0, AverageRTT: 15 * time.Millisecond, BurstThroughputKBps: 250, Qualified: true})
+
+	engine := NewDiscoveryEngine(cfg, prober, pool, nil)
+	ctx := context.Background()
+	if err := engine.Run(ctx); err != nil {
+		t.Fatalf("engine.Run() failed: %v", err)
+	}
+
+	t.Logf("Probed MTU keys: %v", prober.ProbedMTUKeys())
+	t.Logf("Probed Burst keys: %v", prober.ProbedBurstKeys())
+	bProbed := false
+	for _, k := range prober.ProbedBurstKeys() {
+		if k == "B:d1" {
+			bProbed = true
+			break
+		}
+	}
+	if !bProbed {
+		t.Fatal("expected candidate B:d1 to be burst-probed because quota of 2 unique endpoints was not met by endpoint A alone")
+	}
+
+	endpoints := make(map[string]bool)
+	for _, c := range pool.ActiveResolvers() {
+		endpoints[c.ResolverLabel] = true
+	}
+	if len(endpoints) < 2 {
+		t.Fatalf("expected 2 unique endpoints in active pool, got %d (%v)", len(endpoints), endpoints)
+	}
+}
+
+func TestDiscoveryEngine_OnMTUSuccessCallback(t *testing.T) {
+	_, pool, cfg := createTestDiscoverySetup(3)
+	cfg.TargetResolvers = 2
+
+	var mu sync.Mutex
+	var reportedConns []Connection
+	cfg.OnMTUSuccess = func(conn Connection) {
+		mu.Lock()
+		defer mu.Unlock()
+		reportedConns = append(reportedConns, conn)
+	}
+
+	prober := NewFakeResolverProber()
+	prober.SetMTUResponse("conn-1", MTUProbeResult{Success: true, UploadBytes: 200, UploadChars: 250, DownloadBytes: 500, ResolveTime: 5 * time.Millisecond})
+	prober.SetMTUResponse("conn-2", MTUProbeResult{Success: false, RejectReason: "rejected"})
+	prober.SetMTUResponse("conn-3", MTUProbeResult{Success: true, UploadBytes: 200, UploadChars: 250, DownloadBytes: 500, ResolveTime: 5 * time.Millisecond})
+
+	engine := NewDiscoveryEngine(cfg, prober, pool, nil)
+	ctx := context.Background()
+	if err := engine.Run(ctx); err != nil {
+		t.Fatalf("engine.Run() failed: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(reportedConns) != 2 {
+		t.Fatalf("expected 2 successful MTU connections reported to OnMTUSuccess, got %d", len(reportedConns))
+	}
+	for _, c := range reportedConns {
+		if c.Key == "conn-2" {
+			t.Fatal("failed MTU probe conn-2 must not be reported to OnMTUSuccess")
+		}
+	}
+}

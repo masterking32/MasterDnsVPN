@@ -81,6 +81,9 @@ type DiscoveryConfig struct {
 
 	// UploadCaps maps each domain to its precomputed maximum upload payload.
 	UploadCaps map[string]int
+
+	// OnMTUSuccess is an optional callback invoked when a candidate connection successfully passes MTU probing.
+	OnMTUSuccess func(conn Connection)
 }
 
 // DiscoveryEngine coordinates candidate batching, worker pool parallelism, quota tracking,
@@ -300,8 +303,11 @@ func (e *DiscoveryEngine) Run(ctx context.Context, candidateSets ...[]Connection
 		// Phase 4: Micro-Burst Qualification (using score.EvaluateResolver)
 		if !e.cfg.MicroBurstEnabled {
 			for _, conn := range batchValidConns {
-				qualifiedEndpoints[conn.ResolverLabel] = struct{}{}
 				qualifiedKeys[conn.Key] = struct{}{}
+			}
+			qualifiedEndpoints = make(map[string]struct{})
+			for _, conn := range e.pool.ActiveResolvers() {
+				qualifiedEndpoints[conn.ResolverLabel] = struct{}{}
 			}
 			continue
 		}
@@ -317,12 +323,17 @@ func (e *DiscoveryEngine) Run(ctx context.Context, candidateSets ...[]Connection
 			maxBurstActive = effectiveMaxActive
 		}
 
-		burstQualified, _ := e.runMicroBurstQualification(ctx, batchValidConns, maxBurstActive)
+		_, results := e.runMicroBurstQualification(ctx, batchValidConns, maxBurstActive)
 
 		// Phase 5: Batch Admission into ResolverPool
-		for _, q := range burstQualified {
-			qualifiedKeys[q.Key] = struct{}{}
-			qualifiedEndpoints[q.ResolverLabel] = struct{}{}
+		for _, r := range results {
+			if r.BurstResult.Qualified {
+				qualifiedKeys[r.Connection.Key] = struct{}{}
+			}
+		}
+		qualifiedEndpoints = make(map[string]struct{})
+		for _, conn := range e.pool.ActiveResolvers() {
+			qualifiedEndpoints[conn.ResolverLabel] = struct{}{}
 		}
 
 		// Phase 6: Replenishment check occurs at top of Phase 2 loop
@@ -416,6 +427,9 @@ func (e *DiscoveryEngine) probeCandidateMTU(ctx context.Context, conn Connection
 			e.log.Infof("<green>✅ Accepted (%d/%d): <cyan>%s</cyan> via <cyan>%s</cyan> | upload=<cyan>%d</cyan> | download=<cyan>%d</cyan> | totals: valid=<green>%d</green>, rejected=<red>%d</red></green>",
 				completed, total, conn.Domain, conn.ResolverLabel, res.UploadBytes, res.DownloadBytes, validNow, rejected)
 		}
+	}
+	if accepted, ok := e.pool.GetConnectionByKey(conn.Key); ok && e.cfg.OnMTUSuccess != nil {
+		e.cfg.OnMTUSuccess(accepted)
 	}
 	return res, true
 }

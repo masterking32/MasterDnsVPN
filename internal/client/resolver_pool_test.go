@@ -457,3 +457,74 @@ func TestResolverPool_CandidateFSM_MutualExclusivity(t *testing.T) {
 		t.Fatalf("inactive state violated mutual exclusivity: IsValid=%v, Standby=%v", conn.IsValid, conn.StandbyEligible)
 	}
 }
+
+func TestResolverPool_RetainMeasuredThroughputOnAdmission(t *testing.T) {
+	// A: 50ms RTT, measured burst throughput 49 KB/s.
+	// B: 18ms RTT, measured burst throughput 20 KB/s.
+	// Single-request MTU/RTT would score B higher (27.1 KB/s vs 9.8 KB/s),
+	// but measured throughput ranks A higher (49 KB/s vs 20 KB/s).
+	// Verify that pool admission retains measured throughput so Optimize() does NOT
+	// replace A with B.
+	p := NewResolverPool(1, nil)
+	connA := Connection{Key: "A", Resolver: "1.1.1.1", ResolverPort: 53, ResolverLabel: "1.1.1.1:53", Domain: "example.com", DownloadMTUBytes: 500, UploadMTUBytes: 200}
+	connB := Connection{Key: "B", Resolver: "2.2.2.2", ResolverPort: 53, ResolverLabel: "2.2.2.2:53", Domain: "example.com", DownloadMTUBytes: 500, UploadMTUBytes: 200}
+	p.SetConnections([]*Connection{&connA, &connB})
+	p.SetSessionMTU(100, 300)
+
+	results := []QualifiedResolver{
+		{
+			Connection: connA,
+			BurstResult: BurstProbeResult{
+				SentCount:           6,
+				ReceivedCount:       6,
+				LossRatio:           0.0,
+				AverageRTT:          50 * time.Millisecond,
+				BurstThroughputKBps: 49.0,
+				DownloadMTUBytes:    500,
+				Qualified:           true,
+			},
+			Score: 44.5,
+		},
+		{
+			Connection: connB,
+			BurstResult: BurstProbeResult{
+				SentCount:           6,
+				ReceivedCount:       6,
+				LossRatio:           0.0,
+				AverageRTT:          18 * time.Millisecond,
+				BurstThroughputKBps: 20.0,
+				DownloadMTUBytes:    500,
+				Qualified:           true,
+			},
+			Score: 19.3,
+		},
+	}
+
+	// Admit startup batch: A is selected as active winner, B is standby
+	p.AdmitStartupBatch(results, []Connection{connA})
+
+	if p.ActiveCount() != 1 {
+		t.Fatalf("expected 1 active, got %d", p.ActiveCount())
+	}
+	active := p.ActiveResolvers()
+	if active[0].Key != "A" {
+		t.Fatalf("expected conn A to be active, got %s", active[0].Key)
+	}
+
+	scoreA := p.calculateConnectionScoreLocked(p.indexByKey["A"])
+	scoreB := p.calculateConnectionScoreLocked(p.indexByKey["B"])
+	if scoreA <= scoreB {
+		t.Fatalf("expected scoreA (%.2f) > scoreB (%.2f) when measured throughput is retained", scoreA, scoreB)
+	}
+
+	// Optimize should not swap A out for B
+	swapped := p.Optimize()
+	if swapped {
+		t.Fatal("Optimize() should not have swapped higher-throughput resolver A with lower-throughput B")
+	}
+
+	active = p.ActiveResolvers()
+	if len(active) != 1 || active[0].Key != "A" {
+		t.Fatalf("expected conn A to remain active after Optimize, got: %v", active)
+	}
+}
