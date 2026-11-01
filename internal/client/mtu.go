@@ -625,9 +625,10 @@ func (c *Client) recheckInactiveResolver(ctx context.Context, conn Connection) {
 		return
 	}
 
-	conn.UploadMTUBytes = c.syncedUploadMTU
-	conn.UploadMTUChars = c.encodedCharsForPayload(c.syncedUploadMTU)
-	conn.DownloadMTUBytes = c.syncedDownloadMTU
+	uploadMTU, downloadMTU := c.syncedMTUs()
+	conn.UploadMTUBytes = uploadMTU
+	conn.UploadMTUChars = c.encodedCharsForPayload(uploadMTU)
+	conn.DownloadMTUBytes = downloadMTU
 
 	if !c.balancer.SetConnectionMTU(
 		conn.Key,
@@ -649,13 +650,23 @@ func (c *Client) recheckInactiveResolver(ctx context.Context, conn Connection) {
 	c.appendMTUReactiveAddedServerLine(&conn)
 }
 
+// syncedMTUs returns the synced upload and download MTUs. The resolver health
+// loop reads them while a session init applies the server's client policy,
+// which lowers them under initStateMu.
+func (c *Client) syncedMTUs() (upload int, download int) {
+	c.initStateMu.Lock()
+	defer c.initStateMu.Unlock()
+	return c.syncedUploadMTU, c.syncedDownloadMTU
+}
+
 func (c *Client) recheckResolverUploadMTU(ctx context.Context, conn Connection, transport *udpQueryTransport) bool {
 	timeout := c.resolverHealthProbeTimeout()
 	for attempt := 0; attempt < c.mtuTestRetries; attempt++ {
 		if ctx.Err() != nil {
 			return false
 		}
-		passed, _, err := c.sendUploadMTUProbe(ctx, conn, transport, c.syncedUploadMTU, timeout, mtuProbeOptions{
+		uploadMTU, _ := c.syncedMTUs()
+		passed, _, err := c.sendUploadMTUProbe(ctx, conn, transport, uploadMTU, timeout, mtuProbeOptions{
 			Quiet:   true,
 			IsRetry: attempt > 0,
 		})
@@ -673,7 +684,8 @@ func (c *Client) recheckResolverDownloadMTU(ctx context.Context, conn Connection
 			return false
 		}
 
-		passed, _, err := c.sendDownloadMTUProbe(ctx, conn, transport, c.syncedDownloadMTU, c.syncedUploadMTU, timeout, mtuProbeOptions{
+		uploadMTU, downloadMTU := c.syncedMTUs()
+		passed, _, err := c.sendDownloadMTUProbe(ctx, conn, transport, downloadMTU, uploadMTU, timeout, mtuProbeOptions{
 			Quiet:   true,
 			IsRetry: attempt > 0,
 		})
@@ -753,7 +765,7 @@ func (c *Client) confirmResolverDown(conn *Connection, window time.Duration) boo
 		timeout = time.Second
 	}
 
-	mtuSize := c.syncedUploadMTU
+	mtuSize, _ := c.syncedMTUs()
 	if mtuSize < 32 {
 		mtuSize = 32
 	}

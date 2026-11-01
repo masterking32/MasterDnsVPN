@@ -285,8 +285,9 @@ func listenTestResolver(t *testing.T, key string) (*net.UDPConn, *Connection) {
 }
 
 // newSessionInitTestClient returns a client whose only valid connection sends
-// to a loopback resolver socket, and that socket.
-func newSessionInitTestClient(t *testing.T, cfg config.ClientConfig) (*Client, *net.UDPConn) {
+// to a loopback resolver socket, and that socket. The inactive connections are
+// added to the balancer as well.
+func newSessionInitTestClient(t *testing.T, cfg config.ClientConfig, inactive ...*Connection) (*Client, *net.UDPConn) {
 	t.Helper()
 
 	codec, err := security.NewCodec(0, "")
@@ -296,7 +297,7 @@ func newSessionInitTestClient(t *testing.T, cfg config.ClientConfig) (*Client, *
 
 	resolver, conn := listenTestResolver(t, "a")
 	c := New(cfg, nil, codec)
-	c.balancer.SetConnections([]*Connection{conn})
+	c.balancer.SetConnections(append([]*Connection{conn}, inactive...))
 	c.balancer.SetConnectionMTU(conn.Key, 130, 210, 400)
 	c.balancer.SetConnectionValidity(conn.Key, true)
 	c.syncedUploadMTU = 130
@@ -478,5 +479,84 @@ func TestLateSessionInitRacerDoesNotRaceWithClientPolicySync(t *testing.T) {
 	}
 	if c.cfg.UploadCompressionType != int(compression.TypeOff) {
 		t.Fatalf("expected upload compression off below 100 bytes, got=%d", c.cfg.UploadCompressionType)
+	}
+}
+
+// Run starts the resolver health loop before it initializes the session, and
+// each session init applies the server's client policy, which lowers the
+// synced MTUs under initStateMu while the loop rechecks inactive resolvers
+// with them. Run with -race.
+func TestResolverHealthRecheckDoesNotRaceWithSessionPolicySync(t *testing.T) {
+	cfg := sessionInitTestConfig()
+	cfg.RecheckInactiveServersEnabled = true
+	// An inactive resolver that answers every probe without a tunnel answer,
+	// so each recheck attempt fails.
+	resolver, inactive := listenTestResolver(t, "b")
+	c, _ := newSessionInitTestClient(t, cfg, inactive)
+
+	probes := make(chan struct{}, 2)
+	applied := make(chan struct{})
+	go func() {
+		buf := make([]byte, 4096)
+		for answered := 0; ; answered++ {
+			n, addr, err := resolver.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			select {
+			case probes <- struct{}{}:
+			default:
+			}
+			if answered == 0 {
+				// Answer the first probe once the policy is applied, so the
+				// recheck's next attempt reads the synced MTUs after that.
+				select {
+				case <-applied:
+				case <-time.After(5 * time.Second):
+				}
+			}
+			response, err := DnsParser.BuildEmptyNoErrorResponse(buf[:n])
+			if err != nil {
+				continue
+			}
+			_, _ = resolver.WriteToUDP(response, addr)
+		}
+	}()
+	waitForProbe := func(which string) {
+		t.Helper()
+		select {
+		case <-probes:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("expected the health loop to send its %s recheck probe", which)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	loopDone := make(chan struct{})
+	go func() {
+		defer close(loopDone)
+		c.runResolverHealthLoop(ctx)
+	}()
+	defer func() {
+		cancel()
+		<-loopDone
+	}()
+
+	waitForProbe("first")
+	_, initPayload, verifyCode, err := c.nextSessionInitAttempt()
+	if err != nil {
+		t.Fatalf("nextSessionInitAttempt returned error: %v", err)
+	}
+	err = c.applySessionInitPacket(VpnProto.Packet{
+		PacketType: Enums.PACKET_SESSION_ACCEPT,
+		Payload:    sessionAcceptTestPayload(verifyCode),
+	}, initPayload, verifyCode)
+	close(applied)
+	if err != nil {
+		t.Fatalf("applySessionInitPacket returned error: %v", err)
+	}
+	waitForProbe("second")
+	if c.syncedUploadMTU != 120 {
+		t.Fatalf("expected the client policy to lower the synced upload mtu to 120, got=%d", c.syncedUploadMTU)
 	}
 }
