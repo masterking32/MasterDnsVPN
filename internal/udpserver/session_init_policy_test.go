@@ -2,6 +2,7 @@ package udpserver
 
 import (
 	"encoding/binary"
+	"sync"
 	"testing"
 
 	"masterdnsvpn-go/internal/arq"
@@ -207,5 +208,74 @@ func TestHandleStreamSynRequestRejectsWhenActiveStreamLimitIsReached(t *testing.
 	}
 	if orphan.StreamID != 2 || orphan.SequenceNum != 77 {
 		t.Fatalf("unexpected rejection packet identity: stream=%d seq=%d", orphan.StreamID, orphan.SequenceNum)
+	}
+}
+
+// A client races identical SESSION_INIT queries and resolvers retry them, so
+// the DNS workers handle duplicates of one session init at the same time and
+// all get the same session record. Run with -race.
+func TestHandleSessionInitRequestConcurrentDuplicatesShareSessionRecord(t *testing.T) {
+	s := New(config.ServerConfig{
+		ClientMaxUploadMTU:   150,
+		ClientMaxDownloadMTU: 4096,
+	}, nil, nil)
+
+	query, err := DnsParser.BuildTXTQuestionPacket("x.v.example.com", Enums.DNS_RECORD_TYPE_TXT, 4096)
+	if err != nil {
+		t.Fatalf("BuildTXTQuestionPacket returned error: %v", err)
+	}
+	initPayload := make([]byte, sessionInitDataSize)
+	initPayload[0] = mtuProbeModeRaw
+	initPayload[1] = compression.PackPair(compression.TypeOff, compression.TypeOff)
+	binary.BigEndian.PutUint16(initPayload[2:4], 120)
+	binary.BigEndian.PutUint16(initPayload[4:6], 400)
+	copy(initPayload[6:10], []byte{1, 2, 3, 4})
+	packet := VpnProto.Packet{
+		SessionID:  0,
+		PacketType: Enums.PACKET_SESSION_INIT,
+		Payload:    initPayload,
+	}
+
+	const duplicates = 4
+	responses := make([][]byte, duplicates)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range duplicates {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			responses[i] = s.handleSessionInitRequest(query, domainMatcher.Decision{RequestName: "x.v.example.com"}, packet)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	var sessionID uint8
+	for i, response := range responses {
+		if response == nil {
+			t.Fatalf("expected session accept response for duplicate %d", i)
+		}
+		accepted, err := DnsParser.ExtractVPNResponse(response, false)
+		if err != nil {
+			t.Fatalf("ExtractVPNResponse returned error: %v", err)
+		}
+		accept, err := VpnProto.DecodeSessionAcceptPayload(accepted.Payload)
+		if err != nil {
+			t.Fatalf("DecodeSessionAcceptPayload returned error: %v", err)
+		}
+		if i == 0 {
+			sessionID = accept.SessionID
+		} else if accept.SessionID != sessionID {
+			t.Fatalf("expected duplicates to share session %d, got %d", sessionID, accept.SessionID)
+		}
+	}
+
+	record, ok := s.sessions.Get(sessionID)
+	if !ok {
+		t.Fatalf("expected session %d to exist", sessionID)
+	}
+	if record.streamCleanup == nil {
+		t.Fatal("expected the session record to clean up stream artifacts")
 	}
 }

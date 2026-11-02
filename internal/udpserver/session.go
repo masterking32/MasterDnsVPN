@@ -212,6 +212,11 @@ type sessionStore struct {
 	sessionInitTTL         time.Duration
 	recentlyClosedTTL      time.Duration
 	recentlyClosedCap      int
+
+	// streamCleanup is set before the server runs and copied into each record
+	// findOrCreate creates. Duplicate SESSION_INITs reuse a record concurrently,
+	// so a record's streamCleanup is never written after it is created.
+	streamCleanup func(uint8, uint16)
 }
 
 func newSessionStore(orphanQueueCap int, streamQueueCap int, options ...any) *sessionStore {
@@ -307,6 +312,7 @@ func (s *sessionStore) findOrCreate(
 		RecentlyClosedTTL:          s.recentlyClosedTTL,
 		RecentlyClosedCap:          s.recentlyClosedCap,
 		OrphanQueue:                mlq.New[VpnProto.Packet](s.orphanQueueCap),
+		streamCleanup:              s.streamCleanup,
 	}
 
 	// Initialize virtual Stream 0 for control packets

@@ -130,7 +130,7 @@ func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Se
 	if cfg.FallbackAddress != "" && packetBufferSize < udpFallbackMaxUDPPacketSize {
 		packetBufferSize = udpFallbackMaxUDPPacketSize
 	}
-	return &Server{
+	s := &Server{
 		cfg:                    cfg,
 		log:                    log,
 		codec:                  codec,
@@ -182,6 +182,8 @@ func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Se
 			},
 		},
 	}
+	sessions.streamCleanup = s.cleanupStreamArtifacts
+	return s
 }
 
 type throttledLogState struct {
