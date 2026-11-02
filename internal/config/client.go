@@ -162,7 +162,7 @@ func defaultClientConfig() ClientConfig {
 		LocalDNSPendingTimeoutSec:             300.0,
 		LocalDNSCachePersist:                  true,
 		LocalDNSCacheFlushSec:                 60.0,
-		ResolverBalancingStrategy:             6,
+		ResolverBalancingStrategy:             9,
 		PacketDuplicationCount:                2,
 		SetupPacketDuplicationCount:           2,
 		StreamResolverFailoverResendThreshold: 2,
@@ -414,7 +414,7 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 
 	cfg.CompressionMinSize = defaultIntBelow(cfg.CompressionMinSize, 100, compression.DefaultMinSize)
 
-	if cfg.ResolverBalancingStrategy < 0 || cfg.ResolverBalancingStrategy > 8 {
+	if cfg.ResolverBalancingStrategy < 0 || cfg.ResolverBalancingStrategy > 9 {
 		return cfg, fmt.Errorf("invalid RESOLVER_BALANCING_STRATEGY: %d", cfg.ResolverBalancingStrategy)
 	}
 

@@ -857,3 +857,44 @@ func TestDiscoveryEngine_FastStartEnforcesDiversityPerBatchBeforeCompletion(t *t
 		t.Fatalf("expected active pool to have all 3 distinct endpoints (1.1.1.1, 2.2.2.2, 3.3.3.3), got: %v", activeEndpoints)
 	}
 }
+
+// TestDiscoveryEngine_CandidateInStateCheckingDuringProbe verifies that during initial MTU probing,
+// the candidate is leased in StateChecking, and cancellations return it to StateUntested.
+func TestDiscoveryEngine_CandidateInStateCheckingDuringProbe(t *testing.T) {
+	pool := NewResolverPool(2, nil)
+	conn := &Connection{
+		Key:           "ep1#d1.com",
+		ResolverLabel: "1.1.1.1:53",
+		Resolver:      "1.1.1.1",
+		ResolverPort:  53,
+		Domain:        "d1.com",
+	}
+	pool.SetConnections([]*Connection{conn})
+
+	prober := NewFakeResolverProber()
+	var inFlightState CandidateState
+	var observedInFlight bool
+
+	prober.onProbeMTU = func(c Connection) {
+		observedInFlight = true
+		st, _ := pool.CandidateState(c.Key)
+		inFlightState = st
+	}
+
+	cfg := DiscoveryConfig{
+		TargetResolvers: 1,
+		Parallelism:     1,
+		FastStart:       true,
+	}
+	engine := NewDiscoveryEngine(cfg, prober, pool, nil)
+	if err := engine.Run(context.Background()); err != nil {
+		t.Fatalf("engine.Run failed: %v", err)
+	}
+
+	if !observedInFlight {
+		t.Fatal("expected probe to be executed")
+	}
+	if inFlightState != StateChecking {
+		t.Fatalf("expected candidate state to be StateChecking during probe, got %v", inFlightState)
+	}
+}

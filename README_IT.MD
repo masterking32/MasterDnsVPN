@@ -620,7 +620,7 @@ Queste impostazioni sono critiche sul server:
 
 | Parametro | Valore di Esempio | Valori Consentiti / Comportamento Reale | Spiegazione Completa |
 | :--- | :--- | :--- | :--- |
-| `RESOLVER_BALANCING_STRATEGY` | `6` | `0..8` | Sceglie come vengono selezionati i resolver.<br>`0/2` = Round Robin, `1` = Random, `3` = Least Loss, `4` = Lowest Latency, `5` = Hybrid Score, `6` = Loss Then Latency (Predefinito), `7` = Least Loss Top Random, `8` = Least Loss Top Round Robin.<br>La modalità ibrida usa un punteggio combinato ponderato. La modalità loss-then-latency seleziona prima una rosa in base alla perdita, poi predilige la latenza inferiore all'interno di quella fascia e ruota tra i migliori candidati quasi equivalenti. La modalità top-random sceglie casualmente tra la migliore fascia di perdita affinché il carico non si concentri su un unico resolver. La modalità top-round-robin scorre la stessa migliore fascia di perdita con una rotazione deterministica. |
+| `RESOLVER_BALANCING_STRATEGY` | `9` | `0..9` | Sceglie come vengono selezionati i resolver.<br>`0/2` = Round Robin, `1` = Random, `3` = Least Loss, `4` = Lowest Latency, `5` = Hybrid Score, `6` = Loss Then Latency, `7` = Least Loss Top Random, `8` = Least Loss Top Round Robin, `9` = Common Score Ranking (Predefinito).<br>La modalità predefinita (9) instrada in base al punteggio di valutazione composito comune condiviso con la diagnostica e il pool. |
 | `PACKET_DUPLICATION_COUNT` | `2` | limitato all'intervallo valido nel codice | Conteggio normale di duplicazione dei pacchetti in uscita.<br>Valori più alti aumentano il costo di traffico ma migliorano la sopravvivenza su collegamenti deboli. |
 | `SETUP_PACKET_DUPLICATION_COUNT` | `2` | limitato all'intervallo valido nel codice | Simile a `PACKET_DUPLICATION_COUNT`, ma usato per i pacchetti sensibili al setup come la creazione degli stream e altri eventi di controllo critici. |
 | `STREAM_RESOLVER_FAILOVER_RESEND_THRESHOLD` | `2` | Se `<1`, si applica il fallback | Se uno stream accumula ripetuta pressione di reinvio sullo stesso resolver preferito, il client può eseguire il failover di quello stream su un altro resolver.<br>Questa soglia controlla la rapidità con cui ciò avviene. |
@@ -676,7 +676,8 @@ Queste impostazioni sono critiche sul server:
 
 | Parametro | Valore di Esempio | Valori Consentiti / Comportamento Reale | Spiegazione Completa |
 | :--- | :--- | :--- | :--- |
-| `RUNTIME_STATS_INTERVAL_SECONDS` | `60.0` | `1.0..86400.0` (o `0` = disabilitato) | Intervallo in secondi tra i log periodici della tabella di performance in console quando c'è traffico.<br>`0` disabilita il log periodico.<br>Premendo `'s'` + Invio (o Invio) in console in qualsiasi momento la tabella viene mostrata istantaneamente. |
+| `INTERACTIVE_STATS_ENABLED` | `false` | `true/false` | Abilita la lettura di stdin per i tasti rapidi delle statistiche. Abilitare solo in una console interattiva in primo piano; lasciare disabilitato per servizi, processi in background e input indirizzato tramite pipe. |
+| `RUNTIME_STATS_INTERVAL_SECONDS` | `60.0` | `1.0..86400.0` (o `0` = disabilitato) | Intervallo in secondi tra i log periodici della tabella di performance in console quando c'è traffico.<br>`0` disabilita il log periodico.<br>L'ottimizzazione del pool di resolver viene eseguita in modo indipendente ogni 60 secondi e salva i resolver classificati in caso di modifica del pool (se il salvataggio automatico è abilitato).<br>Se `INTERACTIVE_STATS_ENABLED = true`, premendo `'s'` + Invio (o Invio) in console la tabella viene mostrata istantaneamente indipendentemente dal timer. |
 
 ### 3.4.9) 🧵 Worker, Code e Timer di Runtime
 

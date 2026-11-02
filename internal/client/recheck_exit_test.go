@@ -65,8 +65,18 @@ func TestRecheckInactiveResolver_EarlyExitsCompleteCandidate(t *testing.T) {
 			state := c.pool.candidates[c.pool.indexByKey[key]].state
 			c.pool.mu.RUnlock()
 			got, _ := c.pool.GetConnectionByKey(key)
-			if state != StateInactive || got.IsValid || got.StandbyEligible {
+			if state == StateChecking || got.IsValid {
 				t.Fatalf("unfinished recheck: state=%v active=%v standby=%v", state, got.IsValid, got.StandbyEligible)
+			}
+			switch reason {
+			case "dial-error":
+				if state != StateRejected || got.StandbyEligible {
+					t.Fatalf("expected StateRejected on dial error: state=%v active=%v standby=%v", state, got.IsValid, got.StandbyEligible)
+				}
+			case "cancelled-before-dial", "cancelled-during-probe":
+				if state != StateStandby || !got.StandbyEligible {
+					t.Fatalf("expected StateStandby on cancelled recheck: state=%v active=%v standby=%v", state, got.IsValid, got.StandbyEligible)
+				}
 			}
 		})
 	}

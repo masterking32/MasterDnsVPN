@@ -183,7 +183,7 @@ func TestLoadClientConfigRejectsInvalidResolverBalancingStrategy(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(`
 PROTOCOL_TYPE = "SOCKS5"
 DOMAINS = ["v.domain.com"]
-RESOLVER_BALANCING_STRATEGY = 9
+RESOLVER_BALANCING_STRATEGY = 10
 DATA_ENCRYPTION_METHOD = 1
 ENCRYPTION_KEY = "secret"
 `), 0o644); err != nil {
@@ -195,6 +195,73 @@ ENCRYPTION_KEY = "secret"
 
 	if _, err := LoadClientConfig(configPath); err == nil {
 		t.Fatal("LoadClientConfig should reject an invalid RESOLVER_BALANCING_STRATEGY")
+	}
+}
+
+func TestLoadClientConfigResolverBalancingStrategyDefaultAndExplicit(t *testing.T) {
+	dir := t.TempDir()
+	resolversPath := filepath.Join(dir, "client_resolvers.txt")
+	if err := os.WriteFile(resolversPath, []byte("8.8.8.8\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile resolvers failed: %v", err)
+	}
+
+	// 1. Omitted strategy defaults to 9 (BalancingCommonScore)
+	configPathOmitted := filepath.Join(dir, "omitted.toml")
+	if err := os.WriteFile(configPathOmitted, []byte(`
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["v.domain.com"]
+RESOLVERS_FILE_PATH = "client_resolvers.txt"
+DATA_ENCRYPTION_METHOD = 1
+ENCRYPTION_KEY = "secret"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile config failed: %v", err)
+	}
+	cfgOmitted, err := LoadClientConfig(configPathOmitted)
+	if err != nil {
+		t.Fatalf("LoadClientConfig failed: %v", err)
+	}
+	if cfgOmitted.ResolverBalancingStrategy != 9 {
+		t.Fatalf("expected omitted strategy to default to 9, got %d", cfgOmitted.ResolverBalancingStrategy)
+	}
+
+	// 2. Explicit strategy 9 (CommonScore) is valid
+	configPath9 := filepath.Join(dir, "strategy9.toml")
+	if err := os.WriteFile(configPath9, []byte(`
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["v.domain.com"]
+RESOLVERS_FILE_PATH = "client_resolvers.txt"
+RESOLVER_BALANCING_STRATEGY = 9
+DATA_ENCRYPTION_METHOD = 1
+ENCRYPTION_KEY = "secret"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile config failed: %v", err)
+	}
+	cfg9, err := LoadClientConfig(configPath9)
+	if err != nil {
+		t.Fatalf("LoadClientConfig failed: %v", err)
+	}
+	if cfg9.ResolverBalancingStrategy != 9 {
+		t.Fatalf("expected strategy 9, got %d", cfg9.ResolverBalancingStrategy)
+	}
+
+	// 3. Explicit strategy 6 (LossThenLatency) is preserved
+	configPath6 := filepath.Join(dir, "strategy6.toml")
+	if err := os.WriteFile(configPath6, []byte(`
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["v.domain.com"]
+RESOLVERS_FILE_PATH = "client_resolvers.txt"
+RESOLVER_BALANCING_STRATEGY = 6
+DATA_ENCRYPTION_METHOD = 1
+ENCRYPTION_KEY = "secret"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile config failed: %v", err)
+	}
+	cfg6, err := LoadClientConfig(configPath6)
+	if err != nil {
+		t.Fatalf("LoadClientConfig failed: %v", err)
+	}
+	if cfg6.ResolverBalancingStrategy != 6 {
+		t.Fatalf("expected strategy 6, got %d", cfg6.ResolverBalancingStrategy)
 	}
 }
 

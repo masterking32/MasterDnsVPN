@@ -292,6 +292,11 @@ func (e *DiscoveryEngine) Run(ctx context.Context, candidateSets ...[]Connection
 
 		if ctx != nil {
 			if err := ctx.Err(); err != nil {
+				for _, c := range batchValidConns {
+					if state, ok := e.pool.CandidateState(c.Key); ok && state == StateChecking {
+						e.pool.CancelChecking(c.Key)
+					}
+				}
 				return err
 			}
 		}
@@ -371,11 +376,26 @@ func (e *DiscoveryEngine) probeCandidateMTU(ctx context.Context, conn Connection
 	if conn.Key == "" {
 		return MTUProbeResult{}, true
 	}
+	if e.pool != nil {
+		if _, ok := e.pool.AcquireCandidateForChecking(conn.Key); !ok {
+			return MTUProbeResult{}, false
+		}
+	}
+	var probeDone bool
+	defer func() {
+		if !probeDone && e.pool != nil {
+			e.pool.CancelChecking(conn.Key)
+		}
+	}()
+
 	defer func() {
 		if recovered := recover(); recovered != nil {
+			probeDone = true
 			result = MTUProbeResult{}
 			completed = true
-			e.pool.ApplyMTUProbeResult(conn.Key, 0, 0, 0, 0, false)
+			if e.pool != nil {
+				e.pool.CommitCandidateOutcome(conn.Key, false, 0, 0, 0, 0)
+			}
 			if e.log != nil {
 				e.log.Errorf("💥 <red>MTU Probe Worker Panic: <cyan>%v</cyan> (Resolver: <cyan>%s</cyan>)</red>", recovered, conn.ResolverLabel)
 			}
@@ -401,8 +421,11 @@ func (e *DiscoveryEngine) probeCandidateMTU(ctx context.Context, conn Connection
 	}
 
 	if err != nil || !res.Success {
+		probeDone = true
 		res.Success = false
-		e.pool.ApplyMTUProbeResult(conn.Key, res.UploadBytes, res.UploadChars, res.DownloadBytes, 0, false)
+		if e.pool != nil {
+			e.pool.CommitCandidateOutcome(conn.Key, false, res.UploadBytes, res.UploadChars, res.DownloadBytes, 0)
+		}
 		if e.counters != nil {
 			completed := e.counters.completed.Add(1)
 			var rejected int32
@@ -419,8 +442,18 @@ func (e *DiscoveryEngine) probeCandidateMTU(ctx context.Context, conn Connection
 		return res, true
 	}
 
-	// MTU success alone is not admission when burst qualification is required.
-	e.pool.ApplyMTUProbeResult(conn.Key, res.UploadBytes, res.UploadChars, res.DownloadBytes, res.ResolveTime, !e.cfg.MicroBurstEnabled)
+	probeDone = true
+	if !e.cfg.MicroBurstEnabled {
+		if e.pool != nil {
+			e.pool.CommitCandidateOutcome(conn.Key, true, res.UploadBytes, res.UploadChars, res.DownloadBytes, res.ResolveTime)
+		}
+	} else {
+		// MTU success alone is not admission when burst qualification is required;
+		// candidate remains in StateChecking for subsequent micro-burst evaluation.
+		if e.pool != nil {
+			e.pool.SetConnectionMTU(conn.Key, res.UploadBytes, res.UploadChars, res.DownloadBytes, res.ResolveTime)
+		}
+	}
 	if e.counters != nil {
 		completed := e.counters.completed.Add(1)
 		validNow := e.counters.recordValid(conn.ResolverLabel)

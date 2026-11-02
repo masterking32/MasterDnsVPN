@@ -11,6 +11,7 @@ package client
 
 import (
 	"container/heap"
+	"context"
 	"crypto/rand"
 	"fmt"
 	"net"
@@ -60,6 +61,16 @@ func formatResolverEndpoint(resolver string, port int) string {
 		return fmt.Sprintf("[%s]:%d", resolver, port)
 	}
 	return fmt.Sprintf("%s:%d", resolver, port)
+}
+
+func connectionEndpointKey(conn Connection) string {
+	if conn.ResolverLabel != "" {
+		return conn.ResolverLabel
+	}
+	if conn.Resolver != "" {
+		return formatResolverEndpoint(conn.Resolver, conn.ResolverPort)
+	}
+	return conn.Key
 }
 
 func makeConnectionKey(resolver string, port int, domain string) string {
@@ -591,6 +602,8 @@ func (c *Client) PrintBanner() {
 		strategyName = "Least Loss Top Random"
 	case 8:
 		strategyName = "Least Loss Top Round Robin"
+	case 9:
+		strategyName = "Common Score Ranking (Default)"
 	}
 
 	c.log.Infof("⚖  <cyan>Resolver Balancing, Strategy:</cyan> <yellow>%s (%d)</yellow>", strategyName, c.cfg.ResolverBalancingStrategy)
@@ -651,10 +664,24 @@ func (c *Client) BuildConnectionMap() error {
 	return nil
 }
 
+// NotifyRankedResolversDirty signals the background writer that resolver rankings need saving.
+func (c *Client) NotifyRankedResolversDirty() {
+	if c != nil && c.rankedWriter != nil {
+		c.rankedWriter.NotifyDirty()
+	}
+}
+
 // SaveRankedResolversToFile persists the top-ranked resolver endpoints to the resolvers file
 // under an auto-ranked header block, preserving all custom user lines below.
 func (c *Client) SaveRankedResolversToFile() {
 	if c == nil || (c.balancer == nil && c.pool == nil) || !c.cfg.AutoSaveRankedResolvers {
+		return
+	}
+
+	if c.rankedWriter != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = c.rankedWriter.Flush(ctx)
 		return
 	}
 

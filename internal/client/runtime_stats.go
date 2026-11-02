@@ -177,6 +177,20 @@ func (c *Client) DumpRuntimeStats(reason string) {
 		overallLossRatio*100,
 		totalActiveStreams,
 	)
+	var cov ResolverPoolCoverageStats
+	if c.pool != nil {
+		cov = c.pool.CoverageStats()
+	} else if c.balancer != nil {
+		cov = c.balancer.CoverageStats()
+	}
+	c.log.Infof(
+		"<magenta>Discovery Coverage: Configured: <cyan>%d</cyan> | Completed Attempts: <green>%d</green> | Remaining Untested: <yellow>%d</yellow> | Distinct Qualified Endpoints: <cyan>%d</cyan> (First-Pass Complete: %v)</magenta>",
+		cov.ConfiguredPairings,
+		cov.CompletedInitialAttempts,
+		cov.RemainingUntested,
+		cov.DistinctQualified,
+		cov.IsFirstPassComplete,
+	)
 	c.log.Infof("%s", separator)
 }
 
@@ -191,12 +205,20 @@ func calculateResolverRuntimeSpeedAndScore(s ResolverStatsSnapshot) (string, str
 		return "n/a", "n/a", tier
 	}
 
-	ev := EvaluateResolver(ResolverMetrics{
-		DownloadMTUBytes: s.Connection.DownloadMTUBytes,
-		RTT:              rtt,
-		LossRatio:        s.LossRatio,
+	ev := EvaluateCandidateObservation(CandidateObservationInput{
+		UploadMTUBytes:      s.Connection.UploadMTUBytes,
+		DownloadMTUBytes:    s.Connection.DownloadMTUBytes,
+		MTUResolveTime:      s.Connection.MTUResolveTime,
+		BurstThroughputKBps: s.BurstThroughputKBps,
+		LiveRTT:             s.AverageRTT,
+		LiveLossRatio:       s.LossRatio,
+		LiveSentCount:       s.Sent,
+		LiveLostCount:       s.Lost,
 	})
 	speedStr := FormatResolverSpeed(ev.ThroughputKBps)
+	if !ev.ThroughputIsMeasured && ev.ThroughputKBps > 0 {
+		speedStr += " (est)"
+	}
 	scoreStr := fmt.Sprintf("%.1f", ev.CompositeScore)
 
 	return speedStr, scoreStr, ev.Tier

@@ -718,44 +718,6 @@ func TestE2E_Tier4_Adversarial_InvariantAudit_MutualExclusivity(t *testing.T) {
 	}
 }
 
-// TestE2E_Tier4_Adversarial_Immutability_ScopeAudit verifies that git status reports zero
-// modifications to go.mod, go.sum, and zero modifications outside internal/client/ & internal/config/.
-func TestE2E_Tier4_Adversarial_Immutability_ScopeAudit(t *testing.T) {
-	// 1. Verify go.mod and go.sum immutability
-	cmdDiff := exec.Command("git", "diff", "--", "go.mod", "go.sum")
-	outDiff, err := cmdDiff.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git diff failed: %v", err)
-	}
-	if strings.TrimSpace(string(outDiff)) != "" {
-		t.Fatalf("CRITICAL INVARIANT VIOLATION: go.mod / go.sum has been modified!\n%s", string(outDiff))
-	}
-
-	// 2. Verify git status has no staged or unstaged modifications in cmd/ or internal/ outside client and config
-	cmdStatus := exec.Command("git", "status", "--porcelain")
-	outStatus, err := cmdStatus.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git status failed: %v", err)
-	}
-
-	lines := strings.Split(string(outStatus), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if len(line) < 3 {
-			continue
-		}
-		filePath := strings.TrimSpace(line[2:])
-		if strings.HasPrefix(filePath, "cmd/") {
-			t.Fatalf("CRITICAL SCOPE VIOLATION: modified forbidden path: %s", filePath)
-		}
-		if strings.HasPrefix(filePath, "internal/") &&
-			!strings.HasPrefix(filePath, "internal/client") &&
-			!strings.HasPrefix(filePath, "internal/config") {
-			t.Fatalf("CRITICAL SCOPE VIOLATION: modified forbidden path: %s", filePath)
-		}
-	}
-}
-
 // TestE2E_Tier2_Boundary_AllCandidatesProbeFailure verifies that the pool behaves safely
 // and returns appropriate errors or empty lists when every candidate fails probes.
 func TestE2E_Tier2_Boundary_AllCandidatesProbeFailure(t *testing.T) {
@@ -915,6 +877,44 @@ func TestE2E_Tier4_Workload_RapidDegradationSwapsUnderLoss(t *testing.T) {
 					t.Fatalf("round %d: selected target %s has StandbyEligible=true", round, tgt.Key)
 				}
 			}
+		}
+	}
+}
+
+// TestE2E_Tier4_Adversarial_Immutability_ScopeAudit verifies that git status reports zero
+// modifications to go.mod, go.sum, and zero modifications outside internal/client/ & internal/config/.
+func TestE2E_Tier4_Adversarial_Immutability_ScopeAudit(t *testing.T) {
+	// 1. Verify go.mod and go.sum immutability
+	cmdDiff := exec.Command("git", "diff", "--", "go.mod", "go.sum")
+	outDiff, err := cmdDiff.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git diff failed: %v", err)
+	}
+	if strings.TrimSpace(string(outDiff)) != "" {
+		t.Fatalf("CRITICAL INVARIANT VIOLATION: go.mod / go.sum has been modified!\n%s", string(outDiff))
+	}
+
+	// 2. Verify git status has no staged or unstaged modifications in cmd/ or internal/ outside client and config
+	cmdStatus := exec.Command("git", "status", "--porcelain")
+	outStatus, err := cmdStatus.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git status failed: %v", err)
+	}
+
+	lines := strings.Split(string(outStatus), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if len(line) < 3 {
+			continue
+		}
+		filePath := strings.TrimSpace(line[2:])
+		if strings.HasPrefix(filePath, "cmd/") {
+			t.Fatalf("CRITICAL SCOPE VIOLATION: modified forbidden path: %s", filePath)
+		}
+		if strings.HasPrefix(filePath, "internal/") &&
+			!strings.HasPrefix(filePath, "internal/client") &&
+			!strings.HasPrefix(filePath, "internal/config") {
+			t.Fatalf("CRITICAL SCOPE VIOLATION: modified forbidden path: %s", filePath)
 		}
 	}
 }

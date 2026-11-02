@@ -108,16 +108,17 @@ LOCAL_DNS_CACHE_FLUSH_INTERVAL_SECONDS = 60.0
 
 # Resolver balancing strategy.
 # Allowed values:
+# 0/2 = Round Robin
 # 1 = Random
-# 2 = Round Robin
 # 3 = Least Loss
 # 4 = Lowest Latency
 # 5 = Hybrid Score (loss-first + latency-aware)
 # 6 = Loss Then Latency (loss shortlist, then latency, then rotate among near-top)
 # 7 = Least Loss Top Random (random choice inside the best 10% loss tier)
 # 8 = Least Loss Top Round Robin (round-robin inside the best 10% loss tier)
-# Modes 3, 4, 5, 6, 7, and 8 use runtime feedback from sends/successes.
-RESOLVER_BALANCING_STRATEGY = 3
+# 9 = Common Score Ranking (Default; uses common composite score from diagnostics and pool comparisons)
+# Modes 3, 4, 5, 6, 7, 8, and 9 use runtime feedback from sends/successes.
+RESOLVER_BALANCING_STRATEGY = 9
 
 # Duplicate each normal outgoing tunnel packet this many times.
 # Clamped in code to [1, 10].
@@ -280,12 +281,12 @@ RECHECK_BURST_PACKET_COUNT = 4
 # What this section does:
 # - Monitors real-time traffic (sent/acked/lost), loss %, and latency per resolver.
 # - Periodically logs a formatted summary table when traffic is active.
-# - Allows interactive on-demand inspection: press 's' + Enter at any time in the console.
+# - Optional on-demand inspection: with INTERACTIVE_STATS_ENABLED = true, press 's' + Enter in the console.
 # ------------------------------------------------------------------------------
 
 # Interval in seconds between periodic runtime performance table logs.
 # Only prints when tunnel traffic has been processed during the interval.
-# Set to 0 to disable periodic logs while keeping keypress inspection enabled.
+# Set to 0 to disable periodic logs (keypress inspection still requires INTERACTIVE_STATS_ENABLED = true).
 # Resolver pool optimization runs independently every 60 seconds.
 RUNTIME_STATS_INTERVAL_SECONDS = 60.0
 

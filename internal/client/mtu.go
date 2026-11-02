@@ -690,7 +690,13 @@ func (c *Client) collectInactiveResolverHealthChecks(recheckInterval time.Durati
 	connections := make([]Connection, 0, parallelism)
 	now := c.now()
 	for len(connections) < parallelism {
-		conn, ok := c.balancer.NextInactiveConnectionForHealthCheck(now, recheckInterval)
+		var conn Connection
+		var ok bool
+		if c.pool != nil {
+			conn, ok = c.pool.AcquireNextInactiveForRecheck(now, recheckInterval)
+		} else if c.balancer != nil {
+			conn, ok = c.balancer.NextInactiveConnectionForHealthCheck(now, recheckInterval)
+		}
 		if !ok || conn.Key == "" || conn.IsValid {
 			break
 		}
@@ -700,20 +706,44 @@ func (c *Client) collectInactiveResolverHealthChecks(recheckInterval time.Durati
 }
 
 func (c *Client) recheckInactiveResolver(ctx context.Context, conn Connection) {
-	if c == nil || c.balancer == nil || conn.Key == "" {
+	if c == nil || (c.pool == nil && c.balancer == nil) || conn.Key == "" {
 		return
 	}
 
+	beginRecheck := func(k string) bool {
+		if c.pool != nil {
+			return c.pool.beginConnectionRecheck(k)
+		}
+		return c.balancer.beginConnectionRecheck(k)
+	}
+	releaseRecheck := func(k string, wasStandby bool) {
+		if c.pool != nil {
+			c.pool.ReleaseRecheck(k, wasStandby)
+		} else {
+			c.balancer.ReleaseRecheck(k, wasStandby)
+		}
+	}
+	completeRecheck := func(res ResolverRecheckResult) (Connection, bool) {
+		if c.pool != nil {
+			return c.pool.CompleteRecheck(res)
+		}
+		return c.balancer.completeConnectionRecheck(res)
+	}
+
 	// Exclude this candidate from promotion for the entire network probe.
-	if !c.balancer.beginConnectionRecheck(conn.Key) {
+	if !beginRecheck(conn.Key) {
 		return
 	}
 	completed := false
 	defer func() {
 		if !completed {
-			// An interrupted or failed recheck must not remain eligible for
-			// promotion or leave the candidate in StateRechecking.
-			c.balancer.completeConnectionRecheck(resolverRecheckResult{Connection: conn})
+			if ctx != nil && ctx.Err() != nil {
+				releaseRecheck(conn.Key, conn.StandbyEligible)
+			} else {
+				// An interrupted or failed recheck must not remain eligible for
+				// promotion or leave the candidate in StateRechecking.
+				completeRecheck(ResolverRecheckResult{Connection: conn})
+			}
 		}
 	}()
 
@@ -748,6 +778,9 @@ func (c *Client) recheckInactiveResolver(ctx context.Context, conn Connection) {
 		if burstCount < 2 {
 			burstCount = 4
 		}
+		if err := c.acquireBackgroundQueries(ctx, burstCount); err != nil {
+			return
+		}
 		burstResult := c.sendPipelinedMicroBurst(
 			ctx,
 			conn,
@@ -763,7 +796,7 @@ func (c *Client) recheckInactiveResolver(ctx context.Context, conn Connection) {
 	if ctx.Err() != nil {
 		return
 	}
-	actualConn, ok := c.balancer.completeConnectionRecheck(resolverRecheckResult{
+	actualConn, ok := completeRecheck(ResolverRecheckResult{
 		Connection: conn, MTUVerified: true, Burst: burstPtr,
 	})
 	completed = true
@@ -791,7 +824,10 @@ func (c *Client) syncedMTUs() (upload int, download int) {
 func (c *Client) recheckResolverUploadMTU(ctx context.Context, conn Connection, transport *udpQueryTransport) (bool, time.Duration) {
 	timeout := c.resolverHealthProbeTimeout()
 	for attempt := 0; attempt < c.mtuTestRetries; attempt++ {
-		if ctx.Err() != nil {
+		if ctx != nil && ctx.Err() != nil {
+			return false, 0
+		}
+		if err := c.acquireBackgroundQuery(ctx); err != nil {
 			return false, 0
 		}
 		uploadMTU, _ := c.syncedMTUs()
@@ -809,7 +845,10 @@ func (c *Client) recheckResolverUploadMTU(ctx context.Context, conn Connection, 
 func (c *Client) recheckResolverDownloadMTU(ctx context.Context, conn Connection, transport *udpQueryTransport) bool {
 	timeout := c.resolverHealthProbeTimeout()
 	for attempt := 0; attempt < c.mtuTestRetries; attempt++ {
-		if ctx.Err() != nil {
+		if ctx != nil && ctx.Err() != nil {
+			return false
+		}
+		if err := c.acquireBackgroundQuery(ctx); err != nil {
 			return false
 		}
 
@@ -827,10 +866,10 @@ func (c *Client) recheckResolverDownloadMTU(ctx context.Context, conn Connection
 }
 
 func (c *Client) resolverHealthProbeTimeout() time.Duration {
-	timeout := c.mtuTestTimeout
-	if timeout <= 0 {
-		timeout = 4 * time.Second
+	if c != nil && c.mtuTestTimeout > 0 {
+		return c.mtuTestTimeout
 	}
+	timeout := 4 * time.Second
 	if c == nil || c.balancer == nil {
 		return timeout
 	}

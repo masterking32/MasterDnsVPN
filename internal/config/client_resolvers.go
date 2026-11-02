@@ -172,6 +172,14 @@ func UpdateResolversFileWithRanked(filePath string, ranked []ResolverAddress) er
 	if err != nil {
 		return err
 	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+
+	mode := os.FileMode(0o644)
+	if info, err := os.Stat(path); err == nil {
+		mode = info.Mode().Perm()
+	}
 
 	var userLines []string
 	data, err := os.ReadFile(path)
@@ -219,7 +227,7 @@ func UpdateResolversFileWithRanked(filePath string, ranked []ResolverAddress) er
 		return err
 	}
 	tmpFile := path + fmt.Sprintf(".tmp_%d", time.Now().UnixNano())
-	if err := os.WriteFile(tmpFile, []byte(buf.String()), 0o644); err != nil {
+	if err := os.WriteFile(tmpFile, []byte(buf.String()), mode); err != nil {
 		return err
 	}
 	defer os.Remove(tmpFile)

@@ -620,7 +620,7 @@ Estos ajustes son críticos en el servidor:
 
 | Parámetro | Valor de ejemplo | Valores permitidos / Comportamiento real | Explicación completa |
 | :--- | :--- | :--- | :--- |
-| `RESOLVER_BALANCING_STRATEGY` | `6` | `0..8` | Elige cómo se seleccionan los resolutores.<br>`0/2` = Round Robin, `1` = Aleatorio, `3` = Menor pérdida, `4` = Menor latencia, `5` = Puntuación híbrida, `6` = Pérdida y luego latencia (Por defecto), `7` = Menor pérdida superior aleatorio, `8` = Menor pérdida superior Round Robin.<br>El modo híbrido usa una puntuación combinada ponderada. El modo de pérdida y luego latencia primero preselecciona por pérdida, luego prefiere menor latencia dentro de ese nivel y rota entre los candidatos principales casi iguales. El modo superior aleatorio elige al azar entre el mejor nivel de pérdida para que la carga no se quede en un solo resolutor. El modo superior Round Robin recorre el mismo nivel superior de pérdida con rotación determinista. |
+| `RESOLVER_BALANCING_STRATEGY` | `9` | `0..9` | Elige cómo se seleccionan los resolutores.<br>`0/2` = Round Robin, `1` = Aleatorio, `3` = Menor pérdida, `4` = Menor latencia, `5` = Puntuación híbrida, `6` = Pérdida y luego latencia, `7` = Menor pérdida superior aleatorio, `8` = Menor pérdida superior Round Robin, `9` = Puntuación común (Por defecto).<br>El modo predeterminado (9) enruta según la puntuación de evaluación compuesta común compartida con el diagnóstico y el pool. |
 | `PACKET_DUPLICATION_COUNT` | `2` | se limita al rango válido en el código | Número de duplicaciones de paquetes salientes normales.<br>Valores más altos aumentan el coste de tráfico pero mejoran la supervivencia en enlaces débiles. |
 | `SETUP_PACKET_DUPLICATION_COUNT` | `2` | se limita al rango válido en el código | Similar a `PACKET_DUPLICATION_COUNT`, pero usado para paquetes sensibles a la configuración, como la creación de streams y otros eventos de control críticos. |
 | `STREAM_RESOLVER_FAILOVER_RESEND_THRESHOLD` | `2` | Si es `<1`, se aplica el valor de reserva | Si un stream acumula presión de reenvío repetida sobre el mismo resolutor preferido, el cliente puede hacer failover de ese stream a otro resolutor.<br>Este umbral controla la rapidez con que ocurre. |
@@ -676,7 +676,8 @@ Estos ajustes son críticos en el servidor:
 
 | Parámetro | Valor de ejemplo | Valores permitidos / Comportamiento real | Explicación completa |
 | :--- | :--- | :--- | :--- |
-| `RUNTIME_STATS_INTERVAL_SECONDS` | `60.0` | `1.0..86400.0` (o `0` = desactivado) | Intervalo en segundos de registro de la tabla de rendimiento en consola cuando hay tráfico.<br>`0` desactiva el registro periódico.<br>Pulsar `'s'` + Enter (o Enter) en la consola en cualquier momento muestra la tabla instantáneamente. |
+| `INTERACTIVE_STATS_ENABLED` | `false` | `true/false` | Activa la lectura de stdin para las teclas de estadísticas. Actívelo solo en una consola atendida en primer plano; déjelo desactivado para servicios, tareas en segundo plano y entradas canalizadas. |
+| `RUNTIME_STATS_INTERVAL_SECONDS` | `60.0` | `1.0..86400.0` (o `0` = desactivado) | Intervalo en segundos de registro de la tabla de rendimiento en consola cuando hay tráfico.<br>`0` desactiva el registro periódico.<br>La optimización del pool de resolutores se ejecuta independientemente cada 60 segundos y guarda los resolutores clasificados si cambia el pool (si el guardado automático está activo).<br>Si `INTERACTIVE_STATS_ENABLED = true`, pulsar `'s'` + Enter (o Enter) muestra la tabla instantáneamente sin importar el temporizador. |
 
 ### 3.4.9) 🧵 Workers, Colas y Temporizadores de Runtime
 

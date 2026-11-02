@@ -185,17 +185,21 @@ func TestResolverPool_RecheckRejectionAndConservativeStats(t *testing.T) {
 }
 
 func TestResolverPool_RecheckPreservesReplacementThreshold(t *testing.T) {
-	for _, rtt := range []time.Duration{90 * time.Millisecond, 110 * time.Millisecond} {
-		t.Run(rtt.String(), func(t *testing.T) {
+	for _, tc := range []struct {
+		rtt        time.Duration
+		wantActive bool
+	}{
+		{rtt: 110 * time.Millisecond, wantActive: false}, // Slower than 100ms -> Standby
+		{rtt: 90 * time.Millisecond, wantActive: false},  // Slightly faster (~1.11x), does not clear 1.25x margin -> Standby
+		{rtt: 50 * time.Millisecond, wantActive: true},   // Much faster (~2.0x), clears 1.25x margin -> Active
+	} {
+		t.Run(tc.rtt.String(), func(t *testing.T) {
 			p, results := poolTestSetup("active", "candidate")
 			p.SetMaxActive(1)
 			results[0].BurstResult.AverageRTT = 100 * time.Millisecond
-			results[1].BurstResult.AverageRTT = rtt
+			results[1].BurstResult.AverageRTT = tc.rtt
 			p.AdmitStartupBatch(results, []Connection{results[0].Connection})
-			// Neither candidate clears periodic optimization's 25% improvement threshold
-			if p.Optimize() {
-				t.Fatal("periodic replacement threshold changed")
-			}
+
 			p.beginConnectionRecheck("candidate")
 			conn, _ := p.GetConnectionByKey("candidate")
 			got, ok := p.CompleteRecheck(ResolverRecheckResult{
@@ -203,10 +207,9 @@ func TestResolverPool_RecheckPreservesReplacementThreshold(t *testing.T) {
 				MTUVerified: true,
 				Burst:       &results[1].BurstResult,
 			})
-			// Immediate admission still accepts any strictly better score
-			wantActive := rtt < 100*time.Millisecond
-			if !ok || got.IsValid != wantActive || got.StandbyEligible == wantActive {
-				t.Fatalf("unexpected actual placement for RTT %s: %+v", rtt, got)
+			// Direct admission applies the unified 1.25x margin
+			if !ok || got.IsValid != tc.wantActive || got.StandbyEligible == tc.wantActive {
+				t.Fatalf("unexpected actual placement for RTT %s: %+v", tc.rtt, got)
 			}
 			if p.ActiveCount() != 1 {
 				t.Fatal("recheck changed pool capacity")

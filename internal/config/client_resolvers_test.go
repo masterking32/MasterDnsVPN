@@ -471,3 +471,51 @@ func TestEmpirical_ResolversUnterminatedBlockFailsafe(t *testing.T) {
 		}
 	})
 }
+
+func TestUpdateResolversFileWithRanked_PreservesFileModeAndFollowsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "resolvers_target.txt")
+	content := "1.1.1.1\n8.8.8.8\n"
+
+	expectedMode := os.FileMode(0o600)
+	if err := os.WriteFile(targetPath, []byte(content), expectedMode); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	ranked := []ResolverAddress{
+		{IP: "8.8.8.8", Port: 53},
+		{IP: "1.1.1.1", Port: 53},
+	}
+
+	if err := UpdateResolversFileWithRanked(targetPath, ranked); err != nil {
+		t.Fatalf("UpdateResolversFileWithRanked failed: %v", err)
+	}
+	info, err := os.Stat(targetPath)
+	if err != nil {
+		t.Fatalf("Stat failed: %v", err)
+	}
+	if runtime.GOOS != "windows" {
+		if info.Mode().Perm() != expectedMode {
+			t.Errorf("file mode not preserved: got %v, want %v", info.Mode().Perm(), expectedMode)
+		}
+	}
+
+	symlinkPath := filepath.Join(dir, "resolvers_symlink.txt")
+	if err := os.Symlink(targetPath, symlinkPath); err != nil {
+		t.Logf("skipping symlink verification (os.Symlink unsupported or insufficient permissions): %v", err)
+		return
+	}
+
+	if err := UpdateResolversFileWithRanked(symlinkPath, ranked); err != nil {
+		t.Fatalf("UpdateResolversFileWithRanked via symlink failed: %v", err)
+	}
+
+	fi, err := os.Lstat(symlinkPath)
+	if err != nil {
+		t.Fatalf("Lstat symlink failed: %v", err)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("expected %s to remain a symlink, but it was replaced by a regular file", symlinkPath)
+	}
+}
+
