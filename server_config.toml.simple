@@ -122,13 +122,14 @@ RECENTLY_CLOSED_STREAM_CAP = 2000
 TERMINAL_STREAM_RETENTION_SECONDS = 45.0
 
 # ------------------------------------------------------------------------------
-# 5) DNS Tunnel Upstream
+# 5) Egress DNS for DNS-over-Tunnel
 # What this section does:
-# - Controls upstream DNS resolution used for DNS-over-tunnel requests.
+# - Controls outbound recursive DNS resolution used for DNS-over-tunnel requests.
 # - Controls fragment assembly and tunnel DNS cache behavior.
 # ------------------------------------------------------------------------------
 
-# Upstream resolvers used when the client sends DNS_QUERY_REQ through the tunnel.
+# External recursive DNS resolvers queried when the client sends DNS_QUERY_REQ through the tunnel.
+# Note: Key name retains 'SERVERS' for backwards compatibility, but configures recursive resolvers.
 DNS_UPSTREAM_SERVERS = ["1.1.1.1:53", "1.0.0.1:53"]
 
 # Timeout for each upstream DNS exchange attempt.
@@ -147,39 +148,39 @@ DNS_CACHE_MAX_RECORDS = 50000
 DNS_CACHE_TTL_SECONDS = 300.0
 
 # ------------------------------------------------------------------------------
-# 6) Upstream SOCKS / Forwarding
+# 6) Destination Forwarding & External SOCKS Proxy
 # What this section does:
-# - Controls how the server opens outbound connections.
+# - Controls how the server connects to outbound destinations.
 # - In SOCKS5 mode, the destination normally comes from the client request.
 # - In TCP mode, all connections go to one fixed destination.
-# - You can also tell the server to use another SOCKS5 proxy as an upstream proxy.
+# - You can also configure the server to chain through an external SOCKS5 proxy.
 # ------------------------------------------------------------------------------
 
 # Timeout for outbound connect attempts made by the server.
 SOCKS_CONNECT_TIMEOUT = 60.0
 
-# If true, then in SOCKS5 mode the server does not connect to the final target directly.
+# If true, then in SOCKS5 mode the server does not connect to the final destination directly.
 # Instead, it first connects to another SOCKS5 proxy at FORWARD_IP:FORWARD_PORT
 # and asks that proxy to open the destination connection.
 # If false, SOCKS5 mode connects directly to the destination requested by the client.
 # This option does NOT change TCP mode behavior.
 USE_EXTERNAL_SOCKS5 = false
 
-# Username/password for the upstream SOCKS5 proxy.
+# Username/password for the external SOCKS5 proxy.
 # Used only when:
 # - PROTOCOL_TYPE = "SOCKS5"
 # - USE_EXTERNAL_SOCKS5 = true
-# - and that upstream proxy requires username/password authentication
+# - and that external proxy requires username/password authentication
 SOCKS5_AUTH = false
 SOCKS5_USER = "admin"
 SOCKS5_PASS = "123456"
 
 # FORWARD_IP / FORWARD_PORT mean different things depending on how the server is used:
 # - If PROTOCOL_TYPE = "TCP":
-#   This is the final fixed target.
-#   Every client connection will be forwarded to this one address and port.
+#   This is the final fixed destination.
+#   Every client stream will be forwarded to this one address and port.
 # - If PROTOCOL_TYPE = "SOCKS5" and USE_EXTERNAL_SOCKS5 = true:
-#   This is the address and port of the upstream SOCKS5 proxy.
+#   This is the address and port of the external SOCKS5 proxy.
 # - If PROTOCOL_TYPE = "SOCKS5" and USE_EXTERNAL_SOCKS5 = false:
 #   These values are not used for normal client SOCKS connections.
 FORWARD_IP = ""
