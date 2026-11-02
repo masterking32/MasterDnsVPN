@@ -157,12 +157,17 @@ func TestPoolRecovery_NoDiversityChurnForSlowCandidate(t *testing.T) {
 	// Verifies that forced diversity override is restricted to startup admission
 	// and does NOT run during background recovery.
 	// Scenario:
-	// Active pool has two pairings of endpoint A: A:d1 (90 KB/s), A:d2 (85 KB/s).
-	// An inactive candidate B:d1 (endpoint B) recovers with 1 KB/s (300ms RTT).
+	// Active pool has two pairings sharing endpoint A (1.1.1.1:53): A:d1 (90 KB/s), A:d2 (85 KB/s).
+	// An inactive candidate B:d1 on endpoint B (2.2.2.2:53) recovers with 1 KB/s (300ms RTT).
+	// Because both active connections share endpoint A, a buggy diversity override would
+	// displace A:d2 to admit endpoint B despite its low score.
 	// Background recovery must NOT displace the 85 KB/s pairing for endpoint diversity.
 	// Runtime Optimize() must NOT churn active membership.
-	pool, _ := poolTestSetup("A:d1", "A:d2", "B:d1")
-	pool.SetMaxActive(2)
+	pool := NewResolverPool(2, nil)
+	connA1 := &Connection{Key: "A:d1", Resolver: "1.1.1.1", ResolverPort: 53, ResolverLabel: "1.1.1.1:53", Domain: "d1.com"}
+	connA2 := &Connection{Key: "A:d2", Resolver: "1.1.1.1", ResolverPort: 53, ResolverLabel: "1.1.1.1:53", Domain: "d2.com"}
+	connB1 := &Connection{Key: "B:d1", Resolver: "2.2.2.2", ResolverPort: 53, ResolverLabel: "2.2.2.2:53", Domain: "d1.com"}
+	pool.SetConnections([]*Connection{connA1, connA2, connB1})
 	pool.SetSessionMTU(100, 1000)
 
 	// A:d1 and A:d2 are active with fast performance

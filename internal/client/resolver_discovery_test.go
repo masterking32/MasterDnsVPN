@@ -771,30 +771,37 @@ func TestDiscoveryEngine_ReserveDistinctEndpointsQuotaWithSlowerCandidate(t *tes
 
 func TestDiscoveryEngine_FastStartEnforcesDiversityPerBatchBeforeCompletion(t *testing.T) {
 	// Scenario:
-	// Capacity = 3, TargetResolvers = 3, Parallelism = 2 (batch size 2).
-	// Batch 1: A:d1 (fast), B:d1 (medium).
-	// Batch 2: C:d2 (medium), A:d2 (fast, faster than B:d1).
-	// Batch 3: D:d1, E:d1 (unresponsive).
-	// When Batch 2 admits C:d2 and A:d2, A:d2 could displace B:d1, reducing active unique endpoints
-	// to {A, C}. Per-batch diversity enforcement must run Optimize(target) immediately after
-	// Batch 2 admission to restore B:d1 from standby before checking FastStart completion,
-	// avoiding scanning the remaining unresponsive candidates in Batch 3.
+	// Capacity = 3, TargetResolvers = 3 (quota of 3 unique endpoints).
+	// Batch 1 probes:
+	//   - A:d1 (endpoint A, fast, passes burst)
+	//   - B:d1 (endpoint B, slow, passes burst)
+	//   - F:d1 (endpoint F, passes MTU, fails burst)
+	// Batch 1 admits {A:d1, B:d1} (2 unique endpoints, < target 3).
+	// Batch 2 probes:
+	//   - A:d2 (endpoint A, duplicate endpoint, fast, passes burst)
+	//   - C:d2 (endpoint C, new endpoint, passes burst)
+	// When Batch 2 admits {A:d2, C:d2}, the higher-scoring A:d2 evicts B:d1 to standby.
+	// Active pool drops to only 2 endpoints {A, C}.
+	// Per-batch diversity enforcement must run Optimize(target) immediately after
+	// Batch 2 admission to restore B:d1 from standby to active, achieving 3 unique endpoints
+	// and completing FastStart early, without scanning remaining unresponsive candidates (D:d1, E:d1).
 	pool := NewResolverPool(3, nil)
 
 	connA1 := Connection{Key: "A:d1", Resolver: "1.1.1.1", ResolverPort: 53, ResolverLabel: "1.1.1.1:53", Domain: "d1.com", DownloadMTUBytes: 500, UploadMTUBytes: 200}
 	connB1 := Connection{Key: "B:d1", Resolver: "2.2.2.2", ResolverPort: 53, ResolverLabel: "2.2.2.2:53", Domain: "d1.com", DownloadMTUBytes: 500, UploadMTUBytes: 200}
-	connC2 := Connection{Key: "C:d2", Resolver: "3.3.3.3", ResolverPort: 53, ResolverLabel: "3.3.3.3:53", Domain: "d2.com", DownloadMTUBytes: 500, UploadMTUBytes: 200}
+	connF1 := Connection{Key: "F:d1", Resolver: "9.9.9.9", ResolverPort: 53, ResolverLabel: "9.9.9.9:53", Domain: "d1.com", DownloadMTUBytes: 500, UploadMTUBytes: 200}
 	connA2 := Connection{Key: "A:d2", Resolver: "1.1.1.1", ResolverPort: 53, ResolverLabel: "1.1.1.1:53", Domain: "d2.com", DownloadMTUBytes: 500, UploadMTUBytes: 200}
+	connC2 := Connection{Key: "C:d2", Resolver: "3.3.3.3", ResolverPort: 53, ResolverLabel: "3.3.3.3:53", Domain: "d2.com", DownloadMTUBytes: 500, UploadMTUBytes: 200}
 	connD1 := Connection{Key: "D:d1", Resolver: "4.4.4.4", ResolverPort: 53, ResolverLabel: "4.4.4.4:53", Domain: "d1.com", DownloadMTUBytes: 500, UploadMTUBytes: 200}
 	connE1 := Connection{Key: "E:d1", Resolver: "5.5.5.5", ResolverPort: 53, ResolverLabel: "5.5.5.5:53", Domain: "d2.com", DownloadMTUBytes: 500, UploadMTUBytes: 200}
 
-	pool.SetConnections([]*Connection{&connA1, &connB1, &connC2, &connA2, &connD1, &connE1})
+	pool.SetConnections([]*Connection{&connA1, &connB1, &connF1, &connA2, &connC2, &connD1, &connE1})
 	pool.SetSessionMTU(100, 300)
 
 	cfg := DiscoveryConfig{
 		FastStart:             true,
 		TargetResolvers:       3,
-		Parallelism:           2,
+		Parallelism:           1, // Deterministic sequential batch probing
 		MaxActiveResolvers:    3,
 		MicroBurstEnabled:     true,
 		MicroBurstPacketCount: 6,
@@ -804,29 +811,30 @@ func TestDiscoveryEngine_FastStartEnforcesDiversityPerBatchBeforeCompletion(t *t
 	}
 
 	prober := NewFakeResolverProber()
-	// Batch 1
+	// Batch 1 candidates: A:d1 and B:d1 qualify, F:d1 fails burst to trigger replenishment
 	prober.SetBurstResponse("A:d1", BurstProbeResult{SentCount: 6, ReceivedCount: 6, LossRatio: 0, AverageRTT: 10 * time.Millisecond, BurstThroughputKBps: 300, Qualified: true})
-	prober.SetBurstResponse("B:d1", BurstProbeResult{SentCount: 6, ReceivedCount: 6, LossRatio: 0, AverageRTT: 30 * time.Millisecond, BurstThroughputKBps: 150, Qualified: true})
+	prober.SetBurstResponse("B:d1", BurstProbeResult{SentCount: 6, ReceivedCount: 6, LossRatio: 0, AverageRTT: 30 * time.Millisecond, BurstThroughputKBps: 100, Qualified: true})
+	prober.SetBurstResponse("F:d1", BurstProbeResult{SentCount: 6, ReceivedCount: 0, LossRatio: 1.0, Qualified: false, RejectReason: "burst timeout"})
 
-	// Batch 2: A:d2 is faster than B:d1
-	prober.SetBurstResponse("C:d2", BurstProbeResult{SentCount: 6, ReceivedCount: 6, LossRatio: 0, AverageRTT: 35 * time.Millisecond, BurstThroughputKBps: 140, Qualified: true})
+	// Batch 2 candidates: C:d2 (fastest in batch) and A:d2 (faster than B:d1)
+	// C:d2 is admitted first, filling capacity (3).
+	// A:d2 (endpoint A) is admitted second. Since endpoint A is already present in active pool,
+	// A:d2's higher score (280) displaces B:d1 (100) to standby.
+	prober.SetBurstResponse("C:d2", BurstProbeResult{SentCount: 6, ReceivedCount: 6, LossRatio: 0, AverageRTT: 8 * time.Millisecond, BurstThroughputKBps: 350, Qualified: true})
 	prober.SetBurstResponse("A:d2", BurstProbeResult{SentCount: 6, ReceivedCount: 6, LossRatio: 0, AverageRTT: 15 * time.Millisecond, BurstThroughputKBps: 280, Qualified: true})
 
-	// Batch 3: Unresponsive candidates (should NOT be probed if FastStart completes after Batch 2)
+	// Batch 3 candidates: Unresponsive candidates (should NOT be probed if FastStart completes after Batch 2)
 	prober.SetMTUResponse("D:d1", MTUProbeResult{Success: false, RejectReason: "mtu failure"})
 	prober.SetMTUResponse("E:d1", MTUProbeResult{Success: false, RejectReason: "mtu failure"})
 
 	engine := NewDiscoveryEngine(cfg, prober, pool, nil)
 	ctx := context.Background()
-	if err := engine.Run(ctx, []Connection{connA1, connB1, connC2, connA2, connD1, connE1}); err != nil {
+	if err := engine.Run(ctx, []Connection{connA1, connB1, connF1, connA2, connC2, connD1, connE1}); err != nil {
 		t.Fatalf("engine.Run() failed: %v", err)
 	}
 
 	t.Logf("Probed MTU keys: %v", prober.ProbedMTUKeys())
 	t.Logf("Probed Burst keys: %v", prober.ProbedBurstKeys())
-	for _, c := range pool.AllConnections() {
-		t.Logf("Conn: %s, IsValid: %v, StandbyEligible: %v", c.Key, c.IsValid, c.StandbyEligible)
-	}
 
 	// Verify that Batch 3 candidates were never probed
 	for _, key := range prober.ProbedMTUKeys() {
