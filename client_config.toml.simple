@@ -137,12 +137,14 @@ STREAM_RESOLVER_FAILOVER_RESEND_THRESHOLD = 2
 # Clamped to [0.1s, 120s].
 STREAM_RESOLVER_FAILOVER_COOLDOWN = 2.5
 
-# If true, resolvers rejected during initial MTU testing are rechecked in the
+# If true, candidate resolvers rejected during initial MTU testing are rechecked in the
 # background using the current synced upload/download MTUs.
+# Note: Key name retains 'SERVERS' for backwards compatibility with existing configs.
 RECHECK_INACTIVE_SERVERS_ENABLED = true
 
 # If true, a resolver is runtime-disabled when it stays timeout-only across the
 # configured window and enough observations have been collected.
+# Note: Key name retains 'SERVERS' for backwards compatibility.
 AUTO_DISABLE_TIMEOUT_SERVERS = true
 
 # Timeout-only observation window in seconds.
@@ -198,11 +200,12 @@ MAX_DOWNLOAD_MTU = 4000
 
 # If true, the client dynamically identifies and drops "bottleneck" resolvers
 # during the initial MTU testing phase.
-# This prevents a small number of weak servers from dragging down the global
+# This prevents a small number of weak resolvers from dragging down the global
 # Synced MTU (Upload/Download) for the entire network. The underlying algorithm 
 # is highly intelligent: it strictly protects network redundancy, balances 
-# upload vs. download gains, and only removes servers if the overall network 
+# upload vs. download gains, and only removes resolvers if the overall network 
 # sees a meaningful performance boost. Highly recommended to keep true.
+# Note: Key name retains 'SERVERS' for backwards compatibility.
 AUTO_REMOVE_LOW_MTU_SERVERS = true
 
 # MTU probe retries and timeout.
@@ -213,6 +216,7 @@ MTU_TEST_TIMEOUT = 2.0
 MTU_TEST_PARALLELISM = 32
 
 # Export successful MTU-tested resolvers to a file.
+# Note: Key and format names retain 'SERVERS' for backwards compatibility.
 SAVE_MTU_SERVERS_TO_FILE = false
 
 # Output file naming / formatting.
@@ -293,10 +297,11 @@ PING_COOL_THRESHOLD_SECONDS = 20.0
 PING_COLD_THRESHOLD_SECONDS = 30.0
 
 # ------------------------------------------------------------------------------
-# 8) ARQ Reliability & Packing
+# 8) ARQ Reliability & Priority Packing
 # What this section does:
 # - Controls data/control retransmission behavior.
 # - Controls per-stream buffering limits and batch packing.
+# - Shapes packet transmission priority via the Packet Priority Queue (MLQ).
 # ------------------------------------------------------------------------------
 
 # Maximum control blocks packed together in one outgoing batch.

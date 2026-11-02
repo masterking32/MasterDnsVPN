@@ -1,4 +1,4 @@
-﻿# MasterDnsVPN Project 🔐
+# MasterDnsVPN Project 🔐
 
 ## | 🇮🇷 [فارسی](https://github.com/masterking32/MasterDnsVPN/blob/main/README_FA.MD) | 🇬🇧 [English](https://github.com/masterking32/MasterDnsVPN/blob/main/README.MD) | 🇷🇺 [Русский](https://github.com/masterking32/MasterDnsVPN/blob/main/README_RU.MD) | 🇨🇳 [中文](https://github.com/masterking32/MasterDnsVPN/blob/main/README_ZH.MD) | 🇪🇸 [Español](https://github.com/masterking32/MasterDnsVPN/blob/main/README_ES.MD) | 🇮🇹 [Italiano](https://github.com/masterking32/MasterDnsVPN/blob/main/README_IT.MD) |
 
@@ -14,23 +14,23 @@ This system is designed around compatibility with many resolver behaviors and ha
 
 | Feature | SlipStream | DNSTT | MasterDnsVPN |
 | :--- | :--- | :--- | :--- |
-| Protocol type | Advanced DNS tunnel | Classic DNS tunnel | Advanced DNS tunnel / VPN |
+| Protocol type | Advanced DNS tunnel | Classic DNS tunnel | Advanced DNS tunnel |
 | Transport protocol | QUIC | KCP + Noise | Custom protocol + ARQ |
 | Transport header overhead | 🟠 ~24B | 🔴 ~59B | 🟢 ~5–7B<br>≈88% lower than DNSTT<br>≈71% lower than SlipStream |
 | Encryption style | TLS 1.3 (inside QUIC) | Noise (Curve25519) | AES / ChaCha20 / XOR (if XOR is used: lightweight with lower security and no extra overhead) |
 | Architecture | Unified (QUIC handles everything) | Multi-layered (KCP + SMUX + Noise) | 🟢 Lightweight custom design optimized for DNS |
 | Speed | 🟡 High (up to ~5× faster than DNSTT) | 🔴 Medium | 🟢 Faster than others<br>Up to ~9× faster than DNSTT<br>Up to ~3.6× faster than SlipStream |
-| Stability under packet loss | 🟡 Good | 🟠 Medium | 🟢 Very high (Multipath + ARQ) |
-| Multi-resolver support | Yes (multipath) | ❌ | Yes — advanced (multi-resolver + duplication) |
+| Stability under packet loss | 🟡 Good | 🟠 Medium | 🟢 Very high (Multi-resolver routing + ARQ) |
+| Multi-resolver support | Yes (multipath) | ❌ | Yes — advanced (multi-resolver routing + duplication) |
 | Resilience under heavy censorship | Good | Medium | Very strong (a core project goal) |
 | Setup complexity | Medium | Simple | Easier installation<br>More complex only if you heavily customize advanced settings |
 | SOCKS5 support | Yes | Yes | Optimized for SOCKS5 / SOCKS4 with reduced SOCKS overhead |
 | Shadowsocks support | ✅ | ❌ | Indirectly: TCP Forwarding mode can carry TCP-based protocols<br>e.g. Shadowsocks, VLESS/VMess, etc. |
-| Real multipath | Yes (QUIC multipath) | ❌ | Yes (multi-resolver + duplication) |
+| Multi-resolver routing | Yes (QUIC multipath) | ❌ | Yes (multi-resolver routing + duplication) |
 | Adaptive routing | Limited | ❌ | Advanced (latency/loss based) |
 | Design goal | High speed and efficiency | Simplicity and stability | Surviving the harshest networks — stability, speed, and efficiency |
 | Implementation language | Rust | Go | Main version is Go<br>Legacy Python version also exists |
-| Built-in balancer | 🔴 | ❌ | 🟢 (8 built-in balancing modes) |
+| Built-in resolver balancer | 🔴 | ❌ | 🟢 (8 built-in balancing modes) |
 | Duplication system | ❌ | ❌ | Yes — increases traffic to improve reliability (configurable or can be disabled) |
 | MTU tolerance | Better than DNSTT | - | Works even with very small MTU because protocol overhead is very low |
 | Failover system | ❌ | ❌ | ✅ |
@@ -91,9 +91,9 @@ A brief overview of the main capabilities of MasterDnsVPN:
 
 - **Censorship resistance and harsh-network survivability:** 🛡️ Designed to work on filtered networks, unstable links, and strict MTU environments.
 - **Lightweight custom protocol:** 🔄 Uses a custom protocol with retransmission logic to reduce overhead and increase usable DNS payload.
-- **Multipath and packet duplication:** 📡 Sends traffic through multiple paths and supports selective duplication to increase delivery probability on unstable networks.
+- **Multi-resolver routing and packet duplication:** 📡 Routes queries across multiple resolvers and supports selective duplication to increase delivery probability on unstable networks.
 - **Smart resolver selection and health checks:** ⚡ Selects resolvers based on quality and health, and manages problematic resolvers automatically.
-- **MTU discovery and synchronization:** 🧰 Detects the practical MTU of working paths and aligns around it to reduce fragmentation and improve stability.
+- **MTU discovery and synchronization:** 🧰 Detects the practical MTU of working resolver pairings and aligns around it to reduce fragmentation and improve stability.
 - **SOCKS5 / SOCKS4 support and optimization:** 🧦 Optimized local proxy handling for common applications.
 - **Packed control blocks and lower control overhead:** 📦 Groups ACK/control traffic together to reduce control chatter.
 - **Optional compression and request packing:** 🗜️ Reduces request counts and improves efficiency under small-MTU conditions.
@@ -560,7 +560,7 @@ These settings are critical on the server:
 2. **`DATA_ENCRYPTION_METHOD`** must match the client
 3. **`ENCRYPTION_KEY_FILE`** defines the path to the server key file
 4. If you want direct outbound connections, keep **`USE_EXTERNAL_SOCKS5 = false`**
-5. If you want to chain through an upstream SOCKS5 proxy, set `USE_EXTERNAL_SOCKS5 = true` and fill `FORWARD_IP` / `FORWARD_PORT`
+5. If you want to chain through an external SOCKS5 proxy, set `USE_EXTERNAL_SOCKS5 = true` and fill `FORWARD_IP` / `FORWARD_PORT`
 
 ---
 
@@ -570,7 +570,7 @@ These settings are critical on the server:
 
 | Parameter | Sample Value | Allowed Values / Real Behavior | Full Explanation |
 | :--- | :--- | :--- | :--- |
-| `PROTOCOL_TYPE` | `"SOCKS5"` | `"SOCKS5"` or `"TCP"` | Chooses the local service mode exposed by the client.<br>`SOCKS5` is the default and recommended mode for normal use.<br>`TCP` is useful when you want to forward traffic to one fixed remote target instead of giving applications a SOCKS proxy. |
+| `PROTOCOL_TYPE` | `"SOCKS5"` | `"SOCKS5"` or `"TCP"` | Chooses the local service mode exposed by the client.<br>`SOCKS5` is the default and recommended mode for normal use.<br>`TCP` is useful when you want to forward traffic to one fixed remote destination instead of giving applications a SOCKS proxy. |
 | `DOMAINS` | `["v.example.com"]` | Non-empty list of strings | These are the tunnel domains used to build DNS requests.<br>Every domain here must belong to the same tunnel you configured on the server.<br>If this list is wrong, the client may build valid DNS queries that the server will simply ignore. |
 | `DATA_ENCRYPTION_METHOD` | `1` | `0..5` | Must match the server.<br>`0=None`, `1=XOR`, `2=ChaCha20`, `3=AES-128-GCM`, `4=AES-192-GCM`, `5=AES-256-GCM`.<br>XOR is lightweight but weaker. AEAD modes are stronger but have more overhead. |
 | `ENCRYPTION_KEY` | `""` | String | Shared secret used by the client codec.<br>This must be exactly the same as the server-side encryption key.<br>If the key is wrong, packets may be parsed as garbage and the tunnel will not work.<br>Not required when `DATA_ENCRYPTION_METHOD` is `0`. |
@@ -753,27 +753,27 @@ These settings are critical on the server:
 | `RECENTLY_CLOSED_STREAM_CAP` | `2000` | clamp to `1..1000000` | Maximum number of recently closed stream entries the server keeps. |
 | `TERMINAL_STREAM_RETENTION_SECONDS` | `45.0` | clamp to `1..86400` seconds | How long terminal streams remain before final sweeping. |
 
-### 3.5.5) 📛 DNS Tunnel Upstream
+### 3.5.5) 📛 Egress DNS (DNS-over-Tunnel)
 
 | Parameter | Sample Value | Allowed Values / Real Behavior | Full Explanation |
 | :--- | :--- | :--- | :--- |
-| `DNS_UPSTREAM_SERVERS` | `["1.1.1.1:53", "1.0.0.1:53"]` | fallback if empty | When the client sends a real DNS request through the tunnel, the server forwards it to these upstream resolvers.<br>This section is only for DNS-over-tunnel, not for the tunnel transport itself. |
+| `DNS_UPSTREAM_SERVERS` | `["1.1.1.1:53", "1.0.0.1:53"]` | fallback if empty | When the client sends a real DNS request through the tunnel, the server forwards it to these recursive DNS resolvers.<br>This section is only for DNS-over-tunnel, not for the tunnel transport itself. |
 | `DNS_UPSTREAM_TIMEOUT` | `4.0` | fallback if `<=0` | Timeout for each exchange with the real DNS upstream. |
 | `DNS_INFLIGHT_WAIT_TIMEOUT_SECONDS` | `60.0` | clamp to `0.1..120` seconds | If several identical DNS queries arrive at the same time, only one upstream lookup is performed and the rest wait as followers.<br>This value controls how long followers wait for the main lookup result. |
 | `DNS_FRAGMENT_ASSEMBLY_TIMEOUT` | `300.0` | fallback if `<=0` | How long the server waits for all fragments of a tunneled DNS query to arrive. |
 | `DNS_CACHE_MAX_RECORDS` | `50000` | fallback if `<1` | Maximum size of the server’s internal DNS cache for tunneled DNS queries. |
 | `DNS_CACHE_TTL_SECONDS` | `300.0` | fallback if `<=0` | TTL of the server-side internal DNS cache. |
 
-### 3.5.6) 🌐 Forwarding and External SOCKS
+### 3.5.6) 🌐 Destination Forwarding and External SOCKS
 
 | Parameter | Sample Value | Allowed Values / Real Behavior | Full Explanation |
 | :--- | :--- | :--- | :--- |
-| `SOCKS_CONNECT_TIMEOUT` | `120.0` | fallback if `<=0` | Timeout for the server’s outbound connection to the final target or to an external SOCKS5 server.<br>The sample shows a higher value, but the real code fallback is `8` seconds. |
+| `SOCKS_CONNECT_TIMEOUT` | `120.0` | fallback if `<=0` | Timeout for the server’s outbound connection to the final destination or to an external SOCKS5 server.<br>The sample shows a higher value, but the real code fallback is `8` seconds. |
 | `USE_EXTERNAL_SOCKS5` | `false` | `true/false` | If `true`, the server sends outbound traffic through an external SOCKS5 server instead of connecting directly.<br>This is mainly useful for chaining or hiding server egress. |
 | `SOCKS5_AUTH` | `false` | `true/false` | Whether the external SOCKS5 server requires username/password authentication. |
 | `SOCKS5_USER` | `"admin"` | up to 255 bytes | Username for the external SOCKS5 server. |
 | `SOCKS5_PASS` | `"123456"` | up to 255 bytes | Password for the external SOCKS5 server.<br>If auth is enabled and username/password are invalid, the config becomes invalid. |
-| `FORWARD_IP` | `""` | string | In `TCP` mode, this is the fixed outbound target.<br>In `SOCKS5` mode with `USE_EXTERNAL_SOCKS5=true`, this is the address of the upstream SOCKS5 server itself. |
+| `FORWARD_IP` | `""` | string | In `TCP` mode, this is the fixed outbound destination.<br>In `SOCKS5` mode with `USE_EXTERNAL_SOCKS5=true`, this is the address of the external SOCKS5 proxy itself. |
 | `FORWARD_PORT` | `0` | `0..65535` | Port of the endpoint above.<br>If `USE_EXTERNAL_SOCKS5=true`, this must be a valid non-zero value. |
 
 ### 3.5.7) 🔐 Security
@@ -1033,8 +1033,8 @@ graph TD
         UDP["📥 UDP Listener + Request Workers"]
         Sessions["🧠 Session Store + Deferred Workers"]
         ServerARQ["🔄 Server ARQ + Packed Control Blocks"]
-        DNSUp["📛 DNS Upstream / Cache"]
-        Out["🌐 Direct Dial or External SOCKS5"]
+        DNSUp["📛 Egress DNS / Cache"]
+        Out["🌐 Destination Dial or External SOCKS5"]
     end
 
     App --> Proxy
@@ -1061,35 +1061,43 @@ graph TD
 sequenceDiagram
     participant App as 📱 User App
     participant Client as 🖥️ Client
-    participant DNS as 📡 Resolvers
+    participant Resolvers as 📡 Resolvers
     participant Server as 🖥️ Server
-    participant Target as 🌐 Final Target
+    participant Destination as 🌐 Destination
 
     App->>Client: Create SOCKS5 / TCP connection
-    Note over Client: Build Session/Stream<br/>Encrypt, ARQ, choose resolver
-    Client->>DNS: Send DNS query with duplication and balancing
-    DNS->>Server: Deliver query to the server NS
+    Note over Client: Build Session/Stream<br/>Encrypt, ARQ, choose resolver pairing
+    Client->>Resolvers: Send DNS query with duplication and balancing
+    Resolvers->>Server: Deliver query to the server NS
     Note over Server: Checksum / Cookie / Session lookup<br/>Deferred setup / ARQ / Queueing
-    Server->>Target: Direct dial or external SOCKS5
-    Target-->>Server: Return target response
+    Server->>Destination: Direct dial or external SOCKS5
+    Destination-->>Server: Return destination response
     Note over Server: Put data into ARQ<br/>Build ACKs and packed control blocks
-    Server-->>DNS: DNS response
-    DNS-->>Client: DNS reply
+    Server-->>Resolvers: DNS response
+    Resolvers-->>Client: DNS reply
     Note over Client: ARQ reorder / ACK consume / deliver to app
     Client-->>App: Ordered clean data
 ```
 
-### Section 6.3: 🧠 Core Concepts Used by the System
+### Section 6.3: 🧠 Core Concepts and Terminology
 
-| Concept | Description |
+| Term | Definition |
 | :--- | :--- |
-| **Session** | One overall connection between client and server |
-| **Stream** | One independent logical connection carried inside a session |
-| **Resolver Runtime** | Resolver selection, duplication, health tracking, auto-disable, and recheck |
-| **ARQ** | Ordering, ACK, retransmission, timeout, and terminal handling |
-| **Deferred Session Runtime** | Ordering-sensitive tasks such as setup, DNS query handling, and sensitive packet flows |
-| **Packed Control Blocks** | Multiple small ACK or control packets packed into one block |
-| **Synced MTU** | The shared MTU chosen across the healthy resolver pool |
+| **Client** | The local program running on the user device that exposes a local proxy (SOCKS5/TCP), encodes traffic into DNS queries, and orchestrates transmission across resolvers. |
+| **Server** | The remote program acting as authoritative DNS server for the tunnel domain that decodes queries and forwards traffic to the destination. |
+| **Resolver** | An external recursive DNS server (such as an ISP recursor or public DNS) relaying queries between Client and Server. |
+| **Resolver Endpoint** | Concrete network address (`IP:Port`) of a Resolver. |
+| **Tunnel Domain** | Delegated domain (e.g. `v.example.com`) served by the Server used to address tunnel queries. |
+| **Pairing (Candidate)** | A pair combining one Resolver Endpoint and one Tunnel Domain evaluated or admitted by the client. |
+| **Resolver Pool** | The client-side collection of candidate Pairings, categorized by health (Active, Standby, Rechecking, Inactive). |
+| **Resolver Balancer** | Client component that selects which active Pairing transmits each outgoing query based on loss/latency metrics. |
+| **Packet Priority Queue (MLQ)** | Internal queue ordering outbound packets by priority (control signals and ACKs jump ahead of stream data). |
+| **Session** | The long-lived authenticated association established between Client and Server. |
+| **Stream** | An individual multiplexed connection (e.g. one TCP connection or SOCKS request) carried inside a Session. |
+| **Destination** | The final internet host and port (`example.com:443`) that the user application connects to through the tunnel. |
+| **ARQ** | Selective-repeat reliability protocol guaranteeing ordered, reliable packet delivery over DNS. |
+| **Duplication** | Sending redundant copies of a fragment across different resolvers to survive severe packet loss. |
+| **Synced MTU** | The negotiated shared MTU across healthy active Pairings in the Resolver Pool. |
 
 ---
 
