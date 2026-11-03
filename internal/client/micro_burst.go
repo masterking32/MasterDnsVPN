@@ -267,9 +267,12 @@ func (c *Client) sendPipelinedMicroBurst(
 	if result.SentCount > 0 {
 		result.LossRatio = float64(result.SentCount-result.ReceivedCount) / float64(result.SentCount)
 	}
-	if limiter != nil && result.SentCount < packetCount && budgetWaited {
-		result.Incomplete = true
-		result.RejectReason = "background query budget interrupted burst"
+	if result.SentCount < packetCount {
+		result.RejectReason = "burst interrupted before all queries were sent"
+		if limiter != nil && budgetWaited {
+			result.Incomplete = true
+			result.RejectReason = "background query budget interrupted burst"
+		}
 		return result
 	}
 

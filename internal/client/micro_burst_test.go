@@ -197,6 +197,51 @@ func TestSendPipelinedMicroBurstSuccess(t *testing.T) {
 	}
 }
 
+// A receiver deadline can interrupt the paced sender even when no background
+// token was needed. Partial samples must not qualify the configured burst.
+func TestSendPipelinedMicroBurstRejectsPartialTrain(t *testing.T) {
+	for _, background := range []bool{false, true} {
+		t.Run(fmt.Sprintf("background=%t", background), func(t *testing.T) {
+			mockConn, addr := startMockBurstServer(t, "example.com", 0, 0)
+			defer mockConn.Close()
+			cfg := config.DefaultClientConfig()
+			cfg.Domains = []string{"example.com"}
+			cfg.DataEncryptionMethod = 0
+			cfg.AutoSaveRankedResolvers = false
+			// Isolate completeness from the loss threshold: any received sample
+			// would qualify without the full-train guard.
+			cfg.MaxBurstLossRatio = 1
+			codec, err := security.NewCodec(0, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := New(cfg, nil, codec)
+			defer c.Close()
+			conn := Connection{Domain: "example.com", ResolverLabel: addr, Key: addr + "#example.com"}
+			transport, err := c.newUDPQueryTransport(context.Background(), addr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer transport.conn.Close()
+			var limiter *BackgroundQueryLimiter
+			if background {
+				limiter = NewBackgroundQueryLimiter(10000, 32)
+			}
+			// Sending 32 queries with 2 ms spacing requires at least 62 ms.
+			result := c.sendPipelinedMicroBurst(context.Background(), conn, transport, 32, 500, 100, 20*time.Millisecond, limiter)
+			if result.SentCount >= 32 || result.ReceivedCount == 0 {
+				t.Fatalf("expected responses from a partial train: %+v", result)
+			}
+			if result.Qualified || result.RateLimited || result.Incomplete {
+				t.Fatalf("partial unthrottled train must be rejected, not retried as a budget interruption: %+v", result)
+			}
+			if result.RejectReason != "burst interrupted before all queries were sent" {
+				t.Fatalf("unexpected rejection reason: %s", result.RejectReason)
+			}
+		})
+	}
+}
+
 func TestSendPipelinedMicroBurstDetectsRateLimiting(t *testing.T) {
 	// Drops after 2 queries, so only 2 of 6 arrive
 	mockConn, addr := startMockBurstServer(t, "example.com", 2, 0)
