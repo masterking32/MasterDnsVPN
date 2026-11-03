@@ -1,8 +1,8 @@
 package client
 
 import (
-	"fmt"
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
