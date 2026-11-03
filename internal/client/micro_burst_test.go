@@ -309,7 +309,7 @@ func TestDiscoveryEngine_UDPQualificationRankingAndSelection(t *testing.T) {
 	}
 	c.balancer.SetConnections(ptrs)
 
-	activeConns, ranked := newEngine(c).runMicroBurstQualification(context.Background(), conns, 0)
+	activeConns, ranked := newEngine(c).runMicroBurstQualification(context.Background(), checkingCandidatesForTest(c.pool, conns, c.syncedUploadMTU, c.syncedDownloadMTU), 0)
 
 	if len(activeConns) != 2 {
 		t.Fatalf("expected 2 active connections, got %d", len(activeConns))
@@ -351,7 +351,7 @@ func TestDiscoveryEngine_UDPQualificationRankingAndSelection(t *testing.T) {
 				client.syncedDownloadMTU, client.syncedUploadMTU = 400, 100
 				candidate := Connection{Key: "partial-loss", Domain: "example.com", ResolverLabel: addr}
 				client.balancer.SetConnections([]*Connection{&candidate})
-				active, ranked := newEngine(client).runMicroBurstQualification(context.Background(), []Connection{candidate}, 0)
+				active, ranked := newEngine(client).runMicroBurstQualification(context.Background(), checkingCandidatesForTest(client.pool, []Connection{candidate}, client.syncedUploadMTU, client.syncedDownloadMTU), 0)
 				if len(ranked) != 1 || ranked[0].BurstResult.ReceivedCount != 5 {
 					t.Fatalf("expected exactly five of six responses: %+v", ranked)
 				}
@@ -373,7 +373,7 @@ func TestDiscoveryEngine_UDPQualificationRankingAndSelection(t *testing.T) {
 		cStrict.syncedUploadMTU = 100
 		cStrict.balancer.SetConnections(ptrs)
 
-		activeStrict, _ := newEngine(cStrict).runMicroBurstQualification(context.Background(), conns, 0)
+		activeStrict, _ := newEngine(cStrict).runMicroBurstQualification(context.Background(), checkingCandidatesForTest(cStrict.pool, conns, cStrict.syncedUploadMTU, cStrict.syncedDownloadMTU), 0)
 		if len(activeStrict) != 0 {
 			t.Fatalf("expected 0 active connections when none qualify, got %d", len(activeStrict))
 		}

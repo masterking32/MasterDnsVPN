@@ -18,7 +18,7 @@ import (
 )
 
 // CandidateState represents the five authoritative finite state machine states
-// that any resolver-domain pairing candidate can occupy.
+// that any resolver-domain path candidate can occupy.
 type CandidateState int
 
 const (
@@ -50,13 +50,16 @@ func (s CandidateState) String() string {
 	}
 }
 
-// poolCandidate encapsulates a connection pairing, its lifecycle state, and performance stats.
+// poolCandidate encapsulates a connection path, its lifecycle state, and performance stats.
 type poolCandidate struct {
 	conn                Connection
 	state               CandidateState
 	wasStandby          bool
 	stats               *connectionStats
 	burstThroughputKBps float64
+	mtuObservedAt       time.Time
+	mtuRTTObservedAt    time.Time
+	burstObservedAt     time.Time
 	failureReason       string
 	lastStateChange     time.Time
 	initialAttemptDone  bool
@@ -91,6 +94,7 @@ type ResolverPool struct {
 	healthRRCounter         atomic.Uint64
 	recoveryFairnessCounter atomic.Uint64
 	onPoolChanged           func()
+	checkGeneration         uint64
 }
 
 // SetTargetEndpoints sets the continuing minimum distinct-endpoint coverage goal.
@@ -194,6 +198,15 @@ func (p *ResolverPool) syncConnectionFlagsLocked(cand *poolCandidate) {
 	cand.conn.StandbyEligible = (cand.state == StateStandby && p.supportsSessionMTULocked(cand.conn))
 }
 
+// candidateSnapshotLocked derives compatibility fields on a copy. Readers must
+// never write into candidate storage while holding a shared lock.
+func (p *ResolverPool) candidateSnapshotLocked(cand *poolCandidate) Connection {
+	conn := cand.conn
+	conn.IsValid = cand.state == StateActive
+	conn.StandbyEligible = cand.state == StateStandby && p.supportsSessionMTULocked(conn)
+	return conn
+}
+
 // SetSessionMTU records negotiated session upload and download MTU for qualification.
 func (p *ResolverPool) SetSessionMTU(uploadMTU, downloadMTU int) {
 	if p == nil {
@@ -255,8 +268,8 @@ func (p *ResolverPool) InactiveConnections() []Connection {
 	return p.connectionsByIDsLocked(p.inactiveIDs)
 }
 
-// StandbyPairings returns a snapshot copy of all pairings in StateStandby that meet Session MTU.
-func (p *ResolverPool) StandbyPairings() []Connection {
+// StandbyPaths returns a snapshot copy of all paths in StateStandby that meet Session MTU.
+func (p *ResolverPool) StandbyPaths() []Connection {
 	if p == nil {
 		return nil
 	}
@@ -268,17 +281,19 @@ func (p *ResolverPool) StandbyPairings() []Connection {
 		if idx >= 0 && idx < len(p.candidates) {
 			cand := &p.candidates[idx]
 			if cand.state == StateStandby && p.supportsSessionMTULocked(cand.conn) {
-				p.syncConnectionFlagsLocked(cand)
-				result = append(result, cand.conn)
+				result = append(result, p.candidateSnapshotLocked(cand))
 			}
 		}
 	}
 	return result
 }
 
-// StandbyResolvers is an alias for StandbyPairings for backward compatibility.
+// StandbyPairings is a compatibility alias for StandbyPaths.
+func (p *ResolverPool) StandbyPairings() []Connection { return p.StandbyPaths() }
+
+// StandbyResolvers is an alias for StandbyPaths for backward compatibility.
 func (p *ResolverPool) StandbyResolvers() []Connection {
-	return p.StandbyPairings()
+	return p.StandbyPaths()
 }
 
 // AllConnections returns a snapshot copy of all connections across all states.
@@ -291,13 +306,12 @@ func (p *ResolverPool) AllConnections() []Connection {
 
 	result := make([]Connection, len(p.candidates))
 	for i := range p.candidates {
-		p.syncConnectionFlagsLocked(&p.candidates[i])
-		result[i] = p.candidates[i].conn
+		result[i] = p.candidateSnapshotLocked(&p.candidates[i])
 	}
 	return result
 }
 
-// ActiveCount returns the number of active resolvers.
+// ActiveCount returns the number of Active Paths.
 func (p *ResolverPool) ActiveCount() int {
 	if p == nil {
 		return 0
@@ -329,8 +343,11 @@ func (p *ResolverPool) GetConnectionByKey(key string) (Connection, bool) {
 	if !ok || idx < 0 || idx >= len(p.candidates) {
 		return Connection{}, false
 	}
-	p.syncConnectionFlagsLocked(&p.candidates[idx])
-	return p.candidates[idx].conn, true
+	return p.candidateSnapshotLocked(&p.candidates[idx]), true
+}
+
+func (p *ResolverPool) matchesCheckingLeaseLocked(cand *poolCandidate, lease Connection) bool {
+	return cand.state == StateChecking && lease.checkGeneration != 0 && cand.conn.checkGeneration == lease.checkGeneration
 }
 
 // CandidateState returns the current authoritative lifecycle state of the candidate.
@@ -367,6 +384,8 @@ func (p *ResolverPool) AcquireCandidateForChecking(key string) (Connection, bool
 	}
 	cand.wasStandby = (cand.state == StateStandby)
 	cand.state = StateChecking
+	p.checkGeneration++
+	cand.conn.checkGeneration = p.checkGeneration
 	cand.conn.LastHealthCheckAt = time.Now()
 	p.syncConnectionFlagsLocked(cand)
 	return cand.conn, true
@@ -376,19 +395,19 @@ func (p *ResolverPool) AcquireCandidateForChecking(key string) (Connection, bool
 // Interrupted initial work returns to StateUntested.
 // An interrupted recheck restores StateStandby only if it remains valid for the current Session;
 // otherwise it becomes StateRejected.
-func (p *ResolverPool) CancelChecking(key string) {
+func (p *ResolverPool) CancelChecking(lease Connection) {
 	if p == nil {
 		return
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	idx, ok := p.indexByKey[key]
+	idx, ok := p.indexByKey[lease.Key]
 	if !ok || idx < 0 || idx >= len(p.candidates) {
 		return
 	}
 	cand := &p.candidates[idx]
-	if cand.state != StateChecking {
+	if !p.matchesCheckingLeaseLocked(cand, lease) {
 		return
 	}
 	if cand.wasStandby && p.supportsSessionMTULocked(cand.conn) {
@@ -419,34 +438,40 @@ func (p *CandidateMTUParams) FromMTUProbeResult(res MTUProbeResult) {
 }
 
 func (p *ResolverPool) applyCandidateMTULocked(cand *poolCandidate, params CandidateMTUParams) {
+	cand.mtuObservedAt = time.Now()
 	cand.conn.UploadMTUBytes = params.UploadBytes
 	cand.conn.UploadMTUChars = params.UploadChars
 	cand.conn.DownloadMTUBytes = params.DownloadBytes
 	if params.ResolveTime > 0 {
+		cand.mtuRTTObservedAt = cand.mtuObservedAt
 		cand.conn.MTUResolveTime = params.ResolveTime
 	}
 }
 
 // CommitCandidateOutcomeWithParams commits qualification results using bundled MTU parameters.
-func (p *ResolverPool) CommitCandidateOutcomeWithParams(key string, qualified bool, params CandidateMTUParams) bool {
-	return p.CommitCandidateOutcome(key, qualified, params.UploadBytes, params.UploadChars, params.DownloadBytes, params.ResolveTime)
+func (p *ResolverPool) CommitCandidateOutcomeWithParams(lease Connection, qualified bool, params CandidateMTUParams) bool {
+	return p.commitCandidateOutcome(lease, qualified, params)
 }
 
 // CommitCandidateOutcome commits qualification results for a candidate in StateChecking.
 // If qualified is true and Session MTU is met, updates MTU parameters and promotes to Active or Standby.
 // If qualified is false or Session MTU is not met, transitions candidate to StateRejected.
-func (p *ResolverPool) CommitCandidateOutcome(key string, qualified bool, uploadBytes, uploadChars, downloadBytes int, resolveTime time.Duration) bool {
+func (p *ResolverPool) CommitCandidateOutcome(lease Connection, qualified bool, uploadBytes, uploadChars, downloadBytes int, resolveTime time.Duration) bool {
+	return p.commitCandidateOutcome(lease, qualified, CandidateMTUParams{UploadBytes: uploadBytes, UploadChars: uploadChars, DownloadBytes: downloadBytes, ResolveTime: resolveTime})
+}
+
+func (p *ResolverPool) commitCandidateOutcome(lease Connection, qualified bool, params CandidateMTUParams) bool {
 	if p == nil {
 		return false
 	}
 	p.mu.Lock()
-	idx, ok := p.indexByKey[key]
+	idx, ok := p.indexByKey[lease.Key]
 	if !ok || idx < 0 || idx >= len(p.candidates) {
 		p.mu.Unlock()
 		return false
 	}
 	cand := &p.candidates[idx]
-	if cand.state != StateChecking {
+	if !p.matchesCheckingLeaseLocked(cand, lease) {
 		p.mu.Unlock()
 		return false
 	}
@@ -455,12 +480,7 @@ func (p *ResolverPool) CommitCandidateOutcome(key string, qualified bool, upload
 	cand.initialAttemptDone = true
 	if qualified {
 		cand.failStreak = 0
-		p.applyCandidateMTULocked(cand, CandidateMTUParams{
-			UploadBytes:   uploadBytes,
-			UploadChars:   uploadChars,
-			DownloadBytes: downloadBytes,
-			ResolveTime:   resolveTime,
-		})
+		p.applyCandidateMTULocked(cand, params)
 		if !p.supportsSessionMTULocked(cand.conn) {
 			qualified = false
 		}
@@ -507,14 +527,10 @@ func (p *ResolverPool) SetConnectionValidity(key string, valid bool) bool {
 	return ok
 }
 
-func (p *ResolverPool) setConnectionValidityLocked(key string, valid bool, allowDiversityOverride ...bool) bool {
+func (p *ResolverPool) setConnectionValidityLocked(key string, valid bool) bool {
 	idx, ok := p.indexByKey[key]
 	if !ok || idx < 0 || idx >= len(p.candidates) {
 		return false
-	}
-	override := false
-	if len(allowDiversityOverride) > 0 {
-		override = allowDiversityOverride[0]
 	}
 	cand := &p.candidates[idx]
 	if (cand.state == StateActive) == valid {
@@ -536,7 +552,7 @@ func (p *ResolverPool) setConnectionValidityLocked(key string, valid bool, allow
 		cand.state = StateRejected
 	}
 	p.syncConnectionFlagsLocked(cand)
-	p.moveConnectionStateLocked(idx, valid, override)
+	p.moveConnectionStateLocked(idx, valid)
 
 	return true
 }
@@ -580,6 +596,18 @@ func (p *ResolverPool) IsConnectionStandbyEligible(key string) bool {
 	}
 	cand := &p.candidates[idx]
 	return cand.state == StateStandby && p.supportsSessionMTULocked(cand.conn)
+}
+
+// SetCheckingMTU records intermediate qualification evidence only for its lease.
+func (p *ResolverPool) SetCheckingMTU(lease Connection, params CandidateMTUParams) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	idx, ok := p.indexByKey[lease.Key]
+	if !ok || !p.matchesCheckingLeaseLocked(&p.candidates[idx], lease) {
+		return false
+	}
+	p.applyCandidateMTULocked(&p.candidates[idx], params)
+	return true
 }
 
 // SetConnectionMTUParams updates MTU parameters using bundled CandidateMTUParams.
@@ -668,71 +696,62 @@ func (p *ResolverPool) ApplyMTUProbeResult(key string, uploadBytes int, uploadCh
 	return true
 }
 
-// AdmitStartupBatch admits a startup qualification batch under atomic lock.
-func (p *ResolverPool) AdmitStartupBatch(results []QualifiedResolver, selected []Connection) {
+// AdmitStartupBatch atomically commits completed qualification leases, then
+// reconciles membership. The historical selection argument is ignored: discovery
+// reports evidence; only the pool chooses members.
+func (p *ResolverPool) AdmitStartupBatch(results []QualifiedResolver, _ []Connection) {
 	if p == nil {
 		return
 	}
 	p.mu.Lock()
-
-	active := make(map[string]bool, len(selected))
-	for _, conn := range selected {
-		active[conn.Key] = true
-	}
+	changed := false
 	for _, result := range results {
 		idx, ok := p.indexByKey[result.Connection.Key]
-		if ok && result.BurstResult.Qualified {
-			burst := result.BurstResult
-			p.candidates[idx].stats.seedBurst(burst.SentCount, burst.ReceivedCount, burst.AverageRTT)
-			throughput := burst.BurstThroughputKBps
-			if throughput <= 0 {
-				throughput = burst.ThroughputKBps
-			}
-			p.candidates[idx].burstThroughputKBps = throughput
-		}
-	}
-	// Transition batch results through authoritative states.
-	for _, result := range results {
-		idx, ok := p.indexByKey[result.Connection.Key]
-		if !ok || idx < 0 || idx >= len(p.candidates) {
+		if !ok {
 			continue
 		}
 		cand := &p.candidates[idx]
+		if !p.matchesCheckingLeaseLocked(cand, result.Connection) {
+			continue
+		}
 		cand.initialAttemptDone = true
 		cand.wasStandby = false
-		if !result.BurstResult.Qualified {
+		if !result.BurstResult.Qualified || !p.supportsSessionMTULocked(cand.conn) {
 			cand.failStreak++
 			cand.state = StateRejected
-			p.syncConnectionFlagsLocked(cand)
-			p.removeActiveIndexLocked(idx)
-			p.addInactiveIndexLocked(idx)
-		} else if !active[result.Connection.Key] {
+		} else {
+			burst := result.BurstResult
+			cand.stats.seedBurst(burst.SentCount, burst.ReceivedCount, burst.AverageRTT)
+			cand.burstObservedAt = time.Now()
+			cand.burstThroughputKBps = burst.BurstThroughputKBps
+			if cand.burstThroughputKBps <= 0 {
+				cand.burstThroughputKBps = burst.ThroughputKBps
+			}
 			cand.failStreak = 0
 			cand.state = StateStandby
-			p.syncConnectionFlagsLocked(cand)
-			p.removeActiveIndexLocked(idx)
-			p.addInactiveIndexLocked(idx)
 		}
+		p.syncConnectionFlagsLocked(cand)
+		p.removeActiveIndexLocked(idx)
+		p.addInactiveIndexLocked(idx)
+		changed = true
 	}
-	for _, conn := range selected {
-		p.setConnectionValidityLocked(conn.Key, true, true)
+	if changed {
+		p.optimizeLocked(0)
 	}
-
 	cb := p.onPoolChanged
 	p.mu.Unlock()
-
-	if cb != nil {
+	if changed && cb != nil {
 		cb()
 	}
 }
 
-// FinalizeFastStart trims the active pool to meet the endpoint quota.
+// FinalizeFastStart validates startup qualification and reconciles using the
+// continuing coverage goal. Readiness does not cap the number of usable endpoints.
 func (p *ResolverPool) FinalizeFastStart(qualifiedKeys map[string]struct{}, target int) {
 	if p == nil {
 		return
 	}
 	p.mu.Lock()
-
 	if qualifiedKeys != nil {
 		for _, conn := range p.connectionsByIDsLocked(p.activeIDs) {
 			if _, qualified := qualifiedKeys[conn.Key]; !qualified {
@@ -740,37 +759,9 @@ func (p *ResolverPool) FinalizeFastStart(qualifiedKeys map[string]struct{}, targ
 			}
 		}
 	}
-	active := p.connectionsByIDsLocked(p.activeIDs)
-	endpoints := make(map[string]bool)
-	for _, conn := range active {
-		endpoints[p.endpointKey(conn)] = true
-	}
-	if len(endpoints) <= target {
-		cb := p.onPoolChanged
-		p.mu.Unlock()
-		if cb != nil {
-			cb()
-		}
-		return
-	}
-	kept := make(map[string]bool, target)
-	for _, conn := range active {
-		ep := p.endpointKey(conn)
-		if len(kept) < target || kept[ep] {
-			kept[ep] = true
-			continue
-		}
-		p.setConnectionValidityLocked(conn.Key, false)
-		idx := p.indexByKey[conn.Key]
-		cand := &p.candidates[idx]
-		cand.state = StateStandby
-		cand.wasStandby = false
-		p.syncConnectionFlagsLocked(cand)
-	}
-
+	p.optimizeLocked(target)
 	cb := p.onPoolChanged
 	p.mu.Unlock()
-
 	if cb != nil {
 		cb()
 	}
@@ -804,6 +795,8 @@ func (p *ResolverPool) leaseCandidateForRecheckLocked(cand *poolCandidate, now t
 	cand.wasStandby = (cand.state == StateStandby)
 	cand.conn.LastHealthCheckAt = now
 	cand.state = StateChecking
+	p.checkGeneration++
+	cand.conn.checkGeneration = p.checkGeneration
 	p.syncConnectionFlagsLocked(cand)
 	return cand.conn, true
 }
@@ -832,7 +825,14 @@ func (p *ResolverPool) AcquireNextInactiveForRecheck(now time.Time, minInterval 
 	if target <= 0 {
 		target = p.maxActive
 	}
-	workingSetSufficient := (len(p.activeIDs) >= target && target > 0)
+	activeEndpoints := make(map[string]struct{})
+	for _, idx := range p.activeIDs {
+		cand := &p.candidates[idx]
+		if cand.state == StateActive && p.supportsSessionMTULocked(cand.conn) {
+			activeEndpoints[p.endpointKey(cand.conn)] = struct{}{}
+		}
+	}
+	workingSetSufficient := target > 0 && len(activeEndpoints) >= target
 
 	start := roundRobinStartIndex(p.healthRRCounter.Add(1)-1, n)
 
@@ -894,46 +894,41 @@ func (p *ResolverPool) AcquireNextInactiveForRecheck(now time.Time, minInterval 
 }
 
 func (p *ResolverPool) beginConnectionRecheck(key string) bool {
-	if p == nil {
-		return false
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	_, ok := p.AcquireCandidateForChecking(key)
+	return ok
+}
 
-	idx, ok := p.indexByKey[key]
-	if !ok || idx < 0 || idx >= len(p.candidates) {
-		return false
+// prepareRecheck accepts a scheduled lease or acquires a new one for a direct caller.
+func (p *ResolverPool) prepareRecheck(conn Connection) (Connection, bool) {
+	if conn.checkGeneration == 0 {
+		return p.AcquireCandidateForChecking(conn.Key)
 	}
-	cand := &p.candidates[idx]
-	if cand.state == StateActive {
-		return false
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	idx, ok := p.indexByKey[conn.Key]
+	if !ok || !p.matchesCheckingLeaseLocked(&p.candidates[idx], conn) {
+		return Connection{}, false
 	}
-	if cand.state == StateChecking {
-		return true
-	}
-	cand.wasStandby = (cand.state == StateStandby)
-	cand.state = StateChecking
-	p.syncConnectionFlagsLocked(cand)
-	return true
+	return conn, true
 }
 
 // ReleaseRecheck releases a rechecking candidate without committing new qualification.
-func (p *ResolverPool) ReleaseRecheck(key string, wasStandby bool) {
+func (p *ResolverPool) ReleaseRecheck(lease Connection) {
 	if p == nil {
 		return
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	idx, ok := p.indexByKey[key]
+	idx, ok := p.indexByKey[lease.Key]
 	if !ok || idx < 0 || idx >= len(p.candidates) {
 		return
 	}
 	cand := &p.candidates[idx]
-	if cand.state != StateChecking {
+	if !p.matchesCheckingLeaseLocked(cand, lease) {
 		return
 	}
-	effectiveStandby := wasStandby || cand.wasStandby
+	effectiveStandby := cand.wasStandby
 	if effectiveStandby && p.supportsSessionMTULocked(cand.conn) {
 		cand.state = StateStandby
 	} else if effectiveStandby {
@@ -964,7 +959,7 @@ func (p *ResolverPool) CompleteRecheck(result ResolverRecheckResult) (Connection
 		return Connection{}, false
 	}
 	cand := &p.candidates[idx]
-	if cand.state != StateChecking {
+	if !p.matchesCheckingLeaseLocked(cand, result.Connection) {
 		p.mu.Unlock()
 		return Connection{}, false
 	}
@@ -975,6 +970,8 @@ func (p *ResolverPool) CompleteRecheck(result ResolverRecheckResult) (Connection
 		cand.conn.UploadMTUChars = result.Connection.UploadMTUChars
 		cand.conn.DownloadMTUBytes = result.Connection.DownloadMTUBytes
 		cand.conn.MTUResolveTime = result.Connection.MTUResolveTime
+		cand.mtuObservedAt = time.Now()
+		cand.mtuRTTObservedAt = cand.mtuObservedAt
 	}
 	qualified := result.MTUVerified && p.supportsSessionMTULocked(cand.conn) && (result.Burst == nil || result.Burst.Qualified)
 	if qualified {
@@ -988,12 +985,15 @@ func (p *ResolverPool) CompleteRecheck(result ResolverRecheckResult) (Connection
 			if throughput <= 0 {
 				throughput = burst.ThroughputKBps
 			}
-			cand.burstThroughputKBps = throughput
+			if !burst.RateLimited {
+				cand.burstThroughputKBps = throughput
+				cand.burstObservedAt = time.Now()
+			}
 		}
 	} else {
 		cand.failStreak++
 	}
-	p.setConnectionValidityLocked(cand.conn.Key, qualified, false)
+	p.setConnectionValidityLocked(cand.conn.Key, qualified)
 	p.syncConnectionFlagsLocked(cand)
 	retConn := cand.conn
 
@@ -1008,15 +1008,16 @@ func (p *ResolverPool) CompleteRecheck(result ResolverRecheckResult) (Connection
 
 // ResolverPoolCoverageStats tracks cumulative initial coverage and current qualification.
 type ResolverPoolCoverageStats struct {
-	ConfiguredPairings       int
+	ConfiguredPaths          int
+	ConfiguredPairings       int // Deprecated: use ConfiguredPaths.
 	CompletedInitialAttempts int
 	RemainingUntested        int
 	DistinctQualified        int
 	IsFirstPassComplete      bool
 }
 
-// CoverageStats reports configured pairings, completed initial attempts, remaining
-// untested pairings, and distinct qualified endpoints.
+// CoverageStats reports configured paths, completed initial attempts, remaining
+// untested paths, and distinct qualified endpoints.
 func (p *ResolverPool) CoverageStats() ResolverPoolCoverageStats {
 	if p == nil {
 		return ResolverPoolCoverageStats{}
@@ -1044,6 +1045,7 @@ func (p *ResolverPool) CoverageStats() ResolverPoolCoverageStats {
 	}
 
 	return ResolverPoolCoverageStats{
+		ConfiguredPaths:          configured,
 		ConfiguredPairings:       configured,
 		CompletedInitialAttempts: completed,
 		RemainingUntested:        untested,
@@ -1052,7 +1054,7 @@ func (p *ResolverPool) CoverageStats() ResolverPoolCoverageStats {
 	}
 }
 
-// IsFirstPassComplete returns true if every configured pairing has completed an initial attempt.
+// IsFirstPassComplete returns true if every configured path has completed an initial attempt.
 func (p *ResolverPool) IsFirstPassComplete() bool {
 	if p == nil {
 		return true
@@ -1067,9 +1069,9 @@ func (p *ResolverPool) IsFirstPassComplete() bool {
 	return true
 }
 
-// Optimize fills vacant slots with qualified standby resolvers, then replaces
-// degraded active resolvers with meaningfully better standby candidates (>1.25x).
-// When targetEndpoints is specified (> 0), it also swaps duplicate active pairings
+// Optimize fills vacant slots with qualified Standby Paths, then replaces
+// degraded Active Paths with meaningfully better standby candidates (>1.25x).
+// When targetEndpoints is specified (> 0), it also swaps duplicate active paths
 // for unrepresented standby endpoints to satisfy the unique-endpoint quota.
 func (p *ResolverPool) Optimize(targetEndpoints ...int) bool {
 	if p == nil {
@@ -1123,179 +1125,57 @@ func (p *ResolverPool) bestStandbyLocked() (int, float64) {
 }
 
 func (p *ResolverPool) optimizeLocked(target int) bool {
-	if len(p.inactiveIDs) == 0 {
-		return false
-	}
-	if target <= 0 {
-		target = p.targetEndpoints
-	}
-
-	swapped := false
-	for p.maxActive <= 0 || len(p.activeIDs) < p.maxActive {
-		idx, _ := p.bestStandbyLocked()
-		if idx < 0 {
-			break
-		}
-		p.moveConnectionStateLocked(idx, true)
-		if p.log != nil {
-			p.log.Infof("<green>⚡ Active Pairing Promoted (Vacancy Filling): %s | Active Pairings: %d/%d</green>",
-				p.candidates[idx].conn.ResolverLabel, len(p.activeIDs), p.maxActive)
-		}
-		swapped = true
-	}
-
 	if target > 0 {
-		for {
-			endpointCounts := make(map[string]int)
-			for _, activeIdx := range p.activeIDs {
-				endpointCounts[p.endpointKey(p.candidates[activeIdx].conn)]++
-			}
-			uniqueCount := len(endpointCounts)
-			if uniqueCount >= target {
-				break
-			}
-
-			// Find candidate from standby whose endpoint is not in endpointCounts
-			bestUnrepStandbyIdx := -1
-			bestUnrepStandbyScore := -1.0
-			for _, inactIdx := range p.inactiveIDs {
-				if inactIdx < 0 || inactIdx >= len(p.candidates) {
-					continue
-				}
-				cand := &p.candidates[inactIdx]
-				if cand.state != StateStandby || !p.supportsSessionMTULocked(cand.conn) {
-					continue
-				}
-				if endpointCounts[p.endpointKey(cand.conn)] == 0 {
-					score := p.calculateConnectionScoreLocked(inactIdx)
-					if score > bestUnrepStandbyScore {
-						bestUnrepStandbyScore = score
-						bestUnrepStandbyIdx = inactIdx
-					}
-				}
-			}
-			if bestUnrepStandbyIdx < 0 {
-				break
-			}
-
-			// Find lowest-scoring duplicate active connection to demote
-			worstDupIdx := -1
-			worstDupScore := math.MaxFloat64
-			worstDupPos := -1
-			for pos, activeIdx := range p.activeIDs {
-				lbl := p.endpointKey(p.candidates[activeIdx].conn)
-				if endpointCounts[lbl] > 1 {
-					score := p.calculateConnectionScoreLocked(activeIdx)
-					if score < worstDupScore {
-						worstDupScore = score
-						worstDupIdx = activeIdx
-						worstDupPos = pos
-					}
-				}
-			}
-			if worstDupIdx < 0 {
-				break
-			}
-
-			demotedCand := &p.candidates[worstDupIdx]
-			promotedCand := &p.candidates[bestUnrepStandbyIdx]
-
-			demotedCand.state = StateStandby
-			demotedCand.wasStandby = false
-			p.syncConnectionFlagsLocked(demotedCand)
-
-			promotedCand.state = StateActive
-			promotedCand.wasStandby = false
-			p.syncConnectionFlagsLocked(promotedCand)
-
-			p.activeIDs[worstDupPos] = bestUnrepStandbyIdx
-			p.removeInactiveIndexLocked(bestUnrepStandbyIdx)
-			p.addInactiveIndexLocked(worstDupIdx)
-
-			if p.log != nil {
-				p.log.Infof("<yellow>⚡ Active Pairing Swapped (Endpoint Coverage Repair): %s (Score: %.1f) ➔ Replaced by %s (Score: %.1f)</yellow>",
-					p.endpointKey(demotedCand.conn), worstDupScore,
-					p.endpointKey(promotedCand.conn), bestUnrepStandbyScore)
-			}
-			swapped = true
+		p.targetEndpoints = target
+	}
+	changed := false
+	// Reconciliation and direct admission use exactly the same membership policy.
+	for _, idx := range append([]int(nil), p.activeIDs...) {
+		if !p.supportsSessionMTULocked(p.candidates[idx].conn) {
+			p.moveConnectionStateLocked(idx, false)
+			changed = true
 		}
 	}
-
-	for iter := 0; iter < len(p.activeIDs); iter++ {
-		bestInactiveIdx, bestInactiveScore := p.bestStandbyLocked()
-		if bestInactiveIdx < 0 {
-			break
-		}
-
-		activeEndpointCounts := make(map[string]int)
-		for _, aIdx := range p.activeIDs {
-			activeEndpointCounts[p.endpointKey(p.candidates[aIdx].conn)]++
-		}
-		uniqueEndpoints := len(activeEndpointCounts)
-		promotedEndpoint := p.endpointKey(p.candidates[bestInactiveIdx].conn)
-
-		findMinActive := func(predicate func(activeIdx int, lbl string) bool) (int, int, float64) {
-			bestIdx := -1
-			bestPos := -1
-			bestScore := math.MaxFloat64
-			for pos, aIdx := range p.activeIDs {
-				lbl := p.endpointKey(p.candidates[aIdx].conn)
-				if predicate != nil && !predicate(aIdx, lbl) {
-					continue
-				}
-				score := p.calculateConnectionScoreLocked(aIdx)
-				if score < bestScore {
-					bestScore = score
-					bestIdx = aIdx
-					bestPos = pos
-				}
+	for {
+		standby := make([]int, 0, len(p.inactiveIDs))
+		for _, idx := range p.inactiveIDs {
+			c := &p.candidates[idx]
+			if c.state == StateStandby && p.supportsSessionMTULocked(c.conn) {
+				standby = append(standby, idx)
 			}
-			return bestIdx, bestPos, bestScore
 		}
-
-		displaceIdx, displacePos, displaceScore := findMinActive(func(aIdx int, lbl string) bool {
-			return !(target > 0 && uniqueEndpoints <= target && activeEndpointCounts[lbl] <= 1 && activeEndpointCounts[promotedEndpoint] > 0)
+		sort.SliceStable(standby, func(i, j int) bool {
+			a, b := standby[i], standby[j]
+			sa, sb := p.calculateConnectionScoreLocked(a), p.calculateConnectionScoreLocked(b)
+			if sa != sb {
+				return sa > sb
+			}
+			return p.candidates[a].conn.Key < p.candidates[b].conn.Key
 		})
-		if displaceIdx < 0 {
-			displaceIdx, displacePos, displaceScore = findMinActive(func(aIdx int, lbl string) bool {
-				return activeEndpointCounts[lbl] > 1
-			})
+		// Coverage repair precedes optional performance swaps once vacancies are filled.
+		if p.maxActive > 0 && len(p.activeIDs) >= p.maxActive {
+			endpoints := make(map[string]bool)
+			for _, idx := range p.activeIDs {
+				endpoints[p.endpointKey(p.candidates[idx].conn)] = true
+			}
+			if len(endpoints) < p.targetEndpoints {
+				sort.SliceStable(standby, func(i, j int) bool {
+					return !endpoints[p.endpointKey(p.candidates[standby[i]].conn)] && endpoints[p.endpointKey(p.candidates[standby[j]].conn)]
+				})
+			}
 		}
-		if displaceIdx < 0 {
-			break
+		promoted := false
+		for _, idx := range standby {
+			p.moveConnectionStateLocked(idx, true)
+			if p.candidates[idx].state == StateActive {
+				promoted, changed = true, true
+				break // Rebuild the ordering after each membership change.
+			}
 		}
-
-		// Swap if the best standby candidate is strictly better (>1.25x active score)
-		marginNeeded := displaceScore * 1.25
-		if !(bestInactiveScore > marginNeeded || (displaceScore == 0 && bestInactiveScore > 0)) {
-			break
+		if !promoted {
+			return changed
 		}
-
-		demotedCand := &p.candidates[displaceIdx]
-		promotedCand := &p.candidates[bestInactiveIdx]
-
-		demotedCand.state = StateStandby
-		demotedCand.wasStandby = false
-		p.syncConnectionFlagsLocked(demotedCand)
-
-		promotedCand.state = StateActive
-		promotedCand.wasStandby = false
-		p.syncConnectionFlagsLocked(promotedCand)
-
-		// Swap IDs
-		p.activeIDs[displacePos] = bestInactiveIdx
-		p.removeInactiveIndexLocked(bestInactiveIdx)
-		p.addInactiveIndexLocked(displaceIdx)
-
-		if p.log != nil {
-			p.log.Infof("<yellow>⚡ Active Pairing Swapped (Performance Improvement): %s (Score: %.1f) ➔ Replaced by %s (Score: %.1f)</yellow>",
-				demotedCand.conn.ResolverLabel, displaceScore,
-				promotedCand.conn.ResolverLabel, bestInactiveScore)
-		}
-		swapped = true
 	}
-
-	return swapped
 }
 
 // RankedEndpoints returns unique resolver endpoints sorted descending by composite score.
@@ -1461,17 +1341,20 @@ func (p *ResolverPool) GetStatsSnapshot() []ResolverStatsSnapshot {
 			lossRatio = float64(lost) / float64(sent)
 		}
 
+		conn := p.candidateSnapshotLocked(cand)
+		evaluation := p.evaluateCandidateLocked(i)
 		snapshots[i] = ResolverStatsSnapshot{
-			Connection:          cand.conn,
+			Connection:          conn,
 			Sent:                sent,
 			Acked:               acked,
 			Lost:                lost,
 			LossRatio:           lossRatio,
 			AverageRTT:          avgRTT,
 			ActiveStreams:       0,
-			IsValid:             cand.conn.IsValid,
-			StandbyEligible:     cand.conn.StandbyEligible,
+			IsValid:             conn.IsValid,
+			StandbyEligible:     conn.StandbyEligible,
 			BurstThroughputKBps: cand.burstThroughputKBps,
+			Evaluation:          &evaluation,
 		}
 	}
 	return snapshots
@@ -1511,31 +1394,18 @@ func (p *ResolverPool) evaluateCandidateLocked(idx int) ResolverEvaluationSnapsh
 		return ResolverEvaluationSnapshot{Tier: "Poor"}
 	}
 	cand := &p.candidates[idx]
-	var sent, lost, rttSum, rttCount uint64
+	var obs CandidateObservationInput
 	if cand.stats != nil {
-		sent, _, lost, rttSum, rttCount = cand.stats.snapshot()
+		obs = cand.stats.evaluationObservations()
 	}
-
-	var liveRTT time.Duration
-	if rttCount > 0 {
-		liveRTT = time.Duration(rttSum/rttCount) * time.Microsecond
-	}
-	var lossRatio float64
-	if sent > 0 {
-		lossRatio = float64(lost) / float64(sent)
-	}
-
-	return EvaluateCandidateObservation(CandidateObservationInput{
-		UploadMTUBytes:      cand.conn.UploadMTUBytes,
-		DownloadMTUBytes:    cand.conn.DownloadMTUBytes,
-		MTUResolveTime:      cand.conn.MTUResolveTime,
-		BurstThroughputKBps: cand.burstThroughputKBps,
-		LiveRTT:             liveRTT,
-		LiveLossRatio:       lossRatio,
-		LiveSentCount:       sent,
-		LiveLostCount:       lost,
-		ObservedAt:          cand.conn.LastHealthCheckAt,
-	})
+	obs.UploadMTUBytes = cand.conn.UploadMTUBytes
+	obs.DownloadMTUBytes = cand.conn.DownloadMTUBytes
+	obs.MTUResolveTime = cand.conn.MTUResolveTime
+	obs.MTUObservedAt = cand.mtuObservedAt
+	obs.MTURTTObservedAt = cand.mtuRTTObservedAt
+	obs.BurstThroughputKBps = cand.burstThroughputKBps
+	obs.BurstObservedAt = cand.burstObservedAt
+	return EvaluateCandidateObservation(obs)
 }
 
 func (p *ResolverPool) calculateConnectionScoreLocked(idx int) float64 {
@@ -1543,11 +1413,7 @@ func (p *ResolverPool) calculateConnectionScoreLocked(idx int) float64 {
 	return ev.CompositeScore
 }
 
-func (p *ResolverPool) moveConnectionStateLocked(idx int, valid bool, allowDiversityOverride ...bool) {
-	override := false
-	if len(allowDiversityOverride) > 0 {
-		override = allowDiversityOverride[0]
-	}
+func (p *ResolverPool) moveConnectionStateLocked(idx int, valid bool) {
 	cand := &p.candidates[idx]
 	if !valid {
 		cand.state = StateRejected
@@ -1581,7 +1447,7 @@ func (p *ResolverPool) moveConnectionStateLocked(idx int, valid bool, allowDiver
 		target := p.targetEndpoints
 
 		// Priority 1: Endpoint Coverage Repair
-		if (override || (target > 0 && uniqueEndpoints < target)) && endpointCounts[candEndpoint] == 0 {
+		if (target > 0 && uniqueEndpoints < target) && endpointCounts[candEndpoint] == 0 {
 			worstDupIdx := -1
 			worstDupScore := math.MaxFloat64
 			worstDupPos := -1
@@ -1600,19 +1466,10 @@ func (p *ResolverPool) moveConnectionStateLocked(idx int, valid bool, allowDiver
 
 			if worstDupIdx >= 0 {
 				demotedCand := &p.candidates[worstDupIdx]
-				demotedCand.state = StateStandby
-				demotedCand.wasStandby = false
-				p.syncConnectionFlagsLocked(demotedCand)
-				p.activeIDs[worstDupPos] = idx
-				p.addInactiveIndexLocked(worstDupIdx)
-
-				p.removeInactiveIndexLocked(idx)
-				cand.state = StateActive
-				cand.wasStandby = false
-				p.syncConnectionFlagsLocked(cand)
+				p.replaceActiveLocked(idx, worstDupIdx, worstDupPos)
 
 				if p.log != nil {
-					p.log.Infof("<green>🔄 Candidate Promoted to Active Pairing (Endpoint Coverage Repair): %s (%s, score: %.1f) [Demoted duplicate: %s, score: %.1f] | Active Pairings: %d/%d</green>",
+					p.log.Infof("<green>🔄 Candidate Promoted to Active Path (Endpoint Coverage Repair): %s (%s, score: %.1f) [Demoted duplicate: %s, score: %.1f] | Active Paths: %d/%d</green>",
 						p.endpointKey(cand.conn), cand.conn.Domain, candScore,
 						p.endpointKey(demotedCand.conn), worstDupScore,
 						len(p.activeIDs), len(p.candidates))
@@ -1653,19 +1510,10 @@ func (p *ResolverPool) moveConnectionStateLocked(idx int, valid bool, allowDiver
 		marginNeeded := displaceScore * 1.25
 		if displaceIdx >= 0 && (candScore > marginNeeded || (displaceScore == 0 && candScore > 0)) {
 			demotedCand := &p.candidates[displaceIdx]
-			demotedCand.state = StateStandby
-			demotedCand.wasStandby = false
-			p.syncConnectionFlagsLocked(demotedCand)
-			p.activeIDs[displacePos] = idx
-			p.addInactiveIndexLocked(displaceIdx)
-
-			p.removeInactiveIndexLocked(idx)
-			cand.state = StateActive
-			cand.wasStandby = false
-			p.syncConnectionFlagsLocked(cand)
+			p.replaceActiveLocked(idx, displaceIdx, displacePos)
 
 			if p.log != nil {
-				p.log.Infof("<green>🔄 Candidate Promoted to Active Pairing (Performance Improvement): %s (%s, score: %.1f) [Demoted: %s, score: %.1f] | Active Pairings: %d/%d</green>",
+				p.log.Infof("<green>🔄 Candidate Promoted to Active Path (Performance Improvement): %s (%s, score: %.1f) [Demoted: %s, score: %.1f] | Active Paths: %d/%d</green>",
 					cand.conn.ResolverLabel, cand.conn.Domain, candScore,
 					demotedCand.conn.ResolverLabel, displaceScore,
 					len(p.activeIDs), len(p.candidates))
@@ -1673,14 +1521,14 @@ func (p *ResolverPool) moveConnectionStateLocked(idx int, valid bool, allowDiver
 			return
 		}
 
-		// Candidate does not beat active resolvers -> Place in Standby status
+		// Candidate does not beat Active Paths -> Place in Standby status
 		cand.state = StateStandby
 		cand.wasStandby = false
 		p.syncConnectionFlagsLocked(cand)
 		p.addInactiveIndexLocked(idx)
 		p.removeActiveIndexLocked(idx)
 		if p.log != nil {
-			p.log.Debugf("<cyan>⏸ Candidate Added to Standby Pairings (Pool Full): %s (%s, score: %.1f) | Active Pairings: %d</cyan>",
+			p.log.Debugf("<cyan>⏸ Candidate Added to Standby Paths (Pool Full): %s (%s, score: %.1f) | Active Paths: %d</cyan>",
 				cand.conn.ResolverLabel, cand.conn.Domain, candScore, len(p.activeIDs))
 		}
 		return
@@ -1698,8 +1546,7 @@ func (p *ResolverPool) connectionsByIDsLocked(ids []int) []Connection {
 	result := make([]Connection, len(ids))
 	for i, id := range ids {
 		if id >= 0 && id < len(p.candidates) {
-			p.syncConnectionFlagsLocked(&p.candidates[id])
-			result[i] = p.candidates[id].conn
+			result[i] = p.candidateSnapshotLocked(&p.candidates[id])
 		}
 	}
 	return result
@@ -1741,4 +1588,19 @@ func (p *ResolverPool) removeInactiveIndexLocked(idx int) {
 			break
 		}
 	}
+}
+
+// replaceActiveLocked keeps membership indexes and lifecycle flags in one operation.
+func (p *ResolverPool) replaceActiveLocked(incoming, outgoing, activePos int) {
+	demoted := &p.candidates[outgoing]
+	demoted.state = StateStandby
+	demoted.wasStandby = false
+	p.syncConnectionFlagsLocked(demoted)
+	p.activeIDs[activePos] = incoming
+	p.addInactiveIndexLocked(outgoing)
+	p.removeInactiveIndexLocked(incoming)
+	promoted := &p.candidates[incoming]
+	promoted.state = StateActive
+	promoted.wasStandby = false
+	p.syncConnectionFlagsLocked(promoted)
 }

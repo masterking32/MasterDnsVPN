@@ -1,12 +1,73 @@
 package client
 
 import (
+	"fmt"
 	"math"
 	"testing"
 	"time"
 
 	Enums "masterdnsvpn-go/internal/enums"
 )
+
+func TestBalancerCommonScore_NormalizesUniqueConnectionCount(t *testing.T) {
+	b := NewBalancer(BalancingCommonScore, nil)
+	b.SetConnections([]*Connection{{Key: "a", ResolverLabel: "A", Domain: "one.example"}})
+	b.SetConnectionValidity("a", true)
+	for _, count := range []int{-1, 0, 1, 2} {
+		if got := b.GetUniqueConnections(count); len(got) != 1 || got[0].Key != "a" {
+			t.Fatalf("GetUniqueConnections(%d) = %+v, want one Active Path", count, got)
+		}
+	}
+}
+
+func TestTieredStrategiesFillDuplicationAcrossEndpoints(t *testing.T) {
+	for _, strategy := range []int{BalancingLossThenLatency, BalancingLeastLossTopRandom, BalancingLeastLossTopRoundRobin} {
+		t.Run(fmt.Sprint(strategy), func(t *testing.T) {
+			b := NewBalancer(strategy, nil)
+			b.SetConnections([]*Connection{
+				{Key: "a1", ResolverLabel: "A", Domain: "one.example"},
+				{Key: "a2", ResolverLabel: "A", Domain: "two.example"},
+				{Key: "b", ResolverLabel: "B", Domain: "one.example"},
+				{Key: "c", ResolverLabel: "C", Domain: "one.example"},
+			})
+			for i, key := range []string{"a1", "a2", "b", "c"} {
+				b.SetConnectionValidity(key, true)
+				b.SeedBurstStats(key, 100, 100-max(0, i-1)*10, time.Duration(i+1)*time.Millisecond)
+			}
+			// Both members of the initial preferred tier share A. Additional
+			// copies must consider the remaining Active endpoints B and C.
+			for _, count := range []int{1, 2, 3, 4} {
+				for _, packet := range []struct {
+					kind   uint8
+					stream uint16
+				}{
+					{Enums.PACKET_PING, 0}, {Enums.PACKET_STREAM_SYN, 77},
+				} {
+					targets, err := b.SelectTargets(packet.kind, packet.stream, count)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if len(targets) != min(count, 3) {
+						t.Fatalf("packet %d requested %d copies: got %d targets: %+v", packet.kind, count, len(targets), targets)
+					}
+					seen := make(map[string]bool)
+					for _, target := range targets {
+						if seen[target.EndpointKey()] {
+							t.Fatalf("duplicate endpoint in %+v", targets)
+						}
+						seen[target.EndpointKey()] = true
+					}
+					if targets[0].EndpointKey() != "A" {
+						t.Fatalf("preferred tier bypassed: %+v", targets)
+					}
+				}
+			}
+			if targets := b.GetUniqueConnections(3); len(targets) != 3 {
+				t.Fatalf("GetUniqueConnections returned %d, want 3", len(targets))
+			}
+		})
+	}
+}
 
 // TestBalancerDefaultCommonScore_FavorsHigherScore verifies that BalancingCommonScore
 // selects the connection with the higher common evaluation score.

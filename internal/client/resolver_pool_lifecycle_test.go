@@ -70,7 +70,7 @@ func TestResolverPool_AuthoritativeLifecycle_FiveStates(t *testing.T) {
 	}
 
 	// 4. Cancellation of initial check returns to Untested
-	pool.CancelChecking(conn1.Key)
+	pool.CancelChecking(candidateSnapshotForTest(pool, conn1.Key))
 	stCancelled, _ := pool.CandidateState(conn1.Key)
 	if stCancelled != StateUntested {
 		t.Fatalf("expected cancelled initial check to return to StateUntested, got %v", stCancelled)
@@ -81,7 +81,7 @@ func TestResolverPool_AuthoritativeLifecycle_FiveStates(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected to re-acquire conn1 for checking")
 	}
-	pool.CommitCandidateOutcome(conn1.Key, false, 0, 0, 0, 0)
+	pool.CommitCandidateOutcome(candidateSnapshotForTest(pool, conn1.Key), false, 0, 0, 0, 0)
 	stRejected, _ := pool.CandidateState(conn1.Key)
 	if stRejected != StateRejected {
 		t.Fatalf("expected failed check to lead to StateRejected, got %v", stRejected)
@@ -105,7 +105,7 @@ func TestResolverPool_AuthoritativeLifecycle_FiveStates(t *testing.T) {
 	}
 
 	// 7. Successful check leads to StateActive (within capacity)
-	pool.CommitCandidateOutcome(conn1.Key, true, 1200, 1200, 1200, 50*time.Millisecond)
+	pool.CommitCandidateOutcome(candidateSnapshotForTest(pool, conn1.Key), true, 1200, 1200, 1200, 50*time.Millisecond)
 	stActive, _ := pool.CandidateState(conn1.Key)
 	if stActive != StateActive {
 		t.Fatalf("expected successful qualification to lead to StateActive, got %v", stActive)
@@ -123,7 +123,7 @@ func TestResolverPool_AuthoritativeLifecycle_FiveStates(t *testing.T) {
 
 	// 8. Add second connection and make it Active as well (capacity=2)
 	pool.AcquireCandidateForChecking(conn2.Key)
-	pool.CommitCandidateOutcome(conn2.Key, true, 1200, 1200, 1200, 40*time.Millisecond)
+	pool.CommitCandidateOutcome(candidateSnapshotForTest(pool, conn2.Key), true, 1200, 1200, 1200, 40*time.Millisecond)
 	if pool.ActiveCount() != 2 {
 		t.Fatalf("expected ActiveCount=2, got %d", pool.ActiveCount())
 	}
@@ -139,7 +139,7 @@ func TestResolverPool_AuthoritativeLifecycle_FiveStates(t *testing.T) {
 	pool.AddConnection(conn3)
 	pool.AcquireCandidateForChecking(conn3.Key)
 	// conn3 qualifies but has worse latency (100ms vs 40ms/50ms), pool is full -> Standby
-	pool.CommitCandidateOutcome(conn3.Key, true, 1200, 1200, 1200, 100*time.Millisecond)
+	pool.CommitCandidateOutcome(candidateSnapshotForTest(pool, conn3.Key), true, 1200, 1200, 1200, 100*time.Millisecond)
 	st3, _ := pool.CandidateState(conn3.Key)
 	if st3 != StateStandby {
 		t.Fatalf("expected conn3 to become StateStandby when pool full, got %v", st3)
@@ -164,7 +164,7 @@ func TestResolverPool_AuthoritativeLifecycle_FiveStates(t *testing.T) {
 	}
 
 	// 11. Cancellation of Standby recheck restores Standby if still session compatible
-	pool.CancelChecking(conn3.Key)
+	pool.CancelChecking(candidateSnapshotForTest(pool, conn3.Key))
 	st3Restored, _ := pool.CandidateState(conn3.Key)
 	if st3Restored != StateStandby {
 		t.Fatalf("expected cancelled standby recheck to restore StateStandby, got %v", st3Restored)
@@ -173,7 +173,7 @@ func TestResolverPool_AuthoritativeLifecycle_FiveStates(t *testing.T) {
 	// 12. If Session MTU changes and candidate is no longer compatible, standby is not restored on cancel
 	pool.AcquireCandidateForChecking(conn3.Key)
 	pool.SetSessionMTU(1500, 1500) // conn3 has downloadMTU 1200 < 1500
-	pool.CancelChecking(conn3.Key)
+	pool.CancelChecking(candidateSnapshotForTest(pool, conn3.Key))
 	st3Incompat, _ := pool.CandidateState(conn3.Key)
 	if st3Incompat == StateStandby {
 		t.Fatalf("incompatible candidate must not restore StateStandby on cancel; got %v", st3Incompat)
@@ -203,10 +203,10 @@ func TestResolverPool_LateCompletion_Ignored(t *testing.T) {
 
 	// Acquire and then cancel
 	pool.AcquireCandidateForChecking(conn.Key)
-	pool.CancelChecking(conn.Key)
+	pool.CancelChecking(candidateSnapshotForTest(pool, conn.Key))
 
 	// Late completion arriving for cancelled candidate must fail
-	ok := pool.CommitCandidateOutcome(conn.Key, true, 1200, 1200, 1200, 50*time.Millisecond)
+	ok := pool.CommitCandidateOutcome(candidateSnapshotForTest(pool, conn.Key), true, 1200, 1200, 1200, 50*time.Millisecond)
 	if ok {
 		t.Fatalf("expected late CommitCandidateOutcome to be rejected")
 	}
@@ -253,14 +253,14 @@ func TestResolverPool_DisplacementAndInvalidation(t *testing.T) {
 
 	// Admit conn1 to active
 	pool.AcquireCandidateForChecking(conn1.Key)
-	pool.CommitCandidateOutcome(conn1.Key, true, 1200, 1200, 1200, 100*time.Millisecond)
+	pool.CommitCandidateOutcome(candidateSnapshotForTest(pool, conn1.Key), true, 1200, 1200, 1200, 100*time.Millisecond)
 	if pool.ActiveCount() != 1 {
 		t.Fatalf("expected 1 active pairing")
 	}
 
 	// Admit conn2 which is much faster (20ms vs 100ms) -> displaces conn1
 	pool.AcquireCandidateForChecking(conn2.Key)
-	pool.CommitCandidateOutcome(conn2.Key, true, 1200, 1200, 1200, 20*time.Millisecond)
+	pool.CommitCandidateOutcome(candidateSnapshotForTest(pool, conn2.Key), true, 1200, 1200, 1200, 20*time.Millisecond)
 
 	st1, _ := pool.CandidateState(conn1.Key)
 	if st1 != StateStandby {
@@ -287,9 +287,7 @@ func TestResolverPool_DisplacementAndInvalidation(t *testing.T) {
 }
 
 // TestResolverPool_FinalizeFastStart_StandbyDerivedViewSessionMTU verifies that
-// when FinalizeFastStart trims active candidates to standby, StandbyEligible is
-// strictly derived from Session MTU compatibility via syncConnectionFlagsLocked,
-// rather than being directly set to true.
+// finalization rejects incompatible paths and never exposes them as Standby.
 func TestResolverPool_FinalizeFastStart_StandbyDerivedViewSessionMTU(t *testing.T) {
 	pool := NewResolverPool(4, nil)
 	pool.SetSessionMTU(1000, 1000)
@@ -298,10 +296,12 @@ func TestResolverPool_FinalizeFastStart_StandbyDerivedViewSessionMTU(t *testing.
 	conn2 := &Connection{Key: "c2", Resolver: "8.8.8.8", ResolverPort: 53, ResolverLabel: "8.8.8.8:53", Domain: "d.com", UploadMTUBytes: 500, DownloadMTUBytes: 500} // Below Session MTU!
 
 	pool.SetConnections([]*Connection{conn1, conn2})
+	pool.SetConnectionMTU("c1", 1200, 1200, 1200)
 	pool.SetConnectionValidity("c1", true)
+	pool.SetConnectionMTU("c2", 500, 500, 500)
 	pool.SetConnectionValidity("c2", true)
 
-	// Target 1 endpoint -> c2 is trimmed
+	// Reconciliation excludes c2 because it cannot carry the Session.
 	pool.FinalizeFastStart(nil, 1)
 
 	c2, ok := pool.GetConnectionByKey("c2")
@@ -309,12 +309,11 @@ func TestResolverPool_FinalizeFastStart_StandbyDerivedViewSessionMTU(t *testing.
 		t.Fatal("c2 not found")
 	}
 	st2, _ := pool.CandidateState("c2")
-	if st2 != StateStandby {
-		t.Fatalf("expected c2 to be StateStandby, got %v", st2)
+	if st2 != StateRejected {
+		t.Fatalf("expected c2 to be StateRejected, got %v", st2)
 	}
 	// Because c2 (500 MTU) is below Session MTU (1000), StandbyEligible MUST be false!
 	if c2.StandbyEligible {
 		t.Fatalf("expected StandbyEligible=false for candidate below Session MTU, got true")
 	}
 }
-

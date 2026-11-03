@@ -12,6 +12,7 @@ package client
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -50,14 +51,18 @@ func NewBackgroundQueryLimiter(rate float64, burst int) *BackgroundQueryLimiter 
 }
 
 // Acquire waits until a query token is available or until ctx is cancelled.
-// It returns ctx.Err() if cancelled before a token can be acquired.
+// It wraps ctx.Err() if cancelled before a token can be acquired.
+// A nil context is treated as context.Background().
 func (l *BackgroundQueryLimiter) Acquire(ctx context.Context) error {
 	if l == nil {
 		return nil
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	for {
-		if ctx != nil && ctx.Err() != nil {
-			return ctx.Err()
+		if ctx.Err() != nil {
+			return fmt.Errorf("acquire background query token: %w", ctx.Err())
 		}
 
 		waitTime := l.takeTokenOrWait()
@@ -67,7 +72,7 @@ func (l *BackgroundQueryLimiter) Acquire(ctx context.Context) error {
 
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return fmt.Errorf("acquire background query token: %w", ctx.Err())
 		case <-time.After(waitTime):
 		}
 	}
@@ -80,7 +85,7 @@ func (l *BackgroundQueryLimiter) AcquireN(ctx context.Context, n int) error {
 	}
 	for i := 0; i < n; i++ {
 		if err := l.Acquire(ctx); err != nil {
-			return err
+			return fmt.Errorf("acquire background query token %d of %d: %w", i+1, n, err)
 		}
 	}
 	return nil
@@ -153,4 +158,16 @@ func (l *BackgroundQueryLimiter) refillLocked() {
 	if l.tokens > l.capacity {
 		l.tokens = l.capacity
 	}
+}
+
+// burstWaitAllowance bounds a probe's scheduling allowance separately from its
+// response timeout. Include the health batch concurrency so competing probes
+// can all send their configured samples through the shared token budget.
+func (l *BackgroundQueryLimiter) burstWaitAllowance(queries, concurrency int) time.Duration {
+	if l == nil {
+		return 0
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return time.Duration(float64(queries*concurrency) / l.rate * float64(time.Second))
 }

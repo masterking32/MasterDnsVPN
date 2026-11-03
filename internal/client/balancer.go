@@ -38,6 +38,7 @@ const (
 )
 
 type Connection struct {
+	checkGeneration   uint64 // Pool-issued identity of a qualification attempt.
 	Domain            string
 	Resolver          string
 	ResolverPort      int
@@ -91,6 +92,7 @@ type balancerPendingShard struct {
 type Balancer struct {
 	pool             *ResolverPool
 	strategy         int
+	strategyMu       sync.RWMutex // Holds one strategy stable across an entire selection.
 	rrCounter        atomic.Uint64
 	totalPacketsSent atomic.Uint64
 	rngState         atomic.Uint64
@@ -115,6 +117,11 @@ type Balancer struct {
 }
 
 type connectionStats struct {
+	observationMu sync.Mutex
+	observations  CandidateObservationInput
+	liveRTTSum    time.Duration
+	liveRTTCount  uint64
+
 	sent            atomic.Uint64
 	acked           atomic.Uint64
 	lost            atomic.Uint64
@@ -162,6 +169,8 @@ func (b *Balancer) Strategy() int {
 	if b == nil {
 		return BalancingCommonScore
 	}
+	b.strategyMu.RLock()
+	defer b.strategyMu.RUnlock()
 	return b.strategy
 }
 
@@ -169,9 +178,9 @@ func (b *Balancer) SetStrategy(strategy int) {
 	if b == nil {
 		return
 	}
-	b.mu.Lock()
+	b.strategyMu.Lock()
 	b.strategy = strategy
-	b.mu.Unlock()
+	b.strategyMu.Unlock()
 }
 
 func (b *Balancer) SetMaxActiveResolvers(maxActive int) {
@@ -449,11 +458,11 @@ func (b *Balancer) beginConnectionRecheck(key string) bool {
 }
 
 // ReleaseRecheck delegates candidate lease release to the underlying ResolverPool.
-func (b *Balancer) ReleaseRecheck(key string, wasStandby bool) {
+func (b *Balancer) ReleaseRecheck(conn Connection) {
 	if b == nil || b.pool == nil {
 		return
 	}
-	b.pool.ReleaseRecheck(key, wasStandby)
+	b.pool.ReleaseRecheck(conn)
 }
 
 // completeConnectionRecheck delegates candidate outcome commit to the underlying ResolverPool.
@@ -476,6 +485,7 @@ type ResolverStatsSnapshot struct {
 	IsValid             bool
 	StandbyEligible     bool
 	BurstThroughputKBps float64
+	Evaluation          *ResolverEvaluationSnapshot
 }
 
 // GetStatsSnapshot thread-safely exports current metrics for all loaded resolvers.
@@ -522,6 +532,7 @@ func (b *Balancer) ReportSend(serverKey string) {
 	b.totalPacketsSent.Add(1)
 	if stats := b.statsForKey(serverKey); stats != nil {
 		stats.sent.Add(1)
+		stats.observeSend(time.Now())
 		stats.applyHalfLife()
 	}
 }
@@ -541,6 +552,7 @@ func (b *Balancer) ReportSuccess(serverKey string, rtt time.Duration) {
 	}
 
 	stats.acked.Add(1)
+	stats.observeSuccess(rtt, time.Now())
 	if rtt > 0 {
 		stats.rttMicrosSum.Add(uint64(rtt / time.Microsecond))
 		stats.rttCount.Add(1)
@@ -554,6 +566,7 @@ func (b *Balancer) ReportTimeout(serverKey string, now time.Time, window time.Du
 		return false
 	}
 	stats.lost.Add(1)
+	stats.observeTimeout(now, false)
 	stats.applyHalfLife()
 
 	totalTimedOut, totalSent := stats.recordWindowTimeout(now, window)
@@ -739,6 +752,7 @@ func (b *Balancer) RetractTimeout(serverKey string, now time.Time, window time.D
 		stats.lost.Add(^uint64(0)) // Atomic decrement
 	}
 
+	stats.observeTimeout(now, true)
 	stats.applyHalfLife()
 	return stats.retractWindowTimeout(now, window)
 }
@@ -950,9 +964,11 @@ func (b *Balancer) ResetServerStats(serverKey string) {
 	stats.lost.Store(0)
 	stats.rttMicrosSum.Store(0)
 	stats.rttCount.Store(0)
+	stats.resetObservations()
 }
 
 func (stats *connectionStats) seedConservative() {
+	stats.resetObservations()
 	stats.sent.Store(10)
 	stats.acked.Store(8)
 	stats.lost.Store(0)
@@ -961,6 +977,15 @@ func (stats *connectionStats) seedConservative() {
 }
 
 func (stats *connectionStats) seedBurst(sentCount int, ackedCount int, avgRTT time.Duration) {
+	stats.resetObservations()
+	stats.observationMu.Lock()
+	stats.observations.QualificationSent = uint64(max(0, sentCount))
+	stats.observations.QualificationLost = uint64(max(0, sentCount-ackedCount))
+	if ackedCount > 0 {
+		stats.observations.QualificationRTT = avgRTT
+	}
+	stats.observations.QualificationAt = time.Now()
+	stats.observationMu.Unlock()
 	if sentCount < 1 {
 		sentCount = 1
 	}
@@ -988,6 +1013,8 @@ func (b *Balancer) GetBestConnection() (Connection, bool) {
 	if b == nil || b.pool == nil {
 		return Connection{}, false
 	}
+	b.strategyMu.RLock()
+	defer b.strategyMu.RUnlock()
 	active := b.pool.ActiveResolvers()
 	if len(active) == 0 {
 		return Connection{}, false
@@ -1023,6 +1050,8 @@ func (b *Balancer) GetBestConnectionExcluding(excludeKey string) (Connection, bo
 	if b == nil || b.pool == nil {
 		return Connection{}, false
 	}
+	b.strategyMu.RLock()
+	defer b.strategyMu.RUnlock()
 	active := b.pool.ActiveResolvers()
 	if len(active) == 0 {
 		return Connection{}, false
@@ -1071,6 +1100,8 @@ func (b *Balancer) SelectTargets(packetType uint8, streamID uint16, requiredCoun
 	if b == nil || b.pool == nil {
 		return nil, ErrNoValidConnections
 	}
+	b.strategyMu.RLock()
+	defer b.strategyMu.RUnlock()
 	active := b.pool.ActiveResolvers()
 
 	// 1. Normalize count: 1 <= requiredCount <= len(active)
@@ -1187,7 +1218,7 @@ func (b *Balancer) selectPreferredConnectionForStreamLocked(active []Connection,
 	var ok bool
 
 	if state.PreferredResolverKey == "" {
-		// New stream: Use "Top 10 Random" to distribute load
+		// New Stream: select its initial preferred Path under the chosen strategy.
 		replacement, ok = b.selectInitialPreferredConnectionLocked(active)
 	} else {
 		// Recovery from dead resolver: Use absolute best alternate
@@ -1216,6 +1247,20 @@ func (b *Balancer) validPreferredConnectionLocked(active []Connection, state *ba
 }
 
 func (b *Balancer) selectAlternateConnectionLocked(active []Connection, excludeKey string) (Connection, bool) {
+	// Prefer another Resolver Endpoint before trying a sibling Tunnel Domain
+	// on the same endpoint. Retain that sibling as a fallback when necessary.
+	if excluded, ok := b.pool.GetConnectionByKey(excludeKey); ok {
+		otherEndpoints := make([]Connection, 0, len(active))
+		for _, conn := range active {
+			if conn.EndpointKey() != excluded.EndpointKey() {
+				otherEndpoints = append(otherEndpoints, conn)
+			}
+		}
+		if len(otherEndpoints) > 0 {
+			return b.getBestConnectionExcludingLocked(otherEndpoints, excludeKey)
+		}
+	}
+
 	if excludeKey != "" {
 		if replacement, ok := b.getBestConnectionExcludingLocked(active, excludeKey); ok {
 			return replacement, true
@@ -1653,6 +1698,8 @@ func (b *Balancer) GetUniqueConnections(requiredCount int) []Connection {
 	if b == nil || b.pool == nil {
 		return nil
 	}
+	b.strategyMu.RLock()
+	defer b.strategyMu.RUnlock()
 	active := b.pool.ActiveResolvers()
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -1667,7 +1714,7 @@ func (b *Balancer) getUniqueConnectionsLocked(active []Connection, requiredCount
 
 	switch b.strategy {
 	case BalancingCommonScore:
-		return b.selectCommonScoreLocked(active, requiredCount)
+		return b.selectCommonScoreLocked(active, count)
 	case BalancingRandom:
 		return b.selectRandomLocked(active, count)
 	default:
@@ -1675,7 +1722,33 @@ func (b *Balancer) getUniqueConnectionsLocked(active []Connection, requiredCount
 			if len(pool) == 0 {
 				return b.selectRoundRobinLocked(active, count)
 			}
-			return b.limitConnectionPoolLocked(pool, count, pick)
+			selected := b.limitConnectionPoolLocked(pool, count, pick)
+			remaining := active
+			for len(selected) < count {
+				used := make(map[string]bool, len(selected))
+				for _, conn := range selected {
+					used[conn.EndpointKey()] = true
+				}
+				candidates := make([]Connection, 0, len(remaining))
+				for _, conn := range remaining {
+					if !used[conn.EndpointKey()] {
+						candidates = append(candidates, conn)
+					}
+				}
+				if len(candidates) == 0 {
+					break
+				}
+				// Reapply the chosen strategy after removing entire endpoints,
+				// so a tier with several domains cannot suppress extra copies.
+				pool, pick, _ = b.strategyCandidatePoolLocked(candidates, "")
+				if len(pool) == 0 {
+					selected = append(selected, b.selectRoundRobinLocked(candidates, count-len(selected))...)
+					break
+				}
+				selected = append(selected, b.limitConnectionPoolLocked(pool, count-len(selected), pick)...)
+				remaining = candidates
+			}
+			return selected
 		}
 		scorer, hasSignal := b.strategyScorerLocked(active)
 		if scorer == nil {
@@ -2374,4 +2447,62 @@ func xorshift64(v uint64) uint64 {
 	v ^= v >> 7
 	v ^= v << 17
 	return v
+}
+
+// Evaluation observations exclude seeded counters from live traffic. Aggregate
+// counters above remain available to the explicit legacy routing strategies.
+func (s *connectionStats) resetObservations() {
+	s.observationMu.Lock()
+	defer s.observationMu.Unlock()
+	s.observations = CandidateObservationInput{}
+	s.liveRTTSum, s.liveRTTCount = 0, 0
+}
+
+func (s *connectionStats) observeSend(now time.Time) {
+	s.observationMu.Lock()
+	defer s.observationMu.Unlock()
+	s.observations.LiveSentCount++
+	if s.observations.LiveSentCount > connectionStatsHalfLifeThreshold {
+		s.observations.LiveSentCount /= 2
+		s.observations.LiveLostCount /= 2
+	}
+	s.observations.LiveLossAt = now
+}
+
+func (s *connectionStats) observeSuccess(rtt time.Duration, now time.Time) {
+	s.observationMu.Lock()
+	defer s.observationMu.Unlock()
+	if rtt > 0 {
+		s.liveRTTSum += rtt
+		s.liveRTTCount++
+		if s.liveRTTCount > connectionStatsHalfLifeThreshold {
+			s.liveRTTSum /= 2
+			s.liveRTTCount /= 2
+		}
+		s.observations.LiveRTT = s.liveRTTSum / time.Duration(s.liveRTTCount)
+		s.observations.LiveRTTAt = now
+	}
+}
+
+func (s *connectionStats) observeTimeout(now time.Time, retract bool) {
+	s.observationMu.Lock()
+	defer s.observationMu.Unlock()
+	if retract {
+		if s.observations.LiveLostCount > 0 {
+			s.observations.LiveLostCount--
+		}
+	} else {
+		s.observations.LiveLostCount++
+	}
+	s.observations.LiveLossAt = now
+}
+
+func (s *connectionStats) evaluationObservations() CandidateObservationInput {
+	s.observationMu.Lock()
+	defer s.observationMu.Unlock()
+	obs := s.observations
+	if obs.LiveSentCount > 0 {
+		obs.LiveLossRatio = float64(obs.LiveLostCount) / float64(obs.LiveSentCount)
+	}
+	return obs
 }

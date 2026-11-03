@@ -120,7 +120,7 @@ func TestResolverPool_AdmissionSeedsBeforeDisplacement(t *testing.T) {
 		pool.SetConnectionValidity(key, true)
 	}
 	results[2].BurstResult.AverageRTT = time.Millisecond
-	pool.AdmitStartupBatch(results[2:], []Connection{results[2].Connection})
+	admitPoolTestBatch(pool, results[2:], []Connection{results[2].Connection})
 	winner, _ := pool.GetConnectionByKey("winner")
 	if !winner.IsValid || winner.StandbyEligible || pool.ActiveCount() != 2 {
 		t.Fatalf("winner not admitted into full pool: %+v (active=%d)", winner, pool.ActiveCount())

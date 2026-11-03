@@ -1060,13 +1060,13 @@ func TestEmpirical_MTU_StrictKeyTrimmingMultiDomain(t *testing.T) {
 func TestEmpirical_RecheckRevokesStandby_NoRaceWithOptimize(t *testing.T) {
 	domain := "v.example.com"
 
-	// Create a closed UDP listener so probe times out / fails immediately
+	// A bound blackhole produces a completed network timeout, independent of cancellation.
 	deadConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
 	if err != nil {
 		t.Fatalf("failed to listen UDP: %v", err)
 	}
 	deadPort := deadConn.LocalAddr().(*net.UDPAddr).Port
-	deadConn.Close() // closed: will fail health probe
+	defer deadConn.Close()
 
 	cfg := config.DefaultClientConfig()
 	cfg.Domains = []string{domain}
@@ -1080,6 +1080,8 @@ func TestEmpirical_RecheckRevokesStandby_NoRaceWithOptimize(t *testing.T) {
 	cfg.MTUTestRetries = 1
 
 	client := createTestFastStartClient(t, cfg)
+	client.syncedUploadMTU, client.syncedDownloadMTU = 100, 500
+	client.pool.SetSessionMTU(100, 500)
 	balancer := client.balancer
 	balancer.SetMaxActiveResolvers(2)
 
@@ -1118,39 +1120,26 @@ func TestEmpirical_RecheckRevokesStandby_NoRaceWithOptimize(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
-	stressCtx, stressCancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	stressCtx, stressCancel := context.WithCancel(context.Background())
 	defer stressCancel()
 
 	var illegalPromotions atomic.Int64
 	var optimizeCalls atomic.Int64
 
-	// Trigger recheck in background: immediately revokes StandbyEligible and probes closed UDP port
-	recheckStarted := make(chan struct{})
-	var recheckWg sync.WaitGroup
-	recheckWg.Add(1)
-	go func() {
-		defer recheckWg.Done()
-		close(recheckStarted)
-		for i := 0; i < 5; i++ {
-			if stressCtx.Err() != nil {
-				return
-			}
-			client.recheckInactiveResolver(stressCtx, targetConn)
-			time.Sleep(10 * time.Millisecond)
-		}
-	}()
-
-	<-recheckStarted
-	// Wait until recheck has revoked standby eligibility before in-flight network probe
-	for i := 0; i < 100; i++ {
-		if !balancer.IsConnectionStandbyEligible(deadKey) {
-			break
-		}
-		time.Sleep(1 * time.Millisecond)
+	// Acquire synchronously so optimization cannot win a scheduling race before
+	// the physical probe starts. Only a completed failure must revoke standby;
+	// cancellation is intentionally tested separately and may restore it.
+	targetConn, ok = client.pool.AcquireCandidateForChecking(deadKey)
+	if !ok {
+		t.Fatal("could not acquire standby candidate")
 	}
-
-	if balancer.IsConnectionStandbyEligible(deadKey) {
-		t.Fatal("expected standby eligibility to be revoked by recheck")
+	probeCtx, cancelProbe := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelProbe()
+	recheckDone := make(chan struct{})
+	go func() { defer close(recheckDone); client.recheckInactiveResolver(probeCtx, targetConn) }()
+	deadConn.SetReadDeadline(time.Now().Add(time.Second))
+	if _, _, err := deadConn.ReadFromUDP(make([]byte, 4096)); err != nil {
+		t.Fatalf("wait for real probe: %v", err)
 	}
 
 	// Concurrently invoke OptimizeActivePool at high frequency from 6 workers while probe is in flight
@@ -1176,8 +1165,8 @@ func TestEmpirical_RecheckRevokesStandby_NoRaceWithOptimize(t *testing.T) {
 		}()
 	}
 
-	<-stressCtx.Done()
-	recheckWg.Wait()
+	<-recheckDone
+	stressCancel()
 	wg.Wait()
 
 	t.Logf("Completed %d concurrent OptimizeActivePool calls during recheck", optimizeCalls.Load())

@@ -62,7 +62,16 @@ type CandidateObservationInput struct {
 	LiveLossRatio       float64
 	LiveSentCount       uint64
 	LiveLostCount       uint64
-	ObservedAt          time.Time
+	ObservedAt          time.Time // Compatibility timestamp for direct callers.
+	MTUObservedAt       time.Time
+	MTURTTObservedAt    time.Time
+	BurstObservedAt     time.Time
+	QualificationRTT    time.Duration
+	QualificationSent   uint64
+	QualificationLost   uint64
+	QualificationAt     time.Time
+	LiveRTTAt           time.Time
+	LiveLossAt          time.Time
 }
 
 // ResolverEvaluationSnapshot encapsulates an immutable standardized explanation of candidate quality.
@@ -80,6 +89,9 @@ type ResolverEvaluationSnapshot struct {
 	Tier                 string
 	ColoredBadge         string
 	ObservedAt           time.Time
+	RTTObservedAt        time.Time
+	LossObservedAt       time.Time
+	ThroughputObservedAt time.Time
 	SampleCount          uint64
 	LostCount            uint64
 }
@@ -95,12 +107,22 @@ func EvaluateCandidateObservation(obs CandidateObservationInput) ResolverEvaluat
 	// 1. Select RTT and source
 	var rtt time.Duration
 	var rttSource MeasurementSource
+	rttAt := obs.ObservedAt
 	if obs.LiveSentCount > 0 && obs.LiveRTT > 0 {
 		rtt = obs.LiveRTT
 		rttSource = SourceLiveTraffic
+		rttAt = obs.LiveRTTAt
+	} else if obs.QualificationRTT > 0 {
+		rtt = obs.QualificationRTT
+		rttSource = SourceQualification
+		rttAt = obs.QualificationAt
 	} else if obs.MTUResolveTime > 0 {
 		rtt = obs.MTUResolveTime
 		rttSource = SourceQualification
+		rttAt = obs.MTURTTObservedAt
+		if rttAt.IsZero() {
+			rttAt = obs.MTUObservedAt
+		}
 	} else {
 		rtt = 0
 		rttSource = SourceUnknown
@@ -109,16 +131,27 @@ func EvaluateCandidateObservation(obs CandidateObservationInput) ResolverEvaluat
 	// 2. Select LossRatio and source
 	var lossRatio float64
 	var lossSource MeasurementSource
-	if obs.LiveSentCount > 0 {
+	lossAt := obs.ObservedAt
+	sampleCount, lostCount := obs.LiveSentCount, obs.LiveLostCount
+	// Match the qualification sample size before replacing its loss evidence.
+	// This uses the existing probe count rather than adding a tuning threshold;
+	// live-only paths can still score immediately when no qualification exists.
+	if obs.LiveSentCount > 0 && (obs.QualificationSent == 0 || obs.LiveSentCount >= obs.QualificationSent) {
 		lossRatio = obs.LiveLossRatio
 		lossSource = SourceLiveTraffic
+		lossAt = obs.LiveLossAt
 		if obs.LiveLostCount >= obs.LiveSentCount {
 			lossRatio = 1.0
 		}
-	} else {
-		lossRatio = 0.0
+	} else if obs.QualificationSent > 0 {
+		sampleCount, lostCount = obs.QualificationSent, obs.QualificationLost
+		lossRatio = float64(lostCount) / float64(sampleCount)
 		lossSource = SourceQualification
+		lossAt = obs.QualificationAt
+	} else {
+		lossSource = SourceUnknown
 	}
+
 	if math.IsNaN(lossRatio) || lossRatio > 1.0 {
 		lossRatio = 1.0
 	} else if lossRatio < 0.0 {
@@ -129,12 +162,14 @@ func EvaluateCandidateObservation(obs CandidateObservationInput) ResolverEvaluat
 	var speedKBps float64
 	var isMeasured bool
 	var speedSource MeasurementSource
+	speedAt := obs.ObservedAt
 
 	burst := obs.BurstThroughputKBps
 	if !math.IsNaN(burst) && !math.IsInf(burst, 0) && burst > 0.0 {
 		speedKBps = burst
 		isMeasured = true
 		speedSource = SourceBurstProbe
+		speedAt = obs.BurstObservedAt
 	} else if rtt > 0 {
 		rttSec := rtt.Seconds()
 		if rttSec > 0.0 {
@@ -142,6 +177,10 @@ func EvaluateCandidateObservation(obs CandidateObservationInput) ResolverEvaluat
 		}
 		isMeasured = false
 		speedSource = SourceEstimate
+		speedAt = rttAt
+		if !obs.MTUObservedAt.IsZero() && (speedAt.IsZero() || obs.MTUObservedAt.Before(speedAt)) {
+			speedAt = obs.MTUObservedAt
+		}
 	} else {
 		speedKBps = 0.0
 		isMeasured = false
@@ -188,9 +227,12 @@ func EvaluateCandidateObservation(obs CandidateObservationInput) ResolverEvaluat
 		CompositeScore:       compositeScore,
 		Tier:                 tier,
 		ColoredBadge:         badge,
-		ObservedAt:           obs.ObservedAt,
-		SampleCount:          obs.LiveSentCount,
-		LostCount:            obs.LiveLostCount,
+		ObservedAt:           rttAt,
+		RTTObservedAt:        rttAt,
+		LossObservedAt:       lossAt,
+		ThroughputObservedAt: speedAt,
+		SampleCount:          sampleCount,
+		LostCount:            lostCount,
 	}
 }
 

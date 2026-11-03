@@ -13,6 +13,26 @@ type observedBurstConfig struct {
 	timeout time.Duration
 }
 
+func TestDiscoveryEngine_NilContext(t *testing.T) {
+	for _, burst := range []bool{false, true} {
+		name := "mtu"
+		if burst {
+			name = "mtu-and-burst"
+		}
+		t.Run(name, func(t *testing.T) {
+			_, pool, cfg := createTestDiscoverySetup(2)
+			cfg.MicroBurstEnabled = burst
+			engine := NewDiscoveryEngine(cfg, NewFakeResolverProber(), pool, nil)
+			if err := engine.Run(nil); err != nil {
+				t.Fatalf("Run(nil): %v", err)
+			}
+			if pool.ActiveCount() != 2 || !pool.IsFirstPassComplete() {
+				t.Fatalf("nil-context discovery did not complete: %+v", pool.CoverageStats())
+			}
+		})
+	}
+}
+
 type configRecordingProber struct {
 	*FakeResolverProber
 	bursts chan observedBurstConfig

@@ -2,12 +2,37 @@ package client
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"masterdnsvpn-go/internal/config"
 	"masterdnsvpn-go/internal/logger"
 )
+
+func TestBackgroundQueryLimiter_NilContextAfterExhaustion(t *testing.T) {
+	limiter := NewBackgroundQueryLimiter(100, 1)
+	if !limiter.TryAcquire() {
+		t.Fatal("expected initial token")
+	}
+	// The first refill leaves the bucket exhausted; after the wait, a
+	// second refill supplies a token without depending on wall-clock timing.
+	now := limiter.lastRefill
+	refills := 0
+	limiter.nowFn = func() time.Time {
+		refills++
+		if refills > 1 {
+			return now.Add(time.Second)
+		}
+		return now
+	}
+	if err := limiter.Acquire(nil); err != nil {
+		t.Fatalf("Acquire(nil): %v", err)
+	}
+	if refills < 2 {
+		t.Fatal("expected Acquire to wait for a refill")
+	}
+}
 
 func TestDiscoveryCoverage_BackgroundQueryLimiter(t *testing.T) {
 	// 1. Token bucket basic mechanics
@@ -31,7 +56,7 @@ func TestDiscoveryCoverage_BackgroundQueryLimiter(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	err := limiter.Acquire(ctx)
-	if err == nil || err != context.Canceled {
+	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
 
@@ -59,14 +84,14 @@ func TestDiscoveryCoverage_BackgroundQueryLimiter(t *testing.T) {
 	// 4. AcquireN cancellation
 	ctxN, cancelN := context.WithCancel(context.Background())
 	cancelN()
-	if err := limiter.AcquireN(ctxN, 3); err != context.Canceled {
+	if err := limiter.AcquireN(ctxN, 3); !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled from AcquireN, got %v", err)
 	}
 }
 
 func TestDiscoveryCoverage_UntestedPriorityWhenWorkingSetSufficient(t *testing.T) {
 	log := logger.New("TestLogger", "error")
-	pool := NewResolverPool(4, log)
+	pool := NewResolverPool(2, log)
 	pool.SetTargetEndpoints(2)
 	pool.SetSessionMTU(100, 500)
 
@@ -81,9 +106,12 @@ func TestDiscoveryCoverage_UntestedPriorityWhenWorkingSetSufficient(t *testing.T
 	// Qualify active-1 and active-2
 	pool.ApplyMTUProbeResult("active-1", 100, 50, 500, 10*time.Millisecond, true)
 	pool.ApplyMTUProbeResult("active-2", 100, 50, 500, 15*time.Millisecond, true)
-	// Qualify standby-1 (will be standby because target quota is 2)
+	// Qualify standby-1; the Active Path capacity is already full.
 	pool.ApplyMTUProbeResult("standby-1", 100, 50, 500, 20*time.Millisecond, true)
 
+	if state, _ := pool.CandidateState("standby-1"); state != StateStandby {
+		t.Fatalf("precondition: standby-1 is %v, want Standby", state)
+	}
 	// Working set is sufficient (2 active distinct endpoints >= target 2)
 	now := time.Now()
 	leased, ok := pool.AcquireNextInactiveForRecheck(now, 0)
@@ -121,8 +149,7 @@ func TestDiscoveryCoverage_FairSchedulingWhenWorkingSetInsufficient(t *testing.T
 		}
 		leasedKeys = append(leasedKeys, leased.Key)
 		// Release back so it can be leased again
-		wasStandby := (leased.Key == "standby-1")
-		pool.ReleaseRecheck(leased.Key, wasStandby)
+		pool.ReleaseRecheck(candidateSnapshotForTest(pool, leased.Key))
 	}
 
 	hasUntested := false
@@ -192,7 +219,7 @@ func TestDiscoveryCoverage_CappedBackoffAndReset(t *testing.T) {
 	pool.candidates[0].failStreak = 10
 	pool.mu.Unlock()
 
-	lastCheck := now.Add(11*time.Second).Add(21*time.Second)
+	lastCheck := now.Add(11 * time.Second).Add(21 * time.Second)
 	// 4 minutes: not eligible
 	if _, ok := pool.AcquireNextInactiveForRecheck(lastCheck.Add(4*time.Minute), minInterval); ok {
 		t.Fatal("expected backoff capped at 5 minutes (gave 4 minutes)")
@@ -236,7 +263,7 @@ func TestDiscoveryCoverage_CoverageStatsAndFirstPassCompletion(t *testing.T) {
 
 	// Step 0: all untested
 	stats := pool.CoverageStats()
-	if stats.ConfiguredPairings != 4 || stats.CompletedInitialAttempts != 0 || stats.RemainingUntested != 4 || stats.IsFirstPassComplete {
+	if stats.ConfiguredPaths != 4 || stats.CompletedInitialAttempts != 0 || stats.RemainingUntested != 4 || stats.IsFirstPassComplete {
 		t.Fatalf("unexpected initial stats: %+v", stats)
 	}
 
@@ -260,7 +287,7 @@ func TestDiscoveryCoverage_CoverageStatsAndFirstPassCompletion(t *testing.T) {
 	if !ok || (leased.Key != "c-3" && leased.Key != "c-4") {
 		t.Fatalf("expected c-3 or c-4 to be leased, got %+v", leased)
 	}
-	pool.ReleaseRecheck(leased.Key, false)
+	pool.ReleaseRecheck(candidateSnapshotForTest(pool, leased.Key))
 	stats = pool.CoverageStats()
 	if stats.CompletedInitialAttempts != 2 || stats.RemainingUntested != 2 {
 		t.Fatalf("stats after cancelled %s should not count as completed: %+v", leased.Key, stats)
@@ -306,8 +333,8 @@ func TestDiscoveryCoverage_RecheckInactiveSwitch(t *testing.T) {
 	if discCfg2.FastStart {
 		t.Fatal("expected FastStart=false when RecheckInactiveServersEnabled=false")
 	}
-	if discCfg2.TargetResolvers != 2 {
-		t.Fatalf("expected TargetResolvers=2 (all endpoints) when RecheckInactiveServersEnabled=false, got %d", discCfg2.TargetResolvers)
+	if discCfg2.TargetResolvers != 1 {
+		t.Fatalf("full scan must retain worker-bounded continuing coverage, got %d", discCfg2.TargetResolvers)
 	}
 }
 

@@ -42,7 +42,7 @@ func (p *UDPResolverProber) ProbeMTU(
 		return MTUProbeResult{
 			Success:      false,
 			RejectReason: "context cancelled",
-		}, ctx.Err()
+		}, fmt.Errorf("probe MTU for %s: %w", conn.Key, ctx.Err())
 	}
 
 	if maxUploadPayload <= 0 {
@@ -54,7 +54,7 @@ func (p *UDPResolverProber) ProbeMTU(
 		return MTUProbeResult{
 			Success:      false,
 			RejectReason: "context cancelled",
-		}, ctx.Err()
+		}, fmt.Errorf("probe MTU for %s: %w", conn.Key, ctx.Err())
 	}
 
 	switch reason {

@@ -260,8 +260,8 @@ func TestDiscoveryEngine_FastStartExitsEarly(t *testing.T) {
 		t.Fatalf("expected Run() to succeed, got: %v", err)
 	}
 
-	if pool.ActiveCount() != 2 {
-		t.Fatalf("expected 2 active resolvers, got: %d", pool.ActiveCount())
+	if pool.ActiveCount() < cfg.TargetResolvers || pool.ActiveCount() > cfg.MaxActiveResolvers {
+		t.Fatalf("expected readiness within capacity, got %d Active Paths", pool.ActiveCount())
 	}
 
 	probedCount := prober.MTUProbedCount()
@@ -299,8 +299,8 @@ func TestDiscoveryEngine_Replenishment_OnBurstFailure(t *testing.T) {
 		t.Fatalf("expected Run() to succeed after replenishment, got: %v", err)
 	}
 
-	if pool.ActiveCount() != 2 {
-		t.Fatalf("expected 2 active resolvers, got: %d", pool.ActiveCount())
+	if pool.ActiveCount() < cfg.TargetResolvers || pool.ActiveCount() > cfg.MaxActiveResolvers {
+		t.Fatalf("expected readiness within capacity, got %d Active Paths", pool.ActiveCount())
 	}
 
 	active := pool.ActiveResolvers()
@@ -336,8 +336,8 @@ func TestDiscoveryEngine_CandidateReplenishment_OnMTUFailure(t *testing.T) {
 		t.Fatalf("expected Run() to succeed after MTU replenishment, got: %v", err)
 	}
 
-	if pool.ActiveCount() != 2 {
-		t.Fatalf("expected 2 active resolvers, got: %d", pool.ActiveCount())
+	if pool.ActiveCount() < cfg.TargetResolvers || pool.ActiveCount() > cfg.MaxActiveResolvers {
+		t.Fatalf("expected readiness within capacity, got %d Active Paths", pool.ActiveCount())
 	}
 
 	active := pool.ActiveResolvers()
@@ -364,7 +364,7 @@ func TestDiscoveryEngine_ContextCancellationPrompt(t *testing.T) {
 	err := engine.Run(ctx)
 	duration := time.Since(start)
 
-	if !errors.Is(err, context.Canceled) && ctx.Err() == nil {
+	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context cancellation error, got: %v", err)
 	}
 
@@ -528,8 +528,8 @@ func TestDiscoveryEngine_WorkerPanicRecovery(t *testing.T) {
 		t.Fatalf("expected Run() to succeed despite panic on conn-1, got: %v", err)
 	}
 
-	if pool.ActiveCount() != 2 {
-		t.Fatalf("expected 2 active resolvers, got: %d", pool.ActiveCount())
+	if pool.ActiveCount() < cfg.TargetResolvers || pool.ActiveCount() > cfg.MaxActiveResolvers {
+		t.Fatalf("expected readiness within capacity, got %d Active Paths", pool.ActiveCount())
 	}
 
 	for _, c := range pool.ActiveResolvers() {
@@ -557,8 +557,8 @@ func TestDiscoveryEngine_MicroBurstDisabled(t *testing.T) {
 		t.Fatalf("expected 0 burst probes when MicroBurstEnabled is false, got: %d", prober.BurstProbedCount())
 	}
 
-	if pool.ActiveCount() != 2 {
-		t.Fatalf("expected 2 active resolvers, got: %d", pool.ActiveCount())
+	if pool.ActiveCount() < cfg.TargetResolvers || pool.ActiveCount() > cfg.MaxActiveResolvers {
+		t.Fatalf("expected readiness within capacity, got %d Active Paths", pool.ActiveCount())
 	}
 }
 

@@ -26,7 +26,7 @@ func TestResolverPool_Policy_UnifiedReplacementMargin(t *testing.T) {
 	}
 	pool.SetConnections([]*Connection{conn1})
 	pool.AcquireCandidateForChecking(conn1.Key)
-	pool.CommitCandidateOutcome(conn1.Key, true, 1000, 1000, 1000, 100*time.Millisecond)
+	pool.CommitCandidateOutcome(candidateSnapshotForTest(pool, conn1.Key), true, 1000, 1000, 1000, 100*time.Millisecond)
 
 	activeScore := pool.CalculateConnectionScore(conn1.Key)
 	if activeScore <= 0 {
@@ -47,7 +47,7 @@ func TestResolverPool_Policy_UnifiedReplacementMargin(t *testing.T) {
 	}
 	pool.AddConnection(connMarginal)
 	pool.AcquireCandidateForChecking(connMarginal.Key)
-	pool.CommitCandidateOutcome(connMarginal.Key, true, 1000, 1000, 1000, 85*time.Millisecond)
+	pool.CommitCandidateOutcome(candidateSnapshotForTest(pool, connMarginal.Key), true, 1000, 1000, 1000, 85*time.Millisecond)
 
 	stMarginal, _ := pool.CandidateState(connMarginal.Key)
 	if stMarginal != StateStandby {
@@ -78,7 +78,7 @@ func TestResolverPool_Policy_UnifiedReplacementMargin(t *testing.T) {
 	}
 	pool.AddConnection(connFaster)
 	pool.AcquireCandidateForChecking(connFaster.Key)
-	pool.CommitCandidateOutcome(connFaster.Key, true, 1000, 1000, 1000, 40*time.Millisecond)
+	pool.CommitCandidateOutcome(candidateSnapshotForTest(pool, connFaster.Key), true, 1000, 1000, 1000, 40*time.Millisecond)
 
 	stFaster, _ := pool.CandidateState(connFaster.Key)
 	if stFaster != StateActive {
@@ -121,9 +121,9 @@ func TestResolverPool_Policy_EndpointCoverageRepair(t *testing.T) {
 	}
 	pool.SetConnections([]*Connection{conn1A, conn1B})
 	pool.AcquireCandidateForChecking(conn1A.Key)
-	pool.CommitCandidateOutcome(conn1A.Key, true, 1200, 1200, 1200, 40*time.Millisecond)
+	pool.CommitCandidateOutcome(candidateSnapshotForTest(pool, conn1A.Key), true, 1200, 1200, 1200, 40*time.Millisecond)
 	pool.AcquireCandidateForChecking(conn1B.Key)
-	pool.CommitCandidateOutcome(conn1B.Key, true, 1200, 1200, 1200, 45*time.Millisecond)
+	pool.CommitCandidateOutcome(candidateSnapshotForTest(pool, conn1B.Key), true, 1200, 1200, 1200, 45*time.Millisecond)
 
 	if pool.ActiveCount() != 2 {
 		t.Fatalf("expected 2 active pairings")
@@ -143,7 +143,7 @@ func TestResolverPool_Policy_EndpointCoverageRepair(t *testing.T) {
 	}
 	pool.AddConnection(conn2)
 	pool.AcquireCandidateForChecking(conn2.Key)
-	pool.CommitCandidateOutcome(conn2.Key, true, 1200, 1200, 1200, 70*time.Millisecond)
+	pool.CommitCandidateOutcome(candidateSnapshotForTest(pool, conn2.Key), true, 1200, 1200, 1200, 70*time.Millisecond)
 
 	st2, _ := pool.CandidateState(conn2.Key)
 	if st2 != StateActive {
@@ -168,7 +168,7 @@ func TestResolverPool_Policy_EndpointCoverageRepair(t *testing.T) {
 	}
 	pool.AddConnection(conn3)
 	pool.AcquireCandidateForChecking(conn3.Key)
-	pool.CommitCandidateOutcome(conn3.Key, true, 1200, 1200, 1200, 1200*time.Millisecond)
+	pool.CommitCandidateOutcome(candidateSnapshotForTest(pool, conn3.Key), true, 1200, 1200, 1200, 1200*time.Millisecond)
 
 	st3, _ := pool.CandidateState(conn3.Key)
 	if st3 != StateStandby {
@@ -208,9 +208,9 @@ func TestResolverPool_EndpointCoverage_UnlabeledEndpointsFallback(t *testing.T) 
 
 	pool.SetConnections([]*Connection{c1, c2})
 	pool.AcquireCandidateForChecking(c1.Key)
-	pool.CommitCandidateOutcome(c1.Key, true, 1000, 1000, 1000, 50*time.Millisecond)
+	pool.CommitCandidateOutcome(candidateSnapshotForTest(pool, c1.Key), true, 1000, 1000, 1000, 50*time.Millisecond)
 	pool.AcquireCandidateForChecking(c2.Key)
-	pool.CommitCandidateOutcome(c2.Key, true, 1000, 1000, 1000, 60*time.Millisecond)
+	pool.CommitCandidateOutcome(candidateSnapshotForTest(pool, c2.Key), true, 1000, 1000, 1000, 60*time.Millisecond)
 
 	if pool.ActiveCount() != 2 {
 		t.Fatalf("expected 2 active candidates, got %d", pool.ActiveCount())
@@ -231,7 +231,7 @@ func TestResolverPool_EndpointCoverage_UnlabeledEndpointsFallback(t *testing.T) 
 	pool.AcquireCandidateForChecking(c3.Key)
 	// Committing c3 must trigger Endpoint Coverage Repair: c3 on 8.8.8.8:53 should displace
 	// the duplicate 1.1.1.1:53 pairing c2 (worst duplicate)
-	pool.CommitCandidateOutcome(c3.Key, true, 1000, 1000, 1000, 70*time.Millisecond)
+	pool.CommitCandidateOutcome(candidateSnapshotForTest(pool, c3.Key), true, 1000, 1000, 1000, 70*time.Millisecond)
 
 	st3, _ := pool.CandidateState(c3.Key)
 	if st3 != StateActive {
@@ -287,11 +287,11 @@ func TestResolverPool_Optimize_DisplacesLowestScoringActive(t *testing.T) {
 
 	pool.SetConnections([]*Connection{conn1, conn2, conn3})
 	pool.AcquireCandidateForChecking(conn1.Key)
-	pool.CommitCandidateOutcome(conn1.Key, true, 1000, 1000, 1000, 50*time.Millisecond)
+	pool.CommitCandidateOutcome(candidateSnapshotForTest(pool, conn1.Key), true, 1000, 1000, 1000, 50*time.Millisecond)
 	pool.AcquireCandidateForChecking(conn2.Key)
-	pool.CommitCandidateOutcome(conn2.Key, true, 1000, 1000, 1000, 50*time.Millisecond)
+	pool.CommitCandidateOutcome(candidateSnapshotForTest(pool, conn2.Key), true, 1000, 1000, 1000, 50*time.Millisecond)
 	pool.AcquireCandidateForChecking(conn3.Key)
-	pool.CommitCandidateOutcome(conn3.Key, true, 1000, 1000, 1000, 500*time.Millisecond)
+	pool.CommitCandidateOutcome(candidateSnapshotForTest(pool, conn3.Key), true, 1000, 1000, 1000, 500*time.Millisecond)
 
 	if pool.ActiveCount() != 2 {
 		t.Fatalf("expected 2 active pairings, got %d", pool.ActiveCount())

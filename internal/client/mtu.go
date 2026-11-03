@@ -360,15 +360,9 @@ func (c *Client) newDiscoveryConfig() DiscoveryConfig {
 	}
 	totalUnique := len(uniqueEndpoints)
 
-	targetResolvers := totalUnique
+	// Full scanning changes readiness only, never continuing endpoint coverage.
+	targetResolvers := min(totalUnique, max(1, c.cfg.RX_TX_Workers))
 	fastStart := c.cfg.RecheckInactiveServersEnabled
-	if fastStart {
-		minRequired := c.cfg.RX_TX_Workers
-		if minRequired < 1 {
-			minRequired = 1
-		}
-		targetResolvers = min(totalUnique, minRequired)
-	}
 
 	parallelism := c.cfg.EffectiveMTUTestParallelism()
 	if parallelism < 1 {
@@ -710,35 +704,21 @@ func (c *Client) recheckInactiveResolver(ctx context.Context, conn Connection) {
 		return
 	}
 
-	beginRecheck := func(k string) bool {
-		if c.pool != nil {
-			return c.pool.beginConnectionRecheck(k)
-		}
-		return c.balancer.beginConnectionRecheck(k)
+	pool := c.pool
+	if pool == nil {
+		pool = c.balancer.pool
 	}
-	releaseRecheck := func(k string, wasStandby bool) {
-		if c.pool != nil {
-			c.pool.ReleaseRecheck(k, wasStandby)
-		} else {
-			c.balancer.ReleaseRecheck(k, wasStandby)
-		}
-	}
-	completeRecheck := func(res ResolverRecheckResult) (Connection, bool) {
-		if c.pool != nil {
-			return c.pool.CompleteRecheck(res)
-		}
-		return c.balancer.completeConnectionRecheck(res)
-	}
-
-	// Exclude this candidate from promotion for the entire network probe.
-	if !beginRecheck(conn.Key) {
+	leased, ok := pool.prepareRecheck(conn)
+	if !ok {
 		return
 	}
+	conn = leased
+	completeRecheck := pool.CompleteRecheck
 	completed := false
 	defer func() {
 		if !completed {
 			if ctx != nil && ctx.Err() != nil {
-				releaseRecheck(conn.Key, conn.StandbyEligible)
+				pool.ReleaseRecheck(conn)
 			} else {
 				// An interrupted or failed recheck must not remain eligible for
 				// promotion or leave the candidate in StateRechecking.
@@ -778,9 +758,7 @@ func (c *Client) recheckInactiveResolver(ctx context.Context, conn Connection) {
 		if burstCount < 2 {
 			burstCount = 4
 		}
-		if err := c.acquireBackgroundQueries(ctx, burstCount); err != nil {
-			return
-		}
+		probeTimeout += c.bgLimiter.burstWaitAllowance(burstCount, c.resolverHealthParallelism())
 		burstResult := c.sendPipelinedMicroBurst(
 			ctx,
 			conn,
@@ -789,7 +767,13 @@ func (c *Client) recheckInactiveResolver(ctx context.Context, conn Connection) {
 			downloadMTU,
 			uploadMTU,
 			probeTimeout,
+			c.bgLimiter,
 		)
+		if burstResult.Incomplete {
+			pool.ReleaseRecheck(conn)
+			completed = true
+			return
+		}
 		burstPtr = &burstResult
 	}
 

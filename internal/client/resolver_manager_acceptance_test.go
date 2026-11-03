@@ -8,253 +8,259 @@
 package client
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	Enums "masterdnsvpn-go/internal/enums"
 	"masterdnsvpn-go/internal/config"
+	"masterdnsvpn-go/internal/logger"
 	"masterdnsvpn-go/internal/security"
 	"masterdnsvpn-go/internal/udpserver"
 )
 
-// mockResolverBehavior controls how a mock DNS listener responds.
-type mockResolverBehavior struct {
-	delay       time.Duration
-	dropPercent int // 0 to 100
-	queryCount  atomic.Int32
+// A local recursive Resolver proxy forwards to one real authoritative Server.
+// Endpoints share Session state while exercising different network behavior.
+type acceptanceResolver struct {
+	queries atomic.Int64
+	conn    *net.UDPConn
+	done    chan struct{}
 }
 
-func startConfigurableMockDNSListener(t *testing.T, domain string, behavior *mockResolverBehavior) (*net.UDPConn, int) {
+func startAcceptanceResolver(t *testing.T, server string, delay time.Duration, dropEvery int) *acceptanceResolver {
 	t.Helper()
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
-		t.Fatalf("failed to listen UDP: %v", err)
+		t.Fatal(err)
 	}
-
-	serverCfg := config.DefaultServerConfig()
-	serverCfg.Domain = []string{domain}
-	serverCfg.MinVPNLabelLength = 3
-	serverCfg.DataEncryptionMethod = 0
-	serverCodec, err := security.NewCodec(0, "")
+	target, err := net.ResolveUDPAddr("udp4", server)
 	if err != nil {
-		t.Fatalf("server codec init failed: %v", err)
+		t.Fatal(err)
 	}
-	server := udpserver.New(serverCfg, nil, serverCodec)
-
+	upstream, err := net.DialUDP("udp4", nil, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &acceptanceResolver{conn: conn, done: make(chan struct{})}
 	go func() {
-		buf := make([]byte, 4096)
+		defer close(r.done)
+		query, reply := make([]byte, 4096), make([]byte, 4096)
 		for {
-			n, remoteAddr, err := conn.ReadFromUDP(buf)
+			n, peer, err := conn.ReadFromUDP(query)
 			if err != nil {
 				return
 			}
-			behavior.queryCount.Add(1)
-			if behavior.dropPercent >= 100 {
-				continue // Nonresponsive blackhole
+			count := r.queries.Add(1)
+			if dropEvery > 0 && count%int64(dropEvery) == 0 {
+				continue
 			}
-			if behavior.dropPercent > 0 && (behavior.queryCount.Load()%2 == 0) {
-				continue // Drop 50%
+			if delay > 0 {
+				time.Sleep(delay)
 			}
-			if behavior.delay > 0 {
-				time.Sleep(behavior.delay)
+			upstream.SetDeadline(time.Now().Add(300 * time.Millisecond))
+			if _, err := upstream.Write(query[:n]); err != nil {
+				continue
 			}
-			query := make([]byte, n)
-			copy(query, buf[:n])
-			response := server.HandlePacket(query)
-			if len(response) > 0 {
-				_, _ = conn.WriteToUDP(response, remoteAddr)
+			n, err = upstream.Read(reply)
+			if err == nil {
+				conn.WriteToUDP(reply[:n], peer)
 			}
 		}
 	}()
-
-	port := conn.LocalAddr().(*net.UDPAddr).Port
-	return conn, port
+	t.Cleanup(func() { conn.Close(); upstream.Close(); <-r.done })
+	return r
 }
 
-// TestIntegratedResolverManagerAcceptance verifies the complete resolver manager lifecycle:
-// cold startup, early readiness, live traffic, background discovery to 100% coverage,
-// failover/replacement, batched ranking persistence, and clean restart.
+func newAcceptanceClient(t *testing.T, cfg config.ClientConfig) *Client {
+	t.Helper()
+	codec, err := security.NewCodec(cfg.DataEncryptionMethod, cfg.EncryptionKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := New(cfg, logger.New("acceptance-client", "error"), codec)
+	t.Cleanup(c.Close)
+	if err := c.BuildConnectionMap(); err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
 func TestIntegratedResolverManagerAcceptance(t *testing.T) {
-	tempDir := t.TempDir()
-	resolversPath := filepath.Join(tempDir, "resolvers.txt")
-
-	dom1 := "v1.example.com"
-	dom2 := "v2.example.com"
-	domains := []string{dom1, dom2}
-
-	// 1. Setup 4 distinct Resolver Endpoints with diverse behaviors
-	// Ep1: Healthy & Fast (0 delay, 0% drop)
-	beh1 := &mockResolverBehavior{}
-	conn1a, port1 := startConfigurableMockDNSListener(t, dom1, beh1)
-	defer conn1a.Close()
-
-	// Ep2: Delayed (15ms delay, 0% drop)
-	beh2 := &mockResolverBehavior{delay: 15 * time.Millisecond}
-	conn2a, port2 := startConfigurableMockDNSListener(t, dom1, beh2)
-	defer conn2a.Close()
-
-	// Ep3: Lossy (50% drop)
-	beh3 := &mockResolverBehavior{dropPercent: 50}
-	conn3a, port3 := startConfigurableMockDNSListener(t, dom1, beh3)
-	defer conn3a.Close()
-
-	// Ep4: Nonresponsive (100% drop)
-	beh4 := &mockResolverBehavior{dropPercent: 100}
-	conn4a, port4 := startConfigurableMockDNSListener(t, dom1, beh4)
-	defer conn4a.Close()
-
-	// Write initial resolvers file
-	initialResolversContent := fmt.Sprintf("127.0.0.1:%d\n127.0.0.1:%d\n127.0.0.1:%d\n127.0.0.1:%d\n", port1, port2, port3, port4)
-	if err := os.WriteFile(resolversPath, []byte(initialResolversContent), 0644); err != nil {
-		t.Fatalf("write resolvers file failed: %v", err)
+	// Real TCP destination; its bytes must traverse the Client, DNS tunnel and Server.
+	destination, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
 	}
+	destinationDone := make(chan struct{})
+	go func() {
+		defer close(destinationDone)
+		for {
+			conn, err := destination.Accept()
+			if err != nil {
+				return
+			}
+			go func() { defer conn.Close(); io.Copy(conn, conn) }()
+		}
+	}()
+	defer func() { destination.Close(); <-destinationDone }()
+	// Reserve a loopback UDP port for the real Server runtime.
+	reservation, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := reservation.LocalAddr().(*net.UDPAddr).Port
+	reservation.Close()
+	domains := []string{"v1.example.com", "v2.example.com"}
+	serverCfg := config.DefaultServerConfig()
+	serverCfg.UDPHost, serverCfg.UDPPort = "127.0.0.1", port
+	serverCfg.UDPReaders, serverCfg.DNSRequestWorkers = 1, 2
+	serverCfg.ProtocolType, serverCfg.ForwardIP = "TCP", "127.0.0.1"
+	serverCfg.ForwardPort = destination.Addr().(*net.TCPAddr).Port
+	serverCfg.Domain, serverCfg.DataEncryptionMethod = domains, 0
+	serverCfg.MinVPNLabelLength = 3
+	codec, err := security.NewCodec(0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := udpserver.New(serverCfg, logger.New("acceptance-server", "error"), codec)
+	serverCtx, stopServer := context.WithCancel(context.Background())
+	serverDone := make(chan error, 1)
+	go func() { serverDone <- server.Run(serverCtx) }()
+	defer func() {
+		stopServer()
+		if err := <-serverDone; err != nil && !errors.Is(err, context.Canceled) {
+			t.Error(err)
+		}
+	}()
 
-	// Configure client: 4 endpoints x 2 domains = 8 pairings
+	serverAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	resolvers := []*acceptanceResolver{
+		startAcceptanceResolver(t, serverAddr, 0, 0),
+		startAcceptanceResolver(t, serverAddr, time.Millisecond, 0),
+		startAcceptanceResolver(t, serverAddr, 0, 2),
+		startAcceptanceResolver(t, serverAddr, 0, 1),
+	}
 	cfg := config.DefaultClientConfig()
-	cfg.ResolversFilePath = resolversPath
+	cfg.ProtocolType, cfg.ListenIP, cfg.ListenPort = "TCP", "127.0.0.1", 0
+	cfg.DataEncryptionMethod = 0
 	cfg.Domains = domains
-	cfg.Resolvers = []config.ResolverAddress{
-		{IP: "127.0.0.1", Port: port1},
-		{IP: "127.0.0.1", Port: port2},
-		{IP: "127.0.0.1", Port: port3},
-		{IP: "127.0.0.1", Port: port4},
+	cfg.Resolvers = nil
+	var lines strings.Builder
+	for _, r := range resolvers {
+		port := r.conn.LocalAddr().(*net.UDPAddr).Port
+		cfg.Resolvers = append(cfg.Resolvers, config.ResolverAddress{IP: "127.0.0.1", Port: port})
+		fmt.Fprintf(&lines, "127.0.0.1:%d\n", port)
 	}
-	cfg.RecheckInactiveServersEnabled = true
-	cfg.RX_TX_Workers = 2
-	cfg.MTUTestParallelism = 2
-	cfg.MaxActiveResolvers = 4
-	cfg.MinUploadMTU = 100
-	cfg.MaxUploadMTU = 200
-	cfg.MinDownloadMTU = 200
-	cfg.MaxDownloadMTU = 400
-	cfg.MTUTestRetries = 1
-	cfg.MTUTestTimeout = 0.1
-	cfg.AutoSaveRankedResolvers = true
+	cfg.ResolversFilePath = filepath.Join(t.TempDir(), "resolvers.txt")
+	if err := os.WriteFile(cfg.ResolversFilePath, []byte(lines.String()), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.AutoSaveRankedResolvers, cfg.RecheckInactiveServersEnabled = true, true
+	cfg.RX_TX_Workers, cfg.MTUTestParallelism, cfg.MaxActiveResolvers = 2, 1, 4
+	cfg.MinUploadMTU, cfg.MaxUploadMTU = 100, 200
+	cfg.MinDownloadMTU, cfg.MaxDownloadMTU = 200, 400
+	cfg.MTUTestRetries, cfg.MTUTestTimeout = 2, 0.3
+	cfg.AutoDisableTimeoutWindowSeconds = 30
+	c := newAcceptanceClient(t, cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	start := time.Now()
+	if err := c.RunInitialMTUTests(ctx); err != nil {
+		t.Fatal(err)
+	}
+	ready := time.Since(start)
+	if c.pool.IsFirstPassComplete() {
+		t.Fatal("readiness waited for full coverage")
+	}
+	if err := c.InitializeSession(2); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.StartAsyncRuntime(ctx); err != nil {
+		t.Fatal(err)
+	}
+	c.InitVirtualStream0()
+	if c.pingManager != nil {
+		c.pingManager.Start(ctx)
+	}
+	defer c.StopAsyncRuntime()
+	healthCtx, stopHealth := context.WithCancel(ctx)
+	healthDone := make(chan struct{})
+	go func() { defer close(healthDone); c.runResolverHealthLoop(healthCtx) }()
+	defer func() { stopHealth(); <-healthDone }()
 
-	client := createTestFastStartClient(t, cfg)
-	defer client.Close()
-
-	// --- PHASE 1: Cold Startup & Early FastStart Readiness ---
-	t0 := time.Now()
-	ctxInit, cancelInit := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancelInit()
-
-	err := client.RunInitialMTUTests(ctxInit)
+	app, err := net.DialTimeout("tcp4", c.tcpListener.listeners[0].Addr().String(), time.Second)
 	if err != nil {
-		t.Fatalf("RunInitialMTUTests failed: %v", err)
+		t.Fatal(err)
 	}
-	tReady := time.Since(t0)
-
-	// Invariant Check: Readiness achieved with distinct qualified endpoints
-	activeCount := client.balancer.ActiveCount()
-	if activeCount < 2 {
-		t.Fatalf("expected at least 2 active resolvers for readiness, got %d", activeCount)
-	}
-	covInit := client.balancer.CoverageStats()
-	if covInit.ConfiguredPairings != 8 {
-		t.Fatalf("expected 8 configured pairings, got %d", covInit.ConfiguredPairings)
-	}
-	// Initial coverage must NOT be 100% yet at early readiness
-	if covInit.IsFirstPassComplete {
-		t.Fatalf("expected early readiness before first pass complete: %+v", covInit)
-	}
-	t.Logf("✓ Early readiness achieved in %s (Active: %d/8, Completed attempts: %d)", tReady, activeCount, covInit.CompletedInitialAttempts)
-
-	// --- PHASE 2: Live Traffic & Background Discovery to 100% Coverage ---
-	// Background query limiter should bound background queries
-	limiter := client.BackgroundQueryLimiter()
-	if limiter == nil {
-		t.Fatal("expected non-nil BackgroundQueryLimiter")
-	}
-
-	// Simulate background discovery driving remaining candidates
-	// Recheck remaining inactive resolvers until first pass is complete
-	ctxRecheck, cancelRecheck := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancelRecheck()
-
-	recheckStartTime := time.Now()
-	for !client.balancer.IsFirstPassComplete() && ctxRecheck.Err() == nil {
-		conn, ok := client.balancer.NextInactiveConnectionForHealthCheck(time.Now(), 0)
-		if !ok || conn.Key == "" {
-			time.Sleep(10 * time.Millisecond)
-			continue
+	defer app.Close()
+	app.SetDeadline(time.Now().Add(15 * time.Second))
+	payload := bytes.Repeat([]byte("resolver-lifecycle-"), 32)
+	reply := make([]byte, len(payload))
+	transferred, exchanges := 0, 0
+	trafficStart := time.Now()
+	var totalLatency time.Duration
+	for {
+		before := time.Now()
+		if _, err := app.Write(payload); err != nil {
+			t.Fatal(err)
 		}
-		// Probe via client's recheckInactiveResolver
-		client.recheckInactiveResolver(ctxRecheck, conn)
-	}
-
-	if !client.balancer.IsFirstPassComplete() {
-		t.Fatalf("expected first pass to reach 100%% complete: %+v", client.balancer.CoverageStats())
-	}
-	tCoverage := time.Since(recheckStartTime)
-	covDone := client.balancer.CoverageStats()
-	t.Logf("✓ Full 100%% first-pass coverage achieved in %s (Completed: %d/8, Untested: %d, Distinct qualified: %d)",
-		tCoverage, covDone.CompletedInitialAttempts, covDone.RemainingUntested, covDone.DistinctQualified)
-
-	// --- PHASE 3: Mutual Exclusivity Invariant & Score-Based Traffic ---
-	snapshots := client.balancer.GetStatsSnapshot()
-	for _, s := range snapshots {
-		// Mutual exclusivity: A candidate cannot be both Active and Standby
-		if s.IsValid && s.StandbyEligible {
-			t.Fatalf("invariant violation: candidate %s is both active and standby", s.Connection.Key)
+		if _, err := io.ReadFull(app, reply); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(reply, payload) {
+			t.Fatal("tunneled destination bytes differ")
+		}
+		transferred += len(payload)
+		exchanges++
+		totalLatency += time.Since(before)
+		if c.pool.ActiveCount() > cfg.MaxActiveResolvers {
+			t.Fatal("active capacity exceeded during traffic")
+		}
+		if c.pool.IsFirstPassComplete() {
+			break
+		}
+		if ctx.Err() != nil {
+			t.Fatal("initial coverage stalled during real traffic")
 		}
 	}
-
-	// Verify default common-score routing selects faster candidates
-	targets, err := client.balancer.SelectTargets(Enums.PACKET_STREAM_DATA, 1, 2)
-	if err != nil || len(targets) == 0 {
-		t.Fatalf("SelectTargets failed: %v", err)
+	coverage := time.Since(start)
+	t.Logf("local evidence: readiness=%s coverage=%s echoed_bytes=%d round_trips=%d measured_payload_KiBps=%.2f mean_round_trip=%s", ready, coverage, transferred, exchanges, float64(transferred)/1024/time.Since(trafficStart).Seconds(), totalLatency/time.Duration(exchanges))
+	if coverage <= ready {
+		t.Fatal("coverage must follow readiness")
 	}
-	for _, tg := range targets {
-		if !tg.IsValid {
-			t.Fatalf("expected only valid active resolvers in targets, got invalid: %s", tg.Key)
-		}
+	stopHealth()
+	<-healthDone
+	c.StopAsyncRuntime()
+	c.Close()
+	saved, err := os.ReadFile(cfg.ResolversFilePath)
+	if err != nil || !strings.Contains(string(saved), "AUTO-RANKED") {
+		t.Fatalf("ranked ordering not saved: %v\n%s", err, saved)
 	}
-
-	// --- PHASE 4: Pool Policy & Failover Replacement ---
-	// Simulate degradation of the top active candidate by applying high loss
-	activeConns := client.balancer.ActiveConnections()
-	if len(activeConns) > 0 {
-		degradedKey := activeConns[0].Key
-		// Invalidate degraded connection
-		client.balancer.SetConnectionValidity(degradedKey, false)
-		// Active pool should remain valid and promote eligible standby candidate
-		newActiveCount := client.balancer.ActiveCount()
-		if newActiveCount < 1 {
-			t.Fatal("expected pool to retain active candidates after failover")
-		}
-		t.Logf("✓ Failover handled successfully: active count now %d", newActiveCount)
-	}
-
-	// --- PHASE 5: Batched Persistence Writer & Clean Restart ---
-	// Force flush of ranked persistence writer
-	client.SaveRankedResolversToFile()
-	client.Close() // Graceful close flushes rankedWriter
-
-	// Read back written resolvers file
-	savedData, err := os.ReadFile(resolversPath)
+	// Load the actual persisted hints and prove they authorize no live candidates.
+	cfg.Resolvers, _, err = config.LoadClientResolvers(cfg.ResolversFilePath)
 	if err != nil {
-		t.Fatalf("failed to read resolvers file: %v", err)
+		t.Fatal(err)
 	}
-	if len(savedData) == 0 {
-		t.Fatal("expected non-empty resolvers file after auto-save")
+	restarted := newAcceptanceClient(t, cfg)
+	if restarted.pool.ActiveCount() != 0 || restarted.pool.CoverageStats().CompletedInitialAttempts != 0 {
+		t.Fatal("saved hints bypassed fresh qualification")
 	}
-	t.Logf("✓ Ranked persistence file verified:\n%s", string(savedData))
-
-	// Simulate Restart: New client loads the ranked resolvers
-	clientRestart := createTestFastStartClient(t, cfg)
-	defer clientRestart.Close()
-
-	if clientRestart.balancer.TotalCount() != 8 {
-		t.Fatalf("expected 8 total candidates on restart, got %d", clientRestart.balancer.TotalCount())
+	queriesBefore := resolvers[0].queries.Load() + resolvers[1].queries.Load()
+	if err := restarted.RunInitialMTUTests(ctx); err != nil {
+		t.Fatal(err)
 	}
-	t.Log("✓ Client restart successfully loaded ranked resolvers and initialized pool")
+	if restarted.pool.ActiveCount() == 0 || resolvers[0].queries.Load()+resolvers[1].queries.Load() <= queriesBefore {
+		t.Fatal("restart did not perform network qualification")
+	}
 }
 
 // TestIntegratedResolverManager_DiagnosticsAudit verifies that DumpRuntimeStats produces

@@ -13,7 +13,7 @@ This follows [PR #205](https://github.com/masterking32/MasterDnsVPN/pull/205). T
 - [x] Provide a clearly named common-score traffic strategy and use it when configuration omits an explicit strategy. Do not repurpose existing strategy identifiers or change meanings of explicitly selected strategies, including loss then latency.
 - [x] Configuration loading, validation, command-line overrides, sample configurations, startup output, and documentation agree on the default and explicit-strategy compatibility behavior.
 - [x] The default selects eligible Active Resolvers using the common ranking, rotating deterministically among equally ranked candidates rather than introducing an accidental insertion-order preference.
-- [x] Preserve existing per-Stream preferred routing and failover where applicable. Ranking does not bypass a deliberate preferred pairing until routing/failover rules require reselection.
+- [x] Preserve existing per-Stream preferred routing and failover where applicable. Ranking does not bypass a deliberate preferred path until routing/failover rules require reselection.
 - [x] Preserve requested Duplication counts when enough distinct endpoints exist. Select additional endpoints under the chosen policy without treating several domains on one endpoint as independent duplicated routes.
 - [x] Explicit alternatives operate on the pool's Active Resolvers and do not introduce separate admission, qualification, scoring, or persistence implementations.
 - [x] Controlled traffic tests demonstrate the default favoring higher common scores and explicit alternatives retaining their documented behavior. Cover ties, Stream preference, failover, insufficient distinct endpoints for Duplication, and multiple domains on one endpoint.

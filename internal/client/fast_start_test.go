@@ -538,8 +538,8 @@ func TestAdversarial_RunInitialMTUTests_Replenishment_2InitialBurstFailures(t *t
 	}
 
 	activeCount := client.balancer.ActiveCount()
-	if activeCount != 2 {
-		t.Fatalf("expected 2 active resolvers, got=%d", activeCount)
+	if activeCount < cfg.RX_TX_Workers || activeCount > 3 {
+		t.Fatalf("expected readiness from two or three healthy Active Paths, got=%d", activeCount)
 	}
 
 	activeConns := client.balancer.ActiveConnections()

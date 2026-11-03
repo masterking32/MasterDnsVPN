@@ -13,6 +13,7 @@ package client
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -126,8 +127,11 @@ func NewDiscoveryEngine(
 
 // Run probes candidates, qualifies batches, and finalizes startup admission.
 func (e *DiscoveryEngine) Run(ctx context.Context, candidateSets ...[]Connection) error {
-	if ctx != nil && ctx.Err() != nil {
-		return ctx.Err()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return fmt.Errorf("run discovery: %w", ctx.Err())
 	}
 	if e.pool == nil || e.pool.TotalCount() == 0 {
 		return ErrNoValidConnections
@@ -151,10 +155,7 @@ func (e *DiscoveryEngine) Run(ctx context.Context, candidateSets ...[]Connection
 	totalUniqueResolvers := len(uniqueEndpoints)
 
 	fastStart := e.cfg.FastStart
-	targetValidResolvers := totalUniqueResolvers
-	if fastStart {
-		targetValidResolvers = min(totalUniqueResolvers, e.cfg.TargetResolvers)
-	}
+	targetValidResolvers := min(totalUniqueResolvers, e.cfg.TargetResolvers)
 
 	effectiveMaxActive := e.cfg.MaxActiveResolvers
 	if effectiveMaxActive > 0 {
@@ -164,18 +165,26 @@ func (e *DiscoveryEngine) Run(ctx context.Context, candidateSets ...[]Connection
 		}
 	}
 
+	// Install continuing coverage before the first admission, regardless of scan mode.
+	e.pool.SetTargetEndpoints(targetValidResolvers)
+
 	workerCount := min(e.cfg.Parallelism, len(scanConnections))
 
 	testedKeys := make(map[string]bool, len(scanConnections))
 	qualifiedKeys := make(map[string]struct{})
 	qualifiedEndpoints := make(map[string]struct{}, targetValidResolvers)
+	// Existing Active Paths are already qualified. Preserve them when discovery
+	// resumes, while excluding any that became incompatible with the Session.
+	e.pool.Optimize(targetValidResolvers)
+	for _, conn := range e.pool.ActiveResolvers() {
+		qualifiedKeys[conn.Key] = struct{}{}
+		qualifiedEndpoints[conn.ResolverLabel] = struct{}{}
+	}
 
 	// Phase 2: Candidate Batching Loop (Outer Replenishment Loop)
 	for {
-		if ctx != nil {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("run discovery: %w", err)
 		}
 
 		if fastStart && len(qualifiedEndpoints) >= targetValidResolvers {
@@ -192,6 +201,7 @@ func (e *DiscoveryEngine) Run(ctx context.Context, candidateSets ...[]Connection
 			break
 		}
 
+		testedBefore := len(testedKeys)
 		needed := targetValidResolvers - len(qualifiedEndpoints)
 		if !fastStart || needed < 1 {
 			needed = totalUniqueResolvers
@@ -229,7 +239,7 @@ func (e *DiscoveryEngine) Run(ctx context.Context, candidateSets ...[]Connection
 				}
 
 				result, completed := e.probeCandidateMTU(batchCtx, conn, idx+1, len(scanConnections))
-				if !completed || batchCtx.Err() != nil {
+				if !completed {
 					break
 				}
 				testedKeys[conn.Key] = true
@@ -250,10 +260,13 @@ func (e *DiscoveryEngine) Run(ctx context.Context, candidateSets ...[]Connection
 						}
 						conn := scanConnections[idx]
 						result, completed := e.probeCandidateMTU(batchCtx, conn, idx+1, len(scanConnections))
-						if !completed || batchCtx.Err() != nil {
-							// If probe was interrupted by batch cancellation, do NOT mark as tested
+						if !completed {
+							// Interrupted probes release their leases and remain untested.
 							continue
 						}
+						// A completed probe still owns its result when another worker
+						// cancels the batch. Preserve it for burst qualification or
+						// parent-cancellation cleanup below.
 						testedMu.Lock()
 						testedKeys[conn.Key] = true
 						testedMu.Unlock()
@@ -290,17 +303,20 @@ func (e *DiscoveryEngine) Run(ctx context.Context, candidateSets ...[]Connection
 		}
 		cancelBatch()
 
-		if ctx != nil {
-			if err := ctx.Err(); err != nil {
-				for _, c := range batchValidConns {
-					if state, ok := e.pool.CandidateState(c.Key); ok && state == StateChecking {
-						e.pool.CancelChecking(c.Key)
-					}
+		if err := ctx.Err(); err != nil {
+			for _, c := range batchValidConns {
+				if state, ok := e.pool.CandidateState(c.Key); ok && state == StateChecking {
+					e.pool.CancelChecking(c)
 				}
-				return err
 			}
+			return fmt.Errorf("run discovery: %w", err)
 		}
 
+		// No batch should spin indefinitely without consuming candidates or
+		// producing qualification work. Parent cancellation was handled above.
+		if len(testedKeys) == testedBefore && len(batchValidConns) == 0 {
+			break
+		}
 		if len(batchValidConns) == 0 {
 			continue // Replenish next batch
 		}
@@ -330,6 +346,9 @@ func (e *DiscoveryEngine) Run(ctx context.Context, candidateSets ...[]Connection
 		}
 
 		_, results := e.runMicroBurstQualification(ctx, batchValidConns, maxBurstActive)
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("run discovery: %w", err)
+		}
 
 		// Phase 5: Batch Admission into ResolverPool
 		for _, r := range results {
@@ -377,14 +396,17 @@ func (e *DiscoveryEngine) probeCandidateMTU(ctx context.Context, conn Connection
 		return MTUProbeResult{}, true
 	}
 	if e.pool != nil {
-		if _, ok := e.pool.AcquireCandidateForChecking(conn.Key); !ok {
-			return MTUProbeResult{}, false
+		leased, ok := e.pool.AcquireCandidateForChecking(conn.Key)
+		if !ok {
+			// Active or leased elsewhere: skip this candidate for this run.
+			return MTUProbeResult{}, true
 		}
+		conn = leased
 	}
 	var probeDone bool
 	defer func() {
 		if !probeDone && e.pool != nil {
-			e.pool.CancelChecking(conn.Key)
+			e.pool.CancelChecking(conn)
 		}
 	}()
 
@@ -394,7 +416,7 @@ func (e *DiscoveryEngine) probeCandidateMTU(ctx context.Context, conn Connection
 			result = MTUProbeResult{}
 			completed = true
 			if e.pool != nil {
-				e.pool.CommitCandidateOutcome(conn.Key, false, 0, 0, 0, 0)
+				e.pool.CommitCandidateOutcome(conn, false, 0, 0, 0, 0)
 			}
 			if e.log != nil {
 				e.log.Errorf("💥 <red>MTU Probe Worker Panic: <cyan>%v</cyan> (Resolver: <cyan>%s</cyan>)</red>", recovered, conn.ResolverLabel)
@@ -424,7 +446,7 @@ func (e *DiscoveryEngine) probeCandidateMTU(ctx context.Context, conn Connection
 		probeDone = true
 		res.Success = false
 		if e.pool != nil {
-			e.pool.CommitCandidateOutcome(conn.Key, false, res.UploadBytes, res.UploadChars, res.DownloadBytes, 0)
+			e.pool.CommitCandidateOutcome(conn, false, res.UploadBytes, res.UploadChars, res.DownloadBytes, 0)
 		}
 		if e.counters != nil {
 			completed := e.counters.completed.Add(1)
@@ -445,13 +467,13 @@ func (e *DiscoveryEngine) probeCandidateMTU(ctx context.Context, conn Connection
 	probeDone = true
 	if !e.cfg.MicroBurstEnabled {
 		if e.pool != nil {
-			e.pool.CommitCandidateOutcome(conn.Key, true, res.UploadBytes, res.UploadChars, res.DownloadBytes, res.ResolveTime)
+			e.pool.CommitCandidateOutcome(conn, true, res.UploadBytes, res.UploadChars, res.DownloadBytes, res.ResolveTime)
 		}
 	} else {
 		// MTU success alone is not admission when burst qualification is required;
 		// candidate remains in StateChecking for subsequent micro-burst evaluation.
 		if e.pool != nil {
-			e.pool.SetConnectionMTU(conn.Key, res.UploadBytes, res.UploadChars, res.DownloadBytes, res.ResolveTime)
+			e.pool.SetCheckingMTU(conn, CandidateMTUParams{UploadBytes: res.UploadBytes, UploadChars: res.UploadChars, DownloadBytes: res.DownloadBytes, ResolveTime: res.ResolveTime})
 		}
 	}
 	if e.counters != nil {
@@ -491,10 +513,11 @@ func (e *DiscoveryEngine) runMicroBurstQualification(
 	for range parallelism {
 		wg.Go(func() {
 			for idx := range jobs {
-				if ctx.Err() != nil {
-					return
-				}
 				conn := validConns[idx]
+				if ctx.Err() != nil {
+					e.pool.CancelChecking(conn)
+					continue
+				}
 				effectiveDown := syncedDown
 				effectiveUp := syncedUp
 				if effectiveDown <= 0 || effectiveDown > conn.DownloadMTUBytes {
@@ -505,6 +528,10 @@ func (e *DiscoveryEngine) runMicroBurstQualification(
 				}
 
 				burstResult := e.prober.ProbeBurst(ctx, conn, packetCount, effectiveDown, effectiveUp, timeout)
+				if ctx.Err() != nil {
+					e.pool.CancelChecking(conn)
+					continue
+				}
 
 				score := 0.0
 				if burstResult.ReceivedCount > 0 {

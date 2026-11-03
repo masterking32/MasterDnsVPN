@@ -8,7 +8,7 @@ MasterDnsVPN is a high-performance DNS tunneling system carrying TCP and SOCKS t
 |------|------|
 | `cmd/client/` | Client CLI application entry point. |
 | `cmd/server/` | Authoritative DNS server application entry point. |
-| `internal/client/` | Client connection lifecycle, resolver dispatch, and tunnel orchestration. |
+| `internal/client/` | Client tunnel path lifecycle, resolver dispatch, and tunnel orchestration. |
 | `internal/vpnproto/` | Wire protocol packet framing, serialization, and parsing. |
 | `internal/arq/` | Selective-repeat ARQ reliability layer over DNS. |
 | `internal/mlq/` | Multi-Level Queue priority scheduling. |

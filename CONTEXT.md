@@ -28,29 +28,29 @@ _Avoid_: Target, Server address
 The domain name (e.g. `v.example.com`) delegated to the Server that the Client uses to build its DNS queries.
 _Avoid_: Hostname, Zone
 
-**Pairing** (or **Candidate**):
-A pair combining one Resolver Endpoint and one Tunnel Domain.
-_Avoid_: Connection, Tuple
+**Tunnel Path** (or **Path**):
+A distinct transmission path carrying DNS tunnel queries, defined by one Resolver Endpoint and one Tunnel Domain.
+_Avoid_: Pairing, Route, Connection, Channel, Tuple
 
 **Resolver Pool**:
-The client-side collection of candidate Pairings, tracked across five authoritative lifecycle states:
+The client-side collection of candidate Tunnel Paths, tracked across five authoritative lifecycle states:
 - **Untested**: Initial state before completed qualification.
 - **Checking**: Leased for initial qualification or background rechecking.
 - **Active**: Qualified and admitted to carry live traffic.
 - **Standby**: Qualified, compatible with current Session requirements, and eligible for promotion.
 - **Rejected**: Qualification failed or became incompatible; eligible for retry.
-_Avoid_: Server pool, Balancer pool
+_Avoid_: Server pool, Balancer pool, Route pool
 
-**Active Pairing**:
-A Pairing admitted to carry live traffic in the Resolver Pool.
-_Avoid_: Active Resolver, Active server
+**Active Path**:
+A Tunnel Path admitted to carry live traffic in the Resolver Pool.
+_Avoid_: Active Resolver, Active server, Active pairing, Active route
 
-**Standby Pairing**:
-A qualified, non-active Pairing compatible with current Session requirements and eligible for promotion into active duty if an active pairing degrades or capacity opens. Distinguished from Untested, Checking, or Rejected candidates.
-_Avoid_: Standby Resolver, Standby server
+**Standby Path**:
+A qualified, non-active Tunnel Path compatible with current Session requirements and eligible for promotion into active duty if an active path degrades or capacity opens. Distinguished from Untested, Checking, or Rejected candidates.
+_Avoid_: Standby Resolver, Standby server, Standby pairing, Standby route
 
 **Resolver Balancer**:
-The client component that selects which active Pairing transmits each outgoing query. By default, it routes using the common composite evaluation score (RTT, loss, measured burst throughput) shared across diagnostics and pool rankings, while preserving explicit user strategies (e.g. Round Robin, Lowest Latency, Least Loss, Loss Then Latency).
+The client component that selects which active Tunnel Path transmits each outgoing query. By default, it routes using the common composite evaluation score (RTT, loss, measured burst throughput) shared across diagnostics and pool rankings, while preserving explicit user strategies (e.g. Round Robin, Lowest Latency, Least Loss, Loss Then Latency).
 _Avoid_: MLQ, Scheduler, Retrier
 
 **Destination**:
@@ -98,5 +98,5 @@ A query or packet transmitted onto the network that has not yet received an ackn
 _Avoid_: Pending, Unresolved, Open
 
 **Duplication**:
-The mechanism of sending copies of the same fragment across different resolvers to survive extreme packet loss.
+The mechanism of sending copies of the same fragment across different paths to survive extreme packet loss.
 _Avoid_: Multipath, Cloning, Redundancy

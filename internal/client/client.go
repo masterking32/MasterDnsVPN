@@ -33,11 +33,11 @@ const (
 )
 
 type Client struct {
-	cfg      config.ClientConfig
-	log      *logger.Logger
-	codec    *security.Codec
-	balancer *Balancer
-	pool     *ResolverPool
+	cfg       config.ClientConfig
+	log       *logger.Logger
+	codec     *security.Codec
+	balancer  *Balancer
+	pool      *ResolverPool
 	bgLimiter *BackgroundQueryLimiter
 
 	successMTUChecks  bool
@@ -74,24 +74,24 @@ type Client struct {
 	streamResolverFailoverCooldown        time.Duration
 
 	// Session States
-	sessionID                  uint8
-	sessionCookie              uint8
-	responseMode               uint8
-	sessionReady               bool
-	initStateMu                sync.Mutex
-	sessionInitReady           bool
-	sessionInitBase64          bool
-	sessionInitPayload         []byte
-	sessionInitVerify          [4]byte
-	sessionInitCursor          int
-	sessionInitBusyUnix        atomic.Int64
-	sessionResetPending        atomic.Bool
-	runtimeResetPending        atomic.Bool
-	resolverHealthStarted      atomic.Bool
-	runtimeStatsStarted        atomic.Bool
-	sessionResetSignal         chan struct{}
-	rxDroppedPackets           atomic.Uint64
-	lastRXDropLogUnix          atomic.Int64
+	sessionID             uint8
+	sessionCookie         uint8
+	responseMode          uint8
+	sessionReady          bool
+	initStateMu           sync.Mutex
+	sessionInitReady      bool
+	sessionInitBase64     bool
+	sessionInitPayload    []byte
+	sessionInitVerify     [4]byte
+	sessionInitCursor     int
+	sessionInitBusyUnix   atomic.Int64
+	sessionResetPending   atomic.Bool
+	runtimeResetPending   atomic.Bool
+	resolverHealthStarted atomic.Bool
+	runtimeStatsStarted   atomic.Bool
+	sessionResetSignal    chan struct{}
+	rxDroppedPackets      atomic.Uint64
+	lastRXDropLogUnix     atomic.Int64
 
 	// Async Runtime Workers & Channels
 	asyncWG              sync.WaitGroup
@@ -390,6 +390,7 @@ func (c *Client) nextSessionInitRetryDelay(failures int) time.Duration {
 
 // Run starts the main execution loop of the client.
 func (c *Client) Run(ctx context.Context) error {
+	defer c.Close()
 	c.successMTUChecks = false
 	c.log.Infof("\U0001F504 <cyan>Starting main runtime loop...</cyan>")
 	sessionInitRetryDelay := time.Duration(0)
@@ -638,11 +639,4 @@ func (c *Client) acquireBackgroundQuery(ctx context.Context) error {
 		return nil
 	}
 	return c.bgLimiter.Acquire(ctx)
-}
-
-func (c *Client) acquireBackgroundQueries(ctx context.Context, n int) error {
-	if c == nil || c.bgLimiter == nil {
-		return nil
-	}
-	return c.bgLimiter.AcquireN(ctx, n)
 }

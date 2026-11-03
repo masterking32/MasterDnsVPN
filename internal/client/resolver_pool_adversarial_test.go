@@ -64,7 +64,7 @@ func TestEmpirical_Adversarial_MutualExclusivityConcurrentStress(t *testing.T) {
 				case 2:
 					if conn, ok := p.AcquireNextInactiveForRecheck(time.Now(), 0); ok {
 						if r.Intn(2) == 1 {
-							p.ReleaseRecheck(conn.Key, r.Intn(2) == 1)
+							p.ReleaseRecheck(conn)
 						} else {
 							p.CompleteRecheck(ResolverRecheckResult{
 								Connection:  conn,
@@ -98,7 +98,7 @@ func TestEmpirical_Adversarial_MutualExclusivityConcurrentStress(t *testing.T) {
 							},
 						}
 					}
-					p.AdmitStartupBatch(results, selected)
+					admitPoolTestBatch(p, results, selected)
 				case 5:
 					p.FinalizeFastStart(nil, maxActive)
 				case 6:
@@ -310,7 +310,7 @@ func TestEmpirical_Adversarial_CapacityBoundingOverflow(t *testing.T) {
 		}
 	}
 
-	p.AdmitStartupBatch(results, selected)
+	admitPoolTestBatch(p, results, selected)
 
 	if p.ActiveCount() > maxActive {
 		t.Fatalf("ActiveCount exceeded maxActive after AdmitStartupBatch overflow: got %d, max %d", p.ActiveCount(), maxActive)
@@ -570,7 +570,7 @@ func TestEmpirical_Adversarial_FailedRecheckFSMStateTransition(t *testing.T) {
 	// If the state is still StateRechecking, then ReleaseRecheck can be called!
 	// If a caller or deferred cleanup calls ReleaseRecheck("cand-fsm", true),
 	// does it improperly restore standby eligibility even though recheck failed?
-	p.ReleaseRecheck("cand-fsm", true)
+	p.ReleaseRecheck(candidateSnapshotForTest(p, "cand-fsm"))
 	if p.candidates[candIdx].conn.StandbyEligible {
 		t.Errorf("BUG DISCOVERED: Failed recheck left candidate in StateRechecking; subsequent ReleaseRecheck revived it into StandbyEligible!")
 	}
@@ -592,4 +592,3 @@ func TestEmpirical_Adversarial_DuplicateKeysInSetConnections(t *testing.T) {
 		t.Logf("NOTE: SetConnections silently permits duplicate keys, orphaning candidate at index 0")
 	}
 }
-

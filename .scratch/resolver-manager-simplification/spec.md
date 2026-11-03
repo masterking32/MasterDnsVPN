@@ -10,11 +10,11 @@ The architecture discussion examined PR head 8615f90197f1188e36bc4e5185f15b03f1c
 
 ## Agreed behavior
 
-- A candidate is a Resolver endpoint paired with a tunnel domain. A Session is the authenticated Client/Server relationship, not a candidate. Pool capacity counts active pairings; endpoint coverage counts distinct addresses and ports.
+- A candidate Tunnel Path is a Resolver endpoint paired with a tunnel domain. A Session is the authenticated Client/Server relationship, not a candidate. Pool capacity counts Active Paths; endpoint coverage counts distinct addresses and ports.
 - Five authoritative candidate states: Untested, Checking, Active, Standby, Rejected. Mutable validity/standby flags are replaced by derived views.
 - Eligibility, quality evaluation, pool membership, and packet selection are separate decisions. They share observations and a consistent default ranking; existing explicitly selected traffic strategies keep their meanings.
 - Pool selection first enforces eligibility, then fills vacancies, repairs required distinct-endpoint coverage, and finally makes optional performance replacements. All optional replacements require a common score strictly greater than 1.25 times the displaced score. Coverage repair and vacancy filling do not require that margin.
-- Startup readiness ends the foreground wait. With inactive rechecking enabled, background discovery continues until every configured pairing has a bounded initial outcome, then maintenance continues. It is limited by both concurrent probes and actual DNS query starts.
+- Startup readiness ends the foreground wait. With inactive rechecking enabled, background discovery continues until every configured Tunnel Path has a bounded initial outcome, then maintenance continues. It is limited by both concurrent probes and actual DNS query starts.
 - Preserve the inactive-rechecking switch: disabling it performs the full initial startup scan and disables continuing inactive discovery. Other features keep their independent configuration.
 - Saved rankings are ordering hints for configured endpoints; they never authorize removed endpoints or bypass qualification. A single background writer batches changes and performs a bounded shutdown flush.
 

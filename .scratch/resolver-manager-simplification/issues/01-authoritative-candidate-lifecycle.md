@@ -1,6 +1,6 @@
 # 01: Make Resolver Pool candidate state authoritative
 
-**What to build:** Make the Client consistently distinguish untested Resolver/domain pairings, candidates being checked, Active Resolvers, Standby Resolvers, and rejected candidates throughout startup and background recovery. A candidate cannot be promoted while qualification is deciding whether it works. Interrupted work must not be reported as a network failure.
+**What to build:** Make the Client consistently distinguish untested Tunnel Paths, candidates being checked, Active Paths, Standby Paths, and rejected candidates throughout startup and background recovery. A candidate cannot be promoted while qualification is deciding whether it works. Interrupted work must not be reported as a network failure.
 
 **Blocked by:** None (can start immediately).
 
@@ -11,7 +11,7 @@ This follows [PR #205](https://github.com/masterking32/MasterDnsVPN/pull/205), a
 ## Acceptance criteria
 
 - [x] Use exactly five authoritative lifecycle states: Untested, Checking, Active, Standby, and Rejected. All transitions are owned by the Resolver Pool.
-- [x] Untested means no completed qualification; Checking reserves a candidate for initial qualification or recheck; Active means qualified and selected for traffic; Standby means qualified, compatible with current Session requirements, and eligible for promotion; Rejected means qualification failed or the pairing became unsuitable.
+- [x] Untested means no completed qualification; Checking reserves a candidate for initial qualification or recheck; Active means qualified and selected for traffic; Standby means qualified, compatible with current Session requirements, and eligible for promotion; Rejected means qualification failed or the path became unsuitable.
 - [x] Initial qualification and background rechecking both use Checking. Active candidates are invalidated through observed failures or Session incompatibility; this change does not introduce background testing of Active Resolvers.
 - [x] Store lifecycle state once. Compatibility views such as IsValid and StandbyEligible are derived from authoritative state and eligibility requirements rather than independently mutable flags. Keep callers compiling during migration and remove obsolete internal flag-based decisions in this ticket.
 - [x] A passing check leads to Active or Standby through existing admission behavior; a failed check leads to Rejected. Rejected candidates can be retried. Displaced but still qualified Active Resolvers become Standby.

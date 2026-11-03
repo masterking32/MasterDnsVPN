@@ -24,6 +24,8 @@ import (
 
 // BurstProbeResult holds the measured metrics from a pipelined micro-burst test.
 type BurstProbeResult struct {
+	Incomplete          bool // The budget prevented completion; no network verdict was reached.
+	RateLimited         bool // Pacing prevents interpreting train throughput as endpoint capacity.
 	SentCount           int
 	ReceivedCount       int
 	LossRatio           float64
@@ -66,7 +68,11 @@ func (c *Client) sendPipelinedMicroBurst(
 	downloadMTU int,
 	uploadMTU int,
 	timeout time.Duration,
+	backgroundLimiter ...*BackgroundQueryLimiter,
 ) BurstProbeResult {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if packetCount < 1 {
 		packetCount = 1
 	}
@@ -80,7 +86,6 @@ func (c *Client) sendPipelinedMicroBurst(
 	}
 
 	result := BurstProbeResult{
-		SentCount:        packetCount,
 		DownloadMTUBytes: effectiveDownloadSize,
 	}
 
@@ -136,17 +141,33 @@ func (c *Client) sendPipelinedMicroBurst(
 		_ = transport.conn.SetReadDeadline(time.Time{})
 	}()
 
+	// Cancellation of the receiver's deadline also releases a sender waiting
+	// for a background query token; it must not outlive this bounded probe.
+	sendCtx, cancelSender := context.WithCancel(ctx)
+	defer cancelSender()
+	var limiter *BackgroundQueryLimiter
+	if len(backgroundLimiter) > 0 {
+		limiter = backgroundLimiter[0]
+	}
 	var itemMu sync.Mutex
 	firstSentAt := time.Now()
 	senderDone := make(chan struct{})
 
+	sentCount := 0
+	budgetWaited := false
 	go func() {
 		defer close(senderDone)
 		for i, query := range queries {
-			if ctx != nil && ctx.Err() != nil {
+			if ctx != nil && sendCtx.Err() != nil {
 				return
 			}
 
+			if limiter != nil && !limiter.TryAcquire() {
+				budgetWaited = true
+				if err := limiter.Acquire(sendCtx); err != nil {
+					return
+				}
+			}
 			code := codes[i]
 			now := time.Now()
 			itemMu.Lock()
@@ -160,9 +181,10 @@ func (c *Client) sendPipelinedMicroBurst(
 				return
 			}
 
+			sentCount++
 			if i < len(queries)-1 {
 				select {
-				case <-ctx.Done():
+				case <-sendCtx.Done():
 					return
 				case <-time.After(2 * time.Millisecond):
 				}
@@ -230,7 +252,10 @@ func (c *Client) sendPipelinedMicroBurst(
 		lastReceivedAt = now
 	}
 
+	cancelSender()
 	<-senderDone
+	result.SentCount = sentCount
+	result.RateLimited = budgetWaited
 
 	if ctx != nil && ctx.Err() != nil {
 		result.Qualified = false
@@ -239,8 +264,14 @@ func (c *Client) sendPipelinedMicroBurst(
 	}
 
 	// 3. Compute loss, timing, and throughput
-	lostCount := packetCount - result.ReceivedCount
-	result.LossRatio = float64(lostCount) / float64(packetCount)
+	if result.SentCount > 0 {
+		result.LossRatio = float64(result.SentCount-result.ReceivedCount) / float64(result.SentCount)
+	}
+	if limiter != nil && result.SentCount < packetCount && budgetWaited {
+		result.Incomplete = true
+		result.RejectReason = "background query budget interrupted burst"
+		return result
+	}
 
 	if result.ReceivedCount > 0 {
 		result.AverageRTT = sumRTT / time.Duration(result.ReceivedCount)
@@ -252,7 +283,7 @@ func (c *Client) sendPipelinedMicroBurst(
 		}
 
 		seconds := result.ElapsedDuration.Seconds()
-		if seconds > 0 {
+		if seconds > 0 && !result.RateLimited {
 			result.BurstThroughputKBps = (float64(result.TotalBytesRx) / 1024.0) / seconds
 		}
 		baseSpeed, _ := CalculateResolverScore(effectiveDownloadSize, result.AverageRTT, result.LossRatio)
@@ -274,7 +305,7 @@ func (c *Client) sendPipelinedMicroBurst(
 	} else if result.LossRatio > maxLossAllowed {
 		result.Qualified = false
 		result.RejectReason = fmt.Sprintf("excessive burst loss: %.1f%% > %.1f%%", result.LossRatio*100, maxLossAllowed*100)
-	} else if c.cfg.MinBurstThroughputKBps > 0 && result.BurstThroughputKBps < c.cfg.MinBurstThroughputKBps {
+	} else if !result.RateLimited && c.cfg.MinBurstThroughputKBps > 0 && result.BurstThroughputKBps < c.cfg.MinBurstThroughputKBps {
 		result.Qualified = false
 		result.RejectReason = fmt.Sprintf("low throughput: %.1f KB/s < %.1f KB/s", result.BurstThroughputKBps, c.cfg.MinBurstThroughputKBps)
 	} else {

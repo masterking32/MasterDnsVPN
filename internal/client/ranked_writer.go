@@ -32,79 +32,71 @@ func defaultRankedPersistenceConfig() RankedPersistenceConfig {
 	}
 }
 
-// RankedPersistenceWriter batches, coalesces, and serializes ranked endpoint saves
-// on a Client-owned background goroutine, decoupling file I/O from pool mutation locks.
+// RankedPersistenceWriter owns scheduling and serializes saves. At most one
+// storage operation is in flight, including explicit flushes.
 type RankedPersistenceWriter struct {
-	mu         sync.Mutex
-	saveMu     sync.Mutex
-	cfg        RankedPersistenceConfig
-	log        *logger.Logger
-	snapshotFn func(maxCount int) []config.ResolverAddress
-	saveFn     func(path string, ranked []config.ResolverAddress) error
-
-	notifyCh chan struct{}
-	closeCh  chan struct{}
-	doneCh   chan struct{}
-
+	mu           sync.Mutex
+	cfg          RankedPersistenceConfig
+	log          *logger.Logger
+	snapshotFn   func(int) []config.ResolverAddress
+	saveFn       func(string, []config.ResolverAddress) error
+	notifyCh     chan struct{}
+	flushCh      chan rankedFlush
+	closeCh      chan struct{}
+	doneCh       chan struct{}
 	isDirty      bool
 	dirtySeq     uint64
-	cleanSeq     uint64
 	firstDirtyAt time.Time
-	lastWritten  []config.ResolverAddress
-
-	currentBackoff time.Duration
-	stopOnce       sync.Once
-	closed         bool
+	closed       bool
+	stopOnce     sync.Once
 }
 
-func newRankedPersistenceWriter(
-	cfg RankedPersistenceConfig,
-	log *logger.Logger,
-	snapshotFn func(maxCount int) []config.ResolverAddress,
-	saveFn func(path string, ranked []config.ResolverAddress) error,
+type rankedFlush struct {
+	revision uint64
+	done     chan error
+}
+
+type rankedSaveResult struct {
+	revision  uint64
+	endpoints []config.ResolverAddress
+	err       error
+}
+
+func newRankedPersistenceWriter(cfg RankedPersistenceConfig, log *logger.Logger,
+	snapshotFn func(int) []config.ResolverAddress,
+	saveFn func(string, []config.ResolverAddress) error,
 ) *RankedPersistenceWriter {
+	defaults := defaultRankedPersistenceConfig()
 	if cfg.CoalesceDelay <= 0 {
-		cfg.CoalesceDelay = 200 * time.Millisecond
+		cfg.CoalesceDelay = defaults.CoalesceDelay
 	}
 	if cfg.MaxDirtyWait <= 0 {
-		cfg.MaxDirtyWait = 2 * time.Second
+		cfg.MaxDirtyWait = defaults.MaxDirtyWait
 	}
 	if cfg.RetryBackoff <= 0 {
-		cfg.RetryBackoff = 500 * time.Millisecond
+		cfg.RetryBackoff = defaults.RetryBackoff
 	}
 	if cfg.MaxRetryBackoff <= 0 {
-		cfg.MaxRetryBackoff = 4 * time.Second
+		cfg.MaxRetryBackoff = defaults.MaxRetryBackoff
 	}
 	if saveFn == nil {
 		saveFn = config.UpdateResolversFileWithRanked
 	}
-
-	w := &RankedPersistenceWriter{
-		cfg:            cfg,
-		log:            log,
-		snapshotFn:     snapshotFn,
-		saveFn:         saveFn,
-		notifyCh:       make(chan struct{}, 1),
-		closeCh:        make(chan struct{}),
-		doneCh:         make(chan struct{}),
-		currentBackoff: cfg.RetryBackoff,
-	}
-
+	w := &RankedPersistenceWriter{cfg: cfg, log: log, snapshotFn: snapshotFn, saveFn: saveFn,
+		notifyCh: make(chan struct{}, 1), flushCh: make(chan rankedFlush),
+		closeCh: make(chan struct{}), doneCh: make(chan struct{})}
 	if cfg.Enabled && cfg.ResolversPath != "" {
 		go w.run()
 	} else {
 		close(w.doneCh)
 	}
-
 	return w
 }
 
-// NotifyDirty nonblockingly records that candidate rankings have changed.
 func (w *RankedPersistenceWriter) NotifyDirty() {
 	if w == nil || !w.cfg.Enabled || w.cfg.ResolversPath == "" {
 		return
 	}
-
 	w.mu.Lock()
 	if w.closed {
 		w.mu.Unlock()
@@ -116,7 +108,6 @@ func (w *RankedPersistenceWriter) NotifyDirty() {
 		w.firstDirtyAt = time.Now()
 	}
 	w.mu.Unlock()
-
 	select {
 	case w.notifyCh <- struct{}{}:
 	default:
@@ -125,153 +116,171 @@ func (w *RankedPersistenceWriter) NotifyDirty() {
 
 func (w *RankedPersistenceWriter) run() {
 	defer close(w.doneCh)
-
-	var timer *time.Timer
+	timer := time.NewTimer(time.Hour)
+	timer.Stop()
+	defer timer.Stop()
 	var timerCh <-chan time.Time
+	var shutdown *time.Timer
+	var shutdownCh <-chan time.Time
+	closeCh := w.closeCh
+	results := make(chan rankedSaveResult, 1)
+	var lastWritten []config.ResolverAddress
+	var waiters []rankedFlush
+	inFlight, stopping := false, false
+	backoff := w.cfg.RetryBackoff
+	var retryAt time.Time
 
-	stopTimer := func() {
-		if timer != nil {
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
-			timerCh = nil
+	schedule := func() {
+		w.mu.Lock()
+		dirty, first := w.isDirty, w.firstDirtyAt
+		w.mu.Unlock()
+		if !dirty || inFlight {
+			return
 		}
-	}
-
-	resetTimer := func(d time.Duration) {
-		stopTimer()
-		if timer == nil {
-			timer = time.NewTimer(d)
-		} else {
-			timer.Reset(d)
+		due := time.Now().Add(w.cfg.CoalesceDelay)
+		if maxDue := first.Add(w.cfg.MaxDirtyWait); maxDue.Before(due) {
+			due = maxDue
 		}
+		if due.Before(retryAt) {
+			due = retryAt
+		}
+		delay := time.Until(due)
+		if delay < 0 {
+			delay = 0
+		}
+		timer.Reset(delay)
 		timerCh = timer.C
 	}
+	startSave := func() {
+		if inFlight {
+			return
+		}
+		w.mu.Lock()
+		dirty, revision := w.isDirty, w.dirtySeq
+		w.mu.Unlock()
+		if !dirty {
+			return
+		}
+		inFlight = true
+		previous := append([]config.ResolverAddress(nil), lastWritten...)
+		go func() {
+			ranked := w.snapshotFn(max(32, w.cfg.MaxRanked))
+			var err error
+			if !endpointOrdersEqual(ranked, previous) {
+				err = w.saveFn(w.cfg.ResolversPath, ranked)
+			}
+			results <- rankedSaveResult{revision: revision, endpoints: ranked, err: err}
+		}()
+	}
+	defer func() {
+		if shutdown != nil {
+			shutdown.Stop()
+		}
+		for _, waiter := range waiters {
+			waiter.done <- fmt.Errorf("ranked writer stopped before flush completed")
+		}
+	}()
 
 	for {
 		select {
-		case <-w.closeCh:
-			stopTimer()
-			return
-
-		case <-w.notifyCh:
-			w.mu.Lock()
-			if !w.isDirty {
-				w.mu.Unlock()
-				continue
+		case <-closeCh:
+			closeCh = nil
+			stopping = true
+			shutdown = time.NewTimer(2 * time.Second)
+			shutdownCh = shutdown.C
+			startSave()
+		case <-shutdownCh:
+			if w.log != nil {
+				w.log.Warnf("[Resolvers] Shutdown flush exceeded 2 seconds")
 			}
-			now := time.Now()
-			coalesceTarget := now.Add(w.cfg.CoalesceDelay)
-			maxTarget := w.firstDirtyAt.Add(w.cfg.MaxDirtyWait)
-
-			delay := w.cfg.CoalesceDelay
-			if maxTarget.Before(coalesceTarget) {
-				delay = maxTarget.Sub(now)
-				if delay < 0 {
-					delay = 0
+			return
+		case waiter := <-w.flushCh:
+			w.mu.Lock()
+			dirty := w.isDirty
+			w.mu.Unlock()
+			if !dirty {
+				waiter.done <- nil
+			} else {
+				waiters = append(waiters, waiter)
+				startSave()
+			}
+		case <-w.notifyCh:
+			schedule()
+		case <-timerCh:
+			timerCh = nil
+			startSave()
+		case result := <-results:
+			inFlight = false
+			w.mu.Lock()
+			if result.err == nil {
+				lastWritten = append([]config.ResolverAddress(nil), result.endpoints...)
+				if w.dirtySeq == result.revision {
+					w.isDirty = false
+					w.firstDirtyAt = time.Time{}
+				}
+				backoff = w.cfg.RetryBackoff
+				retryAt = time.Time{}
+			} else {
+				retryAt = time.Now().Add(backoff)
+				backoff *= 2
+				if backoff > w.cfg.MaxRetryBackoff {
+					backoff = w.cfg.MaxRetryBackoff
 				}
 			}
 			w.mu.Unlock()
-
-			resetTimer(delay)
-
-		case <-timerCh:
-			stopTimer()
-			err := w.performSave()
-			if err != nil {
-				// Retry with backoff
-				w.mu.Lock()
-				backoff := w.currentBackoff
-				w.currentBackoff *= 2
-				if w.currentBackoff > w.cfg.MaxRetryBackoff {
-					w.currentBackoff = w.cfg.MaxRetryBackoff
+			if result.err != nil && w.log != nil {
+				w.log.Warnf("[Resolvers] Failed to save ranked resolvers: %v", result.err)
+			}
+			remaining := waiters[:0]
+			for _, waiter := range waiters {
+				if waiter.revision <= result.revision {
+					waiter.done <- result.err
+				} else {
+					remaining = append(remaining, waiter)
 				}
-				w.mu.Unlock()
-				resetTimer(backoff)
+			}
+			waiters = remaining
+			if len(waiters) > 0 && result.err == nil {
+				startSave()
+			} else {
+				schedule()
+			}
+		}
+		if stopping && !inFlight {
+			w.mu.Lock()
+			dirty := w.isDirty
+			w.mu.Unlock()
+			if !dirty {
+				return
 			}
 		}
 	}
 }
 
-// performSave serializes snapshot acquisition and persistence under lock.
-func (w *RankedPersistenceWriter) performSave() error {
-	w.saveMu.Lock()
-	defer w.saveMu.Unlock()
-
-	w.mu.Lock()
-	if !w.isDirty {
-		w.mu.Unlock()
-		return nil
-	}
-	targetSeq := w.dirtySeq
-	w.mu.Unlock()
-
-	maxRanked := w.cfg.MaxRanked
-	if maxRanked < 32 {
-		maxRanked = 32
-	}
-	ranked := w.snapshotFn(maxRanked)
-
-	w.mu.Lock()
-	if endpointOrdersEqual(ranked, w.lastWritten) {
-		// Telemetry changed but endpoint order remained unchanged -> no file rewrite
-		if w.dirtySeq == targetSeq {
-			w.isDirty = false
-			w.firstDirtyAt = time.Time{}
-		}
-		w.currentBackoff = w.cfg.RetryBackoff
-		w.mu.Unlock()
-		return nil
-	}
-	w.mu.Unlock()
-
-	err := w.saveFn(w.cfg.ResolversPath, ranked)
-
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	if err != nil {
-		if w.log != nil {
-			w.log.Warnf("<yellow>[Resolvers]</yellow> Failed to auto-save ranked resolvers to <cyan>%s</cyan>: %v",
-				w.cfg.ResolversPath, err)
-		}
-		return fmt.Errorf("save ranked resolvers: %w", err)
-	}
-
-	w.lastWritten = make([]config.ResolverAddress, len(ranked))
-	copy(w.lastWritten, ranked)
-	w.currentBackoff = w.cfg.RetryBackoff
-
-	if w.dirtySeq == targetSeq {
-		w.isDirty = false
-		w.firstDirtyAt = time.Time{}
-	}
-
-	if w.log != nil {
-		w.log.Debugf("<green>[Resolvers]</green> Saved %d ranked resolvers to <cyan>%s</cyan>",
-			len(ranked), w.cfg.ResolversPath)
-	}
-
-	return nil
-}
-
-// Flush immediately flushes dirty ranked endpoints.
+// Flush asks the single writer to persist the current dirty revision. Cancelling
+// a waiter never spawns another save or blocks the writer's completion path.
 func (w *RankedPersistenceWriter) Flush(ctx context.Context) error {
 	if w == nil || !w.cfg.Enabled || w.cfg.ResolversPath == "" {
 		return nil
 	}
-	done := make(chan error, 1)
-	go func() {
-		done <- w.performSave()
-	}()
-
+	w.mu.Lock()
+	request := rankedFlush{revision: w.dirtySeq, done: make(chan error, 1)}
+	closed := w.closed
+	w.mu.Unlock()
+	if closed {
+		return fmt.Errorf("ranked writer is closed")
+	}
 	select {
 	case <-ctx.Done():
-		return fmt.Errorf("ranked writer flush context: %w", ctx.Err())
-	case err := <-done:
+		return fmt.Errorf("ranked writer flush: %w", ctx.Err())
+	case <-w.doneCh:
+		return fmt.Errorf("ranked writer is closed")
+	case w.flushCh <- request:
+	}
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("ranked writer flush: %w", ctx.Err())
+	case err := <-request.done:
 		if err != nil {
 			return fmt.Errorf("ranked writer flush: %w", err)
 		}
@@ -279,7 +288,9 @@ func (w *RankedPersistenceWriter) Flush(ctx context.Context) error {
 	}
 }
 
-// Close gracefully flushes pending changes within bounded timeout and joins the background writer.
+// Close stops notifications, allows up to two seconds for final persistence, and
+// joins the scheduling goroutine. Go cannot cancel a blocked filesystem syscall;
+// a single outstanding storage operation may finish after the deadline.
 func (w *RankedPersistenceWriter) Close() {
 	if w == nil {
 		return
@@ -287,15 +298,7 @@ func (w *RankedPersistenceWriter) Close() {
 	w.stopOnce.Do(func() {
 		w.mu.Lock()
 		w.closed = true
-		dirty := w.isDirty
 		w.mu.Unlock()
-
-		if dirty && w.cfg.Enabled && w.cfg.ResolversPath != "" {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			_ = w.Flush(ctx)
-			cancel()
-		}
-
 		close(w.closeCh)
 		<-w.doneCh
 	})

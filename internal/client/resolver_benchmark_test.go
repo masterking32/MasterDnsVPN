@@ -32,9 +32,7 @@ var (
 // (or MDNS_BENCHMARK_RESOLVERS/MDNS_BENCHMARK_DOMAIN env vars) are provided, it profiles:
 //   - T_ready: Time elapsed until Session initialization begins (MinReady met)
 //   - T_coverage: Time elapsed until 100% of configured pairings receive qualification
-//   - Q_bg: Total background DNS queries sent
-//   - N_swaps: Number of active pairing replacements performed
-//   - W_disk: Number of ranked file writes performed
+// This probe-only benchmark does not measure foreground application throughput.
 func TestBenchmark_RealNetwork_FastStart(t *testing.T) {
 	resolversPath := *benchResolversFile
 	domain := *benchDomain
@@ -96,6 +94,7 @@ func TestBenchmark_RealNetwork_FastStart(t *testing.T) {
 		t.Fatalf("client codec init failed: %v", err)
 	}
 	client := New(cfg, nil, codec)
+	defer client.Close()
 	if err := client.BuildConnectionMap(); err != nil {
 		t.Fatalf("BuildConnectionMap failed: %v", err)
 	}
@@ -116,17 +115,23 @@ func TestBenchmark_RealNetwork_FastStart(t *testing.T) {
 	coverageStart := time.Now()
 	coverageCtx, coverageCancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer coverageCancel()
+	healthDone := make(chan struct{})
+	go func() { defer close(healthDone); client.runResolverHealthLoop(coverageCtx) }()
+	defer func() { coverageCancel(); <-healthDone }()
 
 	for !pool.IsFirstPassComplete() && coverageCtx.Err() == nil {
 		time.Sleep(100 * time.Millisecond)
 	}
 	tCoverage := time.Since(coverageStart)
+	if !pool.IsFirstPassComplete() {
+		t.Fatal("background initial coverage did not complete before deadline")
+	}
 
 	stats := pool.CoverageStats()
 	t.Logf("=== Real-Network Benchmark Results ===")
 	t.Logf("T_ready:           %v (Active pairings: %d)", tReady, pool.ActiveCount())
 	t.Logf("T_coverage:        %v (First pass complete: %v)", tCoverage, stats.IsFirstPassComplete)
-	t.Logf("Total Configured:  %d", stats.ConfiguredPairings)
+	t.Logf("Total Configured:  %d", stats.ConfiguredPaths)
 	t.Logf("Initial Completed: %d", stats.CompletedInitialAttempts)
 	t.Logf("Remaining Untested:%d", stats.RemainingUntested)
 	t.Logf("Distinct Qualified:%d", stats.DistinctQualified)

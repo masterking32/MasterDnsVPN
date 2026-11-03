@@ -27,7 +27,7 @@ func TestScore_SharedEvaluation_ConsistentQuality(t *testing.T) {
 	}
 	pool.SetConnections([]*Connection{conn})
 	pool.AcquireCandidateForChecking(conn.Key)
-	pool.CommitCandidateOutcome(conn.Key, true, 1200, 1200, 1200, 50*time.Millisecond)
+	pool.CommitCandidateOutcome(candidateSnapshotForTest(pool, conn.Key), true, 1200, 1200, 1200, 50*time.Millisecond)
 
 	// 1. Direct evaluation from shared function
 	obs := CandidateObservationInput{

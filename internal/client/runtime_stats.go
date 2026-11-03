@@ -185,7 +185,7 @@ func (c *Client) DumpRuntimeStats(reason string) {
 	}
 	c.log.Infof(
 		"<magenta>Discovery Coverage: Configured: <cyan>%d</cyan> | Completed Attempts: <green>%d</green> | Remaining Untested: <yellow>%d</yellow> | Distinct Qualified Endpoints: <cyan>%d</cyan> (First-Pass Complete: %v)</magenta>",
-		cov.ConfiguredPairings,
+		cov.ConfiguredPaths,
 		cov.CompletedInitialAttempts,
 		cov.RemainingUntested,
 		cov.DistinctQualified,
@@ -215,6 +215,9 @@ func calculateResolverRuntimeSpeedAndScore(s ResolverStatsSnapshot) (string, str
 		LiveSentCount:       s.Sent,
 		LiveLostCount:       s.Lost,
 	})
+	if s.Evaluation != nil {
+		ev = *s.Evaluation
+	}
 	speedStr := FormatResolverSpeed(ev.ThroughputKBps)
 	if !ev.ThroughputIsMeasured && ev.ThroughputKBps > 0 {
 		speedStr += " (est)"
