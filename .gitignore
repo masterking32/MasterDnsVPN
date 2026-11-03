@@ -25,4 +25,7 @@ build/
 .gocache
 .bench/
 live-configs/
-.kilo/
+.kilo/
+.scratch/
+.agents/
+
