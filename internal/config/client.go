@@ -50,6 +50,7 @@ type ClientConfig struct {
 	StreamResolverFailoverResendThreshold int               `toml:"STREAM_RESOLVER_FAILOVER_RESEND_THRESHOLD"`
 	StreamResolverFailoverCooldownSec     float64           `toml:"STREAM_RESOLVER_FAILOVER_COOLDOWN"`
 	RecheckInactiveServersEnabled         bool              `toml:"RECHECK_INACTIVE_SERVERS_ENABLED"`
+	AutoSaveRankedResolvers               bool              `toml:"AUTO_SAVE_RANKED_RESOLVERS"`
 	AutoDisableTimeoutServers             bool              `toml:"AUTO_DISABLE_TIMEOUT_SERVERS"`
 	AutoDisableTimeoutWindowSeconds       float64           `toml:"AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS"`
 	FDControlUnixSocket                   string            `toml:"FD_CONTROL_UNIX_SOCKET"`
@@ -67,6 +68,16 @@ type ClientConfig struct {
 	MTUTestRetries                        int               `toml:"MTU_TEST_RETRIES"`
 	MTUTestTimeout                        float64           `toml:"MTU_TEST_TIMEOUT"`
 	MTUTestParallelism                    int               `toml:"MTU_TEST_PARALLELISM"`
+	MicroBurstTestEnabled                 bool              `toml:"MICRO_BURST_TEST_ENABLED"`
+	MicroBurstPacketCount                 int               `toml:"MICRO_BURST_PACKET_COUNT"`
+	MicroBurstParallelism                 int               `toml:"MICRO_BURST_PARALLELISM"`
+	MaxActiveResolvers                    int               `toml:"MAX_ACTIVE_RESOLVERS"`
+	MinBurstThroughputKBps                float64           `toml:"MIN_BURST_THROUGHPUT_KBPS"`
+	MaxBurstLossRatio                     float64           `toml:"MAX_BURST_LOSS_RATIO"`
+	RecheckBurstTestEnabled               bool              `toml:"RECHECK_BURST_TEST_ENABLED"`
+	RecheckBurstPacketCount               int               `toml:"RECHECK_BURST_PACKET_COUNT"`
+	InteractiveStatsEnabled               bool              `toml:"INTERACTIVE_STATS_ENABLED"`
+	RuntimeStatsIntervalSeconds           float64           `toml:"RUNTIME_STATS_INTERVAL_SECONDS"`
 	RX_TX_Workers                         int               `toml:"RX_TX_WORKERS"`
 	LegacyTunnelReaderWorkers             int               `toml:"TUNNEL_READER_WORKERS"`
 	LegacyTunnelWriterWorkers             int               `toml:"TUNNEL_WRITER_WORKERS"`
@@ -130,6 +141,10 @@ type ClientConfigFlagBinder struct {
 	flagToField map[string]string
 }
 
+func DefaultClientConfig() ClientConfig {
+	return defaultClientConfig()
+}
+
 func defaultClientConfig() ClientConfig {
 	return ClientConfig{
 		ProtocolType:                          "SOCKS5",
@@ -147,12 +162,13 @@ func defaultClientConfig() ClientConfig {
 		LocalDNSPendingTimeoutSec:             300.0,
 		LocalDNSCachePersist:                  true,
 		LocalDNSCacheFlushSec:                 60.0,
-		ResolverBalancingStrategy:             2,
+		ResolverBalancingStrategy:             9,
 		PacketDuplicationCount:                2,
 		SetupPacketDuplicationCount:           2,
 		StreamResolverFailoverResendThreshold: 2,
 		StreamResolverFailoverCooldownSec:     2.5,
 		RecheckInactiveServersEnabled:         true,
+		AutoSaveRankedResolvers:               true,
 		AutoDisableTimeoutServers:             true,
 		AutoDisableTimeoutWindowSeconds:       30.0,
 		FDControlUnixSocket:                   "",
@@ -170,6 +186,15 @@ func defaultClientConfig() ClientConfig {
 		MTUTestRetries:                        2,
 		MTUTestTimeout:                        2.0,
 		MTUTestParallelism:                    16,
+		MicroBurstTestEnabled:                 true,
+		MicroBurstPacketCount:                 6,
+		MicroBurstParallelism:                 8,
+		MaxActiveResolvers:                    15,
+		MinBurstThroughputKBps:                0.0,
+		MaxBurstLossRatio:                     0.20,
+		RecheckBurstTestEnabled:               true,
+		RecheckBurstPacketCount:               4,
+		RuntimeStatsIntervalSeconds:           60.0,
 		RX_TX_Workers:                         4,
 		TunnelProcessWorkers:                  0,
 		TunnelPacketTimeoutSec:                10.0,
@@ -389,7 +414,7 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 
 	cfg.CompressionMinSize = defaultIntBelow(cfg.CompressionMinSize, 100, compression.DefaultMinSize)
 
-	if cfg.ResolverBalancingStrategy < 0 || cfg.ResolverBalancingStrategy > 8 {
+	if cfg.ResolverBalancingStrategy < 0 || cfg.ResolverBalancingStrategy > 9 {
 		return cfg, fmt.Errorf("invalid RESOLVER_BALANCING_STRATEGY: %d", cfg.ResolverBalancingStrategy)
 	}
 
@@ -431,6 +456,17 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 	cfg.MTUTestRetries = defaultIntBelow(cfg.MTUTestRetries, 1, 1)
 	cfg.MTUTestTimeout = defaultFloatAtMostZero(cfg.MTUTestTimeout, 2.0)
 	cfg.MTUTestParallelism = defaultIntBelow(cfg.MTUTestParallelism, 1, 1)
+	cfg.MicroBurstPacketCount = clampInt(defaultIntBelow(cfg.MicroBurstPacketCount, 2, 6), 2, 32)
+	cfg.MicroBurstParallelism = clampInt(defaultIntBelow(cfg.MicroBurstParallelism, 1, 8), 1, 128)
+	cfg.MaxActiveResolvers = clampInt(defaultIntBelow(cfg.MaxActiveResolvers, 0, 15), 0, 1024)
+	cfg.MaxBurstLossRatio = clampFloat(defaultFloatBelow(cfg.MaxBurstLossRatio, 0.0, 0.20), 0.0, 1.0)
+	cfg.MinBurstThroughputKBps = clampFloat(defaultFloatBelow(cfg.MinBurstThroughputKBps, 0.0, 0.0), 0.0, 100000.0)
+	cfg.RecheckBurstPacketCount = clampInt(defaultIntBelow(cfg.RecheckBurstPacketCount, 2, 4), 2, 32)
+	if cfg.RuntimeStatsIntervalSeconds < 0.0 {
+		cfg.RuntimeStatsIntervalSeconds = 0.0
+	} else if cfg.RuntimeStatsIntervalSeconds > 0.0 {
+		cfg.RuntimeStatsIntervalSeconds = clampFloat(cfg.RuntimeStatsIntervalSeconds, 1.0, 86400.0)
+	}
 	legacyRX_TX_Workers := max(cfg.LegacyTunnelReaderWorkers, cfg.LegacyTunnelWriterWorkers)
 	if !cfg.explicitRX_TX_Workers && legacyRX_TX_Workers > 0 {
 		cfg.RX_TX_Workers = legacyRX_TX_Workers

@@ -183,7 +183,7 @@ func TestLoadClientConfigRejectsInvalidResolverBalancingStrategy(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(`
 PROTOCOL_TYPE = "SOCKS5"
 DOMAINS = ["v.domain.com"]
-RESOLVER_BALANCING_STRATEGY = 9
+RESOLVER_BALANCING_STRATEGY = 10
 DATA_ENCRYPTION_METHOD = 1
 ENCRYPTION_KEY = "secret"
 `), 0o644); err != nil {
@@ -195,6 +195,73 @@ ENCRYPTION_KEY = "secret"
 
 	if _, err := LoadClientConfig(configPath); err == nil {
 		t.Fatal("LoadClientConfig should reject an invalid RESOLVER_BALANCING_STRATEGY")
+	}
+}
+
+func TestLoadClientConfigResolverBalancingStrategyDefaultAndExplicit(t *testing.T) {
+	dir := t.TempDir()
+	resolversPath := filepath.Join(dir, "client_resolvers.txt")
+	if err := os.WriteFile(resolversPath, []byte("8.8.8.8\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile resolvers failed: %v", err)
+	}
+
+	// 1. Omitted strategy defaults to 9 (BalancingCommonScore)
+	configPathOmitted := filepath.Join(dir, "omitted.toml")
+	if err := os.WriteFile(configPathOmitted, []byte(`
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["v.domain.com"]
+RESOLVERS_FILE_PATH = "client_resolvers.txt"
+DATA_ENCRYPTION_METHOD = 1
+ENCRYPTION_KEY = "secret"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile config failed: %v", err)
+	}
+	cfgOmitted, err := LoadClientConfig(configPathOmitted)
+	if err != nil {
+		t.Fatalf("LoadClientConfig failed: %v", err)
+	}
+	if cfgOmitted.ResolverBalancingStrategy != 9 {
+		t.Fatalf("expected omitted strategy to default to 9, got %d", cfgOmitted.ResolverBalancingStrategy)
+	}
+
+	// 2. Explicit strategy 9 (CommonScore) is valid
+	configPath9 := filepath.Join(dir, "strategy9.toml")
+	if err := os.WriteFile(configPath9, []byte(`
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["v.domain.com"]
+RESOLVERS_FILE_PATH = "client_resolvers.txt"
+RESOLVER_BALANCING_STRATEGY = 9
+DATA_ENCRYPTION_METHOD = 1
+ENCRYPTION_KEY = "secret"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile config failed: %v", err)
+	}
+	cfg9, err := LoadClientConfig(configPath9)
+	if err != nil {
+		t.Fatalf("LoadClientConfig failed: %v", err)
+	}
+	if cfg9.ResolverBalancingStrategy != 9 {
+		t.Fatalf("expected strategy 9, got %d", cfg9.ResolverBalancingStrategy)
+	}
+
+	// 3. Explicit strategy 6 (LossThenLatency) is preserved
+	configPath6 := filepath.Join(dir, "strategy6.toml")
+	if err := os.WriteFile(configPath6, []byte(`
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["v.domain.com"]
+RESOLVERS_FILE_PATH = "client_resolvers.txt"
+RESOLVER_BALANCING_STRATEGY = 6
+DATA_ENCRYPTION_METHOD = 1
+ENCRYPTION_KEY = "secret"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile config failed: %v", err)
+	}
+	cfg6, err := LoadClientConfig(configPath6)
+	if err != nil {
+		t.Fatalf("LoadClientConfig failed: %v", err)
+	}
+	if cfg6.ResolverBalancingStrategy != 6 {
+		t.Fatalf("expected strategy 6, got %d", cfg6.ResolverBalancingStrategy)
 	}
 }
 
@@ -626,5 +693,138 @@ func TestLoadClientConfigFromJSONBase64WithOverridesAppliesBeforeFinalize(t *tes
 	}
 	if cfg.ResolverMap["9.9.9.9"] != 53 {
 		t.Fatalf("expected override resolvers to be loaded, got=%d", cfg.ResolverMap["9.9.9.9"])
+	}
+}
+
+func TestLoadClientConfigMicroBurstKnobs(t *testing.T) {
+	dir := t.TempDir()
+
+	configPath := filepath.Join(dir, "client_config.toml")
+	resolversPath := filepath.Join(dir, "client_resolvers.txt")
+
+	if err := os.WriteFile(configPath, []byte(`
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["v.domain.com"]
+DATA_ENCRYPTION_METHOD = 1
+ENCRYPTION_KEY = "secret"
+MICRO_BURST_TEST_ENABLED = true
+MICRO_BURST_PACKET_COUNT = 8
+MICRO_BURST_PARALLELISM = 12
+MAX_ACTIVE_RESOLVERS = 20
+MIN_BURST_THROUGHPUT_KBPS = 50.0
+MAX_BURST_LOSS_RATIO = 0.15
+RECHECK_BURST_TEST_ENABLED = true
+RECHECK_BURST_PACKET_COUNT = 5
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile config failed: %v", err)
+	}
+	if err := os.WriteFile(resolversPath, []byte("8.8.8.8\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile resolvers failed: %v", err)
+	}
+
+	cfg, err := LoadClientConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadClientConfig returned error: %v", err)
+	}
+
+	if !cfg.MicroBurstTestEnabled {
+		t.Fatal("expected MicroBurstTestEnabled to be true")
+	}
+	if cfg.MicroBurstPacketCount != 8 {
+		t.Fatalf("unexpected MicroBurstPacketCount: got=%d want=8", cfg.MicroBurstPacketCount)
+	}
+	if cfg.MicroBurstParallelism != 12 {
+		t.Fatalf("unexpected MicroBurstParallelism: got=%d want=12", cfg.MicroBurstParallelism)
+	}
+	if cfg.MaxActiveResolvers != 20 {
+		t.Fatalf("unexpected MaxActiveResolvers: got=%d want=20", cfg.MaxActiveResolvers)
+	}
+	if cfg.MinBurstThroughputKBps != 50.0 {
+		t.Fatalf("unexpected MinBurstThroughputKBps: got=%v want=50.0", cfg.MinBurstThroughputKBps)
+	}
+	if cfg.MaxBurstLossRatio != 0.15 {
+		t.Fatalf("unexpected MaxBurstLossRatio: got=%v want=0.15", cfg.MaxBurstLossRatio)
+	}
+	if !cfg.RecheckBurstTestEnabled {
+		t.Fatal("expected RecheckBurstTestEnabled to be true")
+	}
+	if cfg.RecheckBurstPacketCount != 5 {
+		t.Fatalf("unexpected RecheckBurstPacketCount: got=%d want=5", cfg.RecheckBurstPacketCount)
+	}
+
+	// Test max clamps: MICRO_BURST_PARALLELISM = 128, RECHECK_BURST_PACKET_COUNT = 32
+	if err := os.WriteFile(configPath, []byte(`
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["v.domain.com"]
+DATA_ENCRYPTION_METHOD = 1
+ENCRYPTION_KEY = "secret"
+MICRO_BURST_PARALLELISM = 128
+RECHECK_BURST_PACKET_COUNT = 32
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile config failed: %v", err)
+	}
+	cfgClamped, err := LoadClientConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadClientConfig returned error: %v", err)
+	}
+	if cfgClamped.MicroBurstParallelism != 128 {
+		t.Fatalf("expected MicroBurstParallelism 128, got=%d", cfgClamped.MicroBurstParallelism)
+	}
+	if cfgClamped.RecheckBurstPacketCount != 32 {
+		t.Fatalf("expected RecheckBurstPacketCount 32, got=%d", cfgClamped.RecheckBurstPacketCount)
+	}
+
+	// Test exceeding limits clamps to bounds
+	if err := os.WriteFile(configPath, []byte(`
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["v.domain.com"]
+DATA_ENCRYPTION_METHOD = 1
+ENCRYPTION_KEY = "secret"
+MICRO_BURST_PARALLELISM = 256
+RECHECK_BURST_PACKET_COUNT = 64
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile config failed: %v", err)
+	}
+	cfgExcess, err := LoadClientConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadClientConfig returned error: %v", err)
+	}
+	if cfgExcess.MicroBurstParallelism != 128 {
+		t.Fatalf("expected MicroBurstParallelism clamped to 128, got=%d", cfgExcess.MicroBurstParallelism)
+	}
+	if cfgExcess.RecheckBurstPacketCount != 32 {
+		t.Fatalf("expected RecheckBurstPacketCount clamped to 32, got=%d", cfgExcess.RecheckBurstPacketCount)
+	}
+}
+
+func TestLoadClientConfigRuntimeStatsKnobs(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "client_config.toml")
+	resolversPath := filepath.Join(dir, "client_resolvers.txt")
+
+	if err := os.WriteFile(configPath, []byte(`
+PROTOCOL_TYPE = "SOCKS5"
+DOMAINS = ["example.com"]
+DATA_ENCRYPTION_METHOD = 1
+ENCRYPTION_KEY = "test-secret"
+RUNTIME_STATS_INTERVAL_SECONDS = 45.0
+INTERACTIVE_STATS_ENABLED = true
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile config failed: %v", err)
+	}
+	if err := os.WriteFile(resolversPath, []byte("1.1.1.1\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile resolvers failed: %v", err)
+	}
+
+	cfg, err := LoadClientConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadClientConfig returned error: %v", err)
+	}
+
+	if !cfg.InteractiveStatsEnabled {
+		t.Fatal("interactive stats opt-in was not loaded")
+	}
+	if cfg.RuntimeStatsIntervalSeconds != 45.0 {
+		t.Fatalf("unexpected RuntimeStatsIntervalSeconds: got=%v want=45.0", cfg.RuntimeStatsIntervalSeconds)
 	}
 }

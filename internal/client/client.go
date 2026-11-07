@@ -33,10 +33,12 @@ const (
 )
 
 type Client struct {
-	cfg      config.ClientConfig
-	log      *logger.Logger
-	codec    *security.Codec
-	balancer *Balancer
+	cfg       config.ClientConfig
+	log       *logger.Logger
+	codec     *security.Codec
+	balancer  *Balancer
+	pool      *ResolverPool
+	bgLimiter *BackgroundQueryLimiter
 
 	successMTUChecks  bool
 	udpBufferPool     sync.Pool
@@ -86,6 +88,7 @@ type Client struct {
 	sessionResetPending   atomic.Bool
 	runtimeResetPending   atomic.Bool
 	resolverHealthStarted atomic.Bool
+	runtimeStatsStarted   atomic.Bool
 	sessionResetSignal    chan struct{}
 	rxDroppedPackets      atomic.Uint64
 	lastRXDropLogUnix     atomic.Int64
@@ -134,6 +137,9 @@ type Client struct {
 
 	// SOCKS5 brute-force rate limiter
 	socksRateLimit *socksRateLimiter
+
+	// Background ranked resolver persistence writer
+	rankedWriter *RankedPersistenceWriter
 }
 
 // clientStreamTXPacket represents a queued packet pending transmission or retransmission.
@@ -244,11 +250,16 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		responseMode = mtuProbeBase64Reply
 	}
 
+	pool := NewResolverPool(cfg.MaxActiveResolvers, log)
+	balancer := NewBalancer(cfg.ResolverBalancingStrategy, log, pool)
+
 	c := &Client{
 		cfg:                 cfg,
 		log:                 log,
 		codec:               codec,
-		balancer:            NewBalancer(cfg.ResolverBalancingStrategy, log),
+		balancer:            balancer,
+		pool:                pool,
+		bgLimiter:           NewBackgroundQueryLimiter(15.0, 15),
 		uploadCompression:   uint8(cfg.UploadCompressionType),
 		downloadCompression: uint8(cfg.DownloadCompressionType),
 		mtuCryptoOverhead:   mtuCryptoOverhead(cfg.DataEncryptionMethod),
@@ -310,11 +321,43 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		c.streamResolverFailoverCooldown = time.Second
 	}
 
+	c.balancer.SetMaxActiveResolvers(cfg.MaxActiveResolvers)
 	c.balancer.SetStreamFailoverConfig(c.streamResolverFailoverResendThreshold, c.streamResolverFailoverCooldown)
 	c.balancer.SetAutoDisableConfig(
 		cfg.AutoDisableTimeoutServers,
 		time.Duration(cfg.AutoDisableTimeoutWindowSeconds*float64(time.Second)),
 	)
+
+	maxRanked := cfg.MaxActiveResolvers * 2
+	if maxRanked < 32 {
+		maxRanked = 32
+	}
+	c.rankedWriter = newRankedPersistenceWriter(
+		RankedPersistenceConfig{
+			Enabled:       cfg.AutoSaveRankedResolvers,
+			ResolversPath: cfg.ResolversPath(),
+			MaxRanked:     maxRanked,
+		},
+		c.log,
+		func(maxCount int) []config.ResolverAddress {
+			if c.pool != nil {
+				return c.pool.RankedEndpoints(maxCount)
+			}
+			if c.balancer != nil {
+				return c.balancer.GetRankedEndpoints(maxCount)
+			}
+			return nil
+		},
+		config.UpdateResolversFileWithRanked,
+	)
+
+	if c.pool != nil {
+		c.pool.SetOnPoolChanged(func() {
+			if c.rankedWriter != nil {
+				c.rankedWriter.NotifyDirty()
+			}
+		})
+	}
 
 	c.balancer.SetResolverDisabledHandler(func(conn *Connection, cause string) {
 		c.appendMTURemovedServerLine(conn, cause)
@@ -347,6 +390,7 @@ func (c *Client) nextSessionInitRetryDelay(failures int) time.Duration {
 
 // Run starts the main execution loop of the client.
 func (c *Client) Run(ctx context.Context) error {
+	defer c.Close()
 	c.successMTUChecks = false
 	c.log.Infof("\U0001F504 <cyan>Starting main runtime loop...</cyan>")
 	sessionInitRetryDelay := time.Duration(0)
@@ -433,6 +477,12 @@ func (c *Client) Run(ctx context.Context) error {
 				}
 
 				c.ensureLocalDNSCachePersistence(ctx)
+
+				if c.runtimeStatsStarted.CompareAndSwap(false, true) {
+					go c.runRuntimeStatsLoop(ctx)
+				}
+				c.startInteractiveConsoleListener(ctx)
+				c.printRuntimeStatsHint()
 			}
 
 			select {
@@ -558,4 +608,35 @@ func (c *Client) HandleErrorDrop(packet VpnProto.Packet) error {
 
 func (c *Client) HandleMTUResponse(packet VpnProto.Packet) error {
 	return nil
+}
+
+// Close gracefully flushes and stops Client-owned background services.
+func (c *Client) Close() {
+	if c == nil {
+		return
+	}
+	if c.rankedWriter != nil {
+		c.rankedWriter.Close()
+	}
+}
+
+func (c *Client) SetBackgroundQueryLimiter(limiter *BackgroundQueryLimiter) {
+	if c == nil {
+		return
+	}
+	c.bgLimiter = limiter
+}
+
+func (c *Client) BackgroundQueryLimiter() *BackgroundQueryLimiter {
+	if c == nil {
+		return nil
+	}
+	return c.bgLimiter
+}
+
+func (c *Client) acquireBackgroundQuery(ctx context.Context) error {
+	if c == nil || c.bgLimiter == nil {
+		return nil
+	}
+	return c.bgLimiter.Acquire(ctx)
 }

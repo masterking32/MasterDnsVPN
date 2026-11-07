@@ -72,6 +72,27 @@ type mtuScanCounters struct {
 	valid          atomic.Int32
 	rejectUpload   atomic.Int32
 	rejectDownload atomic.Int32
+	mu             sync.Mutex
+	validEndpoints map[string]struct{}
+	uniqueValid    atomic.Int32
+}
+
+func (m *mtuScanCounters) recordValid(endpoint string) int32 {
+	m.valid.Add(1)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.validEndpoints == nil {
+		m.validEndpoints = make(map[string]struct{})
+	}
+	if _, exists := m.validEndpoints[endpoint]; !exists {
+		m.validEndpoints[endpoint] = struct{}{}
+		return m.uniqueValid.Add(1)
+	}
+	return m.uniqueValid.Load()
+}
+
+func (m *mtuScanCounters) uniqueValidCount() int32 {
+	return m.uniqueValid.Load()
 }
 
 type mtuDecision struct {
@@ -314,59 +335,111 @@ func (c *Client) optimizeMTUResolvers(connections []Connection) ([]Connection, i
 	return summarizeValidMTUConnections(trulyFinalConns)
 }
 
+func (c *Client) newDiscoveryConfig() DiscoveryConfig {
+	totalConns := 0
+	if c.pool != nil {
+		totalConns = c.pool.TotalCount()
+	} else if c.balancer != nil {
+		totalConns = c.balancer.TotalCount()
+	}
+
+	uniqueEndpoints := make(map[string]struct{})
+	var conns []Connection
+	if c.pool != nil {
+		conns = c.pool.AllConnections()
+	} else if c.balancer != nil {
+		conns = c.balancer.AllConnections()
+	}
+	for _, conn := range conns {
+		uniqueEndpoints[conn.ResolverLabel] = struct{}{}
+	}
+	if len(uniqueEndpoints) == 0 {
+		for _, r := range c.cfg.Resolvers {
+			uniqueEndpoints[fmt.Sprintf("%s:%d", r.IP, r.Port)] = struct{}{}
+		}
+	}
+	totalUnique := len(uniqueEndpoints)
+
+	// Full scanning changes readiness only, never continuing endpoint coverage.
+	targetResolvers := min(totalUnique, max(1, c.cfg.RX_TX_Workers))
+	fastStart := c.cfg.RecheckInactiveServersEnabled
+
+	parallelism := c.cfg.EffectiveMTUTestParallelism()
+	if parallelism < 1 {
+		parallelism = 1
+	}
+	if totalConns > 0 && parallelism > totalConns {
+		parallelism = totalConns
+	}
+
+	burstCount := c.cfg.MicroBurstPacketCount
+	if burstCount < 2 {
+		burstCount = 6
+	}
+
+	burstParallelism := c.cfg.MicroBurstParallelism
+	if burstParallelism < 1 {
+		burstParallelism = 8
+	}
+
+	return DiscoveryConfig{
+		FastStart:             fastStart,
+		TargetResolvers:       targetResolvers,
+		Parallelism:           parallelism,
+		MaxActiveResolvers:    c.cfg.MaxActiveResolvers,
+		MicroBurstEnabled:     c.cfg.MicroBurstTestEnabled,
+		MicroBurstPacketCount: burstCount,
+		MicroBurstParallelism: burstParallelism,
+		MicroBurstTimeout:     c.resolverHealthProbeTimeout(),
+		Domains:               c.cfg.Domains,
+		UploadCaps:            c.precomputeUploadCaps(),
+		OnMTUSuccess: func(conn Connection) {
+			c.appendMTUSuccessLine(&conn)
+		},
+	}
+}
+
 func (c *Client) RunInitialMTUTests(ctx context.Context) error {
-	if c.balancer == nil {
+	if c.balancer == nil && c.pool == nil {
 		return ErrNoValidConnections
 	}
 
-	scanConnections := c.balancer.AllConnections()
+	var scanConnections []Connection
+	if c.balancer != nil {
+		scanConnections = c.balancer.AllConnections()
+	} else if c.pool != nil {
+		scanConnections = c.pool.AllConnections()
+	}
 	if len(scanConnections) == 0 {
 		return ErrNoValidConnections
 	}
 
-	uploadCaps := c.precomputeUploadCaps()
-	workerCount := min(max(1, c.cfg.EffectiveMTUTestParallelism()), len(scanConnections))
+	cfg := c.newDiscoveryConfig()
+	workerCount := min(max(1, cfg.Parallelism), len(scanConnections))
 	c.logMTUStart(workerCount)
 	c.prepareMTUSuccessOutputFile()
 
-	counters := &mtuScanCounters{}
-	if workerCount <= 1 {
-		for idx := range scanConnections {
-			if err := ctx.Err(); err != nil {
-				return nil
-			}
-			conn := scanConnections[idx]
-			c.runConnectionMTUTest(ctx, conn, idx+1, len(scanConnections), uploadCaps[conn.Domain], counters)
-		}
-	} else {
-		jobs := make(chan int, len(scanConnections))
-		var wg sync.WaitGroup
-		for range workerCount {
-			wg.Go(func() {
-				for idx := range jobs {
-					if err := ctx.Err(); err != nil {
-						return
-					}
-					conn := scanConnections[idx]
-					c.runConnectionMTUTest(ctx, conn, idx+1, len(scanConnections), uploadCaps[conn.Domain], counters)
-				}
-			})
-		}
-
-		for idx := range scanConnections {
-			select {
-			case <-ctx.Done():
-				close(jobs)
-				wg.Wait()
-				return nil
-			case jobs <- idx:
-			}
-		}
-		close(jobs)
-		wg.Wait()
+	prober := NewUDPResolverProber(c)
+	pool := c.pool
+	if pool == nil && c.balancer != nil {
+		pool = c.balancer.pool
 	}
 
-	activeConns := c.balancer.ActiveConnections()
+	engine := NewDiscoveryEngine(cfg, prober, pool, c.log)
+	if err := engine.Run(ctx, scanConnections); err != nil {
+		if errors.Is(err, context.Canceled) || (ctx != nil && ctx.Err() != nil) {
+			return nil
+		}
+		return err
+	}
+
+	var activeConns []Connection
+	if c.balancer != nil {
+		activeConns = c.balancer.ActiveConnections()
+	} else if pool != nil {
+		activeConns = pool.ActiveResolvers()
+	}
+
 	validConns, minUpload, minDownload, minUploadChars := c.optimizeMTUResolvers(activeConns)
 	if len(validConns) == 0 {
 		if c.log != nil {
@@ -378,6 +451,15 @@ func (c *Client) RunInitialMTUTests(ctx context.Context) error {
 	c.applySyncedMTUState(minUpload, minDownload, minUploadChars)
 	c.appendMTUUsageSeparatorOnce()
 	c.logMTUCompletion(validConns)
+
+	if cfg.FastStart && len(validConns) < len(scanConnections) {
+		remaining := len(scanConnections) - len(validConns)
+		if c.log != nil {
+			c.log.Infof("⚡ <green>FastStart:</green> Initial connection ready with <cyan>%d</cyan> resolver(s). Background recheck will discover and test remaining <cyan>%d</cyan> resolver(s).", len(validConns), remaining)
+		}
+	}
+
+	c.SaveRankedResolversToFile()
 	return nil
 }
 
@@ -400,6 +482,10 @@ func (c *Client) runResolverHealthLoop(ctx context.Context) {
 			c.now(),
 			c.tunnelPacketTimeout,
 		)
+
+		if c.balancer != nil {
+			c.balancer.OptimizeActivePool()
+		}
 
 		if c.cfg.RecheckInactiveServersEnabled {
 			c.runResolverHealthBatch(ctx, recheckInterval, parallelism)
@@ -598,7 +684,13 @@ func (c *Client) collectInactiveResolverHealthChecks(recheckInterval time.Durati
 	connections := make([]Connection, 0, parallelism)
 	now := c.now()
 	for len(connections) < parallelism {
-		conn, ok := c.balancer.NextInactiveConnectionForHealthCheck(now, recheckInterval)
+		var conn Connection
+		var ok bool
+		if c.pool != nil {
+			conn, ok = c.pool.AcquireNextInactiveForRecheck(now, recheckInterval)
+		} else if c.balancer != nil {
+			conn, ok = c.balancer.NextInactiveConnectionForHealthCheck(now, recheckInterval)
+		}
 		if !ok || conn.Key == "" || conn.IsValid {
 			break
 		}
@@ -608,17 +700,45 @@ func (c *Client) collectInactiveResolverHealthChecks(recheckInterval time.Durati
 }
 
 func (c *Client) recheckInactiveResolver(ctx context.Context, conn Connection) {
-	if c == nil || c.balancer == nil || conn.Key == "" {
+	if c == nil || (c.pool == nil && c.balancer == nil) || conn.Key == "" {
 		return
 	}
+
+	pool := c.pool
+	if pool == nil {
+		pool = c.balancer.pool
+	}
+	leased, ok := pool.prepareRecheck(conn)
+	if !ok {
+		return
+	}
+	conn = leased
+	completeRecheck := pool.CompleteRecheck
+	completed := false
+	defer func() {
+		if !completed {
+			if ctx != nil && ctx.Err() != nil {
+				pool.ReleaseRecheck(conn)
+			} else {
+				// An interrupted or failed recheck must not remain eligible for
+				// promotion or leave the candidate in StateRechecking.
+				completeRecheck(ResolverRecheckResult{Connection: conn})
+			}
+		}
+	}()
 
 	transport, err := c.newUDPQueryTransport(ctx, conn.ResolverLabel)
 	if err != nil {
 		return
 	}
 	defer transport.conn.Close()
+	stopCancellation := context.AfterFunc(ctx, func() {
+		_ = transport.conn.Close()
+	})
+	defer stopCancellation()
 
-	if !c.recheckResolverUploadMTU(ctx, conn, transport) {
+	ok, resolveTime := c.recheckResolverUploadMTU(ctx, conn, transport)
+	if !ok {
 		return
 	}
 	if !c.recheckResolverDownloadMTU(ctx, conn, transport) {
@@ -629,25 +749,51 @@ func (c *Client) recheckInactiveResolver(ctx context.Context, conn Connection) {
 	conn.UploadMTUBytes = uploadMTU
 	conn.UploadMTUChars = c.encodedCharsForPayload(uploadMTU)
 	conn.DownloadMTUBytes = downloadMTU
+	conn.MTUResolveTime = resolveTime
 
-	if !c.balancer.SetConnectionMTU(
-		conn.Key,
-		conn.UploadMTUBytes,
-		conn.UploadMTUChars,
-		conn.DownloadMTUBytes,
-	) {
+	var burstPtr *BurstProbeResult
+	if c.cfg.RecheckBurstTestEnabled {
+		probeTimeout := c.resolverHealthProbeTimeout()
+		burstCount := c.cfg.RecheckBurstPacketCount
+		if burstCount < 2 {
+			burstCount = 4
+		}
+		probeTimeout += c.bgLimiter.burstWaitAllowance(burstCount, c.resolverHealthParallelism())
+		burstResult := c.sendPipelinedMicroBurst(
+			ctx,
+			conn,
+			transport,
+			burstCount,
+			downloadMTU,
+			uploadMTU,
+			probeTimeout,
+			c.bgLimiter,
+		)
+		if burstResult.Incomplete {
+			pool.ReleaseRecheck(conn)
+			completed = true
+			return
+		}
+		burstPtr = &burstResult
+	}
+
+	if ctx.Err() != nil {
+		return
+	}
+	actualConn, ok := completeRecheck(ResolverRecheckResult{
+		Connection: conn, MTUVerified: true, Burst: burstPtr,
+	})
+	completed = true
+	if !ok || (burstPtr != nil && !burstPtr.Qualified) {
 		return
 	}
 
-	if !c.balancer.SetConnectionValidityWithLog(conn.Key, true, true) {
-		return
+	activeCount := c.balancer.ActiveCount()
+	totalCount := c.balancer.TotalCount()
+	if actualConn.IsValid {
+		c.logResolverReactivated(actualConn, resolveTime, burstPtr, activeCount, totalCount)
+		c.appendMTUReactiveAddedServerLine(&actualConn)
 	}
-
-	c.balancer.SeedConservativeStats(conn.Key)
-
-	conn.IsValid = true
-
-	c.appendMTUReactiveAddedServerLine(&conn)
 }
 
 // syncedMTUs returns the synced upload and download MTUs. The resolver health
@@ -659,28 +805,34 @@ func (c *Client) syncedMTUs() (upload int, download int) {
 	return c.syncedUploadMTU, c.syncedDownloadMTU
 }
 
-func (c *Client) recheckResolverUploadMTU(ctx context.Context, conn Connection, transport *udpQueryTransport) bool {
+func (c *Client) recheckResolverUploadMTU(ctx context.Context, conn Connection, transport *udpQueryTransport) (bool, time.Duration) {
 	timeout := c.resolverHealthProbeTimeout()
 	for attempt := 0; attempt < c.mtuTestRetries; attempt++ {
-		if ctx.Err() != nil {
-			return false
+		if ctx != nil && ctx.Err() != nil {
+			return false, 0
+		}
+		if err := c.acquireBackgroundQuery(ctx); err != nil {
+			return false, 0
 		}
 		uploadMTU, _ := c.syncedMTUs()
-		passed, _, err := c.sendUploadMTUProbe(ctx, conn, transport, uploadMTU, timeout, mtuProbeOptions{
+		passed, rtt, err := c.sendUploadMTUProbe(ctx, conn, transport, uploadMTU, timeout, mtuProbeOptions{
 			Quiet:   true,
 			IsRetry: attempt > 0,
 		})
 		if err == nil && passed {
-			return true
+			return true, rtt
 		}
 	}
-	return false
+	return false, 0
 }
 
 func (c *Client) recheckResolverDownloadMTU(ctx context.Context, conn Connection, transport *udpQueryTransport) bool {
 	timeout := c.resolverHealthProbeTimeout()
 	for attempt := 0; attempt < c.mtuTestRetries; attempt++ {
-		if ctx.Err() != nil {
+		if ctx != nil && ctx.Err() != nil {
+			return false
+		}
+		if err := c.acquireBackgroundQuery(ctx); err != nil {
 			return false
 		}
 
@@ -698,10 +850,10 @@ func (c *Client) recheckResolverDownloadMTU(ctx context.Context, conn Connection
 }
 
 func (c *Client) resolverHealthProbeTimeout() time.Duration {
-	timeout := c.mtuTestTimeout
-	if timeout <= 0 {
-		timeout = 4 * time.Second
+	if c != nil && c.mtuTestTimeout > 0 {
+		return c.mtuTestTimeout
 	}
+	timeout := 4 * time.Second
 	if c == nil || c.balancer == nil {
 		return timeout
 	}
@@ -792,12 +944,13 @@ func (c *Client) confirmResolverDown(conn *Connection, window time.Duration) boo
 	return true
 }
 
-func (c *Client) runConnectionMTUTest(ctx context.Context, conn Connection, serverID int, total int, maxUploadPayload int, counters *mtuScanCounters) {
+func (c *Client) runConnectionMTUTest(ctx context.Context, conn Connection, serverID int, total int, maxUploadPayload int, counters *mtuScanCounters) (completed bool) {
 	if conn.Key == "" {
-		return
+		return false
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
+			completed = true
 			c.applyMTUDecision(conn.Key, mtuDecision{})
 			if c.log != nil {
 				c.log.Errorf(
@@ -808,12 +961,12 @@ func (c *Client) runConnectionMTUTest(ctx context.Context, conn Connection, serv
 			}
 
 			if counters != nil {
-				completed := counters.completed.Add(1)
+				completedCount := counters.completed.Add(1)
 				rejectedNow := counters.rejectUpload.Add(1) + counters.rejectDownload.Load()
 				if c.log != nil && c.log.Enabled(logger.LevelWarn) {
 					c.log.Warnf(
 						"<red>❌ Rejected (%d/%d): <cyan>%s</cyan> via <cyan>%s</cyan> | reason=<yellow>PANIC</yellow> | totals: valid=<green>%d</green>, rejected=<red>%d</red></red>",
-						completed,
+						completedCount,
 						total,
 						conn.Domain,
 						conn.ResolverLabel,
@@ -836,8 +989,11 @@ func (c *Client) runConnectionMTUTest(ctx context.Context, conn Connection, serv
 	}
 
 	result, reason := c.probeConnectionMTU(ctx, conn, maxUploadPayload)
+	if ctx.Err() != nil {
+		return false
+	}
 	if counters == nil {
-		return
+		return false
 	}
 
 	decision := buildMTUDecision(result, reason)
@@ -845,12 +1001,12 @@ func (c *Client) runConnectionMTUTest(ctx context.Context, conn Connection, serv
 
 	switch reason {
 	case mtuRejectUpload:
-		completed := counters.completed.Add(1)
+		completedCount := counters.completed.Add(1)
 		rejectedNow := counters.rejectUpload.Add(1) + counters.rejectDownload.Load()
 		if c.log != nil && c.log.Enabled(logger.LevelWarn) {
 			c.log.Warnf(
 				"<red>❌ Rejected (%d/%d): <cyan>%s</cyan> via <cyan>%s</cyan> | reason=<yellow>UPLOAD_MTU</yellow> | value=<cyan>%d</cyan> | totals: valid=<green>%d</green>, rejected=<red>%d</red></red>",
-				completed,
+				completedCount,
 				total,
 				conn.Domain,
 				conn.ResolverLabel,
@@ -859,14 +1015,14 @@ func (c *Client) runConnectionMTUTest(ctx context.Context, conn Connection, serv
 				rejectedNow,
 			)
 		}
-		return
+		return true
 	case mtuRejectDownload:
-		completed := counters.completed.Add(1)
+		completedCount := counters.completed.Add(1)
 		rejectedNow := counters.rejectUpload.Load() + counters.rejectDownload.Add(1)
 		if c.log != nil && c.log.Enabled(logger.LevelWarn) {
 			c.log.Warnf(
 				"<red>❌ Rejected (%d/%d): <cyan>%s</cyan> via <cyan>%s</cyan> | reason=<yellow>DOWNLOAD_MTU</yellow> | value=<cyan>%d</cyan> | totals: valid=<green>%d</green>, rejected=<red>%d</red></red>",
-				completed,
+				completedCount,
 				total,
 				conn.Domain,
 				conn.ResolverLabel,
@@ -875,16 +1031,16 @@ func (c *Client) runConnectionMTUTest(ctx context.Context, conn Connection, serv
 				rejectedNow,
 			)
 		}
-		return
+		return true
 	}
 
-	completed := counters.completed.Add(1)
-	validNow := counters.valid.Add(1)
+	completedCount := counters.completed.Add(1)
+	validNow := counters.recordValid(conn.ResolverLabel)
 	rejectedNow := counters.rejectUpload.Load() + counters.rejectDownload.Load()
 	if c.log != nil && c.log.Enabled(logger.LevelInfo) {
 		c.log.Infof(
 			"<green>✅ Accepted (%d/%d): <cyan>%s</cyan> via <cyan>%s</cyan> | upload=<cyan>%d</cyan> | download=<cyan>%d</cyan> | totals: valid=<green>%d</green>, rejected=<red>%d</red></green>",
-			completed,
+			completedCount,
 			total,
 			conn.Domain,
 			conn.ResolverLabel,
@@ -897,6 +1053,7 @@ func (c *Client) runConnectionMTUTest(ctx context.Context, conn Connection, serv
 	if acceptedConn, ok := c.balancer.GetConnectionByKey(conn.Key); ok {
 		c.appendMTUSuccessLine(&acceptedConn)
 	}
+	return true
 }
 
 func (c *Client) probeConnectionMTU(ctx context.Context, conn Connection, maxUploadPayload int) (mtuConnectionProbeResult, mtuRejectReason) {
@@ -907,6 +1064,18 @@ func (c *Client) probeConnectionMTU(ctx context.Context, conn Connection, maxUpl
 		return result, mtuRejectUpload
 	}
 	defer probeTransport.conn.Close()
+
+	if ctx != nil {
+		if ctx.Err() != nil {
+			return result, mtuRejectUpload
+		}
+		stop := context.AfterFunc(ctx, func() {
+			if probeTransport.conn != nil {
+				_ = probeTransport.conn.Close()
+			}
+		})
+		defer stop()
+	}
 
 	upOK, upBytes, upChars, upRTT, err := c.testUploadMTU(ctx, conn, probeTransport, maxUploadPayload)
 	if err != nil || !upOK {
