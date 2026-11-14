@@ -93,7 +93,7 @@ A brief overview of the main capabilities of MasterDnsVPN:
 - **Lightweight custom protocol:** 🔄 Uses a custom protocol with retransmission logic to reduce overhead and increase usable DNS payload.
 - **Multi-resolver routing and packet duplication:** 📡 Routes queries across multiple resolvers and supports selective duplication to increase delivery probability on unstable networks.
 - **Smart resolver selection and health checks:** ⚡ Selects resolvers based on quality and health, and manages problematic resolvers automatically.
-- **MTU discovery and synchronization:** 🧰 Detects the practical MTU of working resolver pairings and aligns around it to reduce fragmentation and improve stability.
+- **MTU discovery and synchronization:** 🧰 Detects the practical MTU of working Tunnel Paths and aligns around it to reduce fragmentation and improve stability.
 - **SOCKS5 / SOCKS4 support and optimization:** 🧦 Optimized local proxy handling for common applications.
 - **Packed control blocks and lower control overhead:** 📦 Groups ACK/control traffic together to reduce control chatter.
 - **Optional compression and request packing:** 🗜️ Reduces request counts and improves efficiency under small-MTU conditions.
@@ -493,19 +493,23 @@ On Windows:
 
 #### Command-line parameters
 
-Both binaries support these arguments:
+Client and server support these command-line flags (all `client_config.toml` settings can also be overridden via CLI flags):
 
-| Parameter | Description |
-| :--- | :--- |
-| `-config` | Path to the configuration file |
-| `-log` | Optional path to a log file |
-| `-version` | Print version and exit |
+| Parameter | Alias | Target | Description |
+| :--- | :--- | :--- | :--- |
+| `-config` | `-c` | Both | Path to the configuration file (default: `client_config.toml` / `server_config.toml`) |
+| `-resolvers` | `-r` | Client | Path to custom resolvers file override (default: `client_resolvers.txt`) |
+| `-domains` | `-d` | Client | Comma-separated tunnel domains override |
+| `-encryption-key` | `-k` | Client | Encryption key override |
+| `-log` | `-l` | Both | Optional path to a log file |
+| `-version` | `-v` | Both | Print version and exit |
+| `-help` | `-h` | Both | Show help message and all available flag overrides |
 
 Example:
 
 ```bash
 ./masterdnsvpn-server -config server_config.toml -log server.log
-./masterdnsvpn-client -config client_config.toml -log client.log
+./masterdnsvpn-client -config client_config.toml -resolvers my_resolvers.txt -log client.log
 ```
 
 ---
@@ -525,19 +529,34 @@ Example:
 
 Accepted formats in `client_resolvers.txt`:
 
-- `IP`
-- `IP:PORT`
-- `CIDR`
-- `CIDR:PORT`
+- `IP` (IPv4, or IPv6 without brackets)
+- `IP:PORT` (IPv4 or `[IPv6]:PORT`)
+- `CIDR` (e.g. `192.168.1.0/24`)
+- `CIDR:PORT` (e.g. `192.168.1.0/24:5300`)
+- Comments (lines starting with `#`)
 
 Example:
 
 ```text
+# >>> MASTERDNSVPN AUTO-RANKED BEST RESOLVERS (Do not edit this block) <<<
+# Last updated: 2026-08-17 18:00:00
+1.1.1.1
+8.8.8.8:53
+192.168.10.5:5300
+# <<< END MASTERDNSVPN AUTO-RANKED BEST RESOLVERS >>>
+
+# --- My Custom Resolvers & Subnets ---
+# Cloudflare DNS
+1.1.1.1
+
+# Google DNS
 8.8.8.8
-1.1.1.1:53
-9.9.9.0/24
-208.67.222.0/24:5353
+
+# Local ISP Subnet
+192.168.10.0/24:5300
 ```
+
+> 💡 **Smart Warm-Start:** The client preserves the exact line order of `client_resolvers.txt`. When `AUTO_SAVE_RANKED_RESOLVERS = true`, the client automatically tracks and persists the proven fastest resolvers at the top inside a managed header block. All custom comments, formatting, and subnets below the block remain untouched. Entries outside the managed block define the allowed resolvers; cached rankings only reorder matching IP-and-port entries, so removing a resolver or changing its port takes effect on the next load. FastStart prioritizes testing these top entries on subsequent launches, reducing initial connection time.
 
 ---
 
@@ -603,12 +622,13 @@ These settings are critical on the server:
 
 | Parameter | Sample Value | Allowed Values / Real Behavior | Full Explanation |
 | :--- | :--- | :--- | :--- |
-| `RESOLVER_BALANCING_STRATEGY` | `2` | `0..8` | Chooses how resolvers are selected.<br>`0/2` = Round Robin, `1` = Random, `3` = Least Loss, `4` = Lowest Latency, `5` = Hybrid Score, `6` = Loss Then Latency, `7` = Least Loss Top Random, `8` = Least Loss Top Round Robin.<br>The hybrid mode uses a weighted combined score. The loss-then-latency mode first shortlists by loss, then prefers lower latency inside that tier, and rotates among near-equal top candidates. The top-random mode picks randomly from the best loss tier so load does not stick to one resolver. The top-round-robin mode cycles through the same top loss tier with deterministic rotation. |
+| `RESOLVER_BALANCING_STRATEGY` | `9` | `0..9` | Chooses how resolvers are selected.<br>`0/2` = Round Robin, `1` = Random, `3` = Least Loss, `4` = Lowest Latency, `5` = Hybrid Score, `6` = Loss Then Latency, `7` = Least Loss Top Random, `8` = Least Loss Top Round Robin, `9` = Common Score Ranking (Default).<br>The default mode (9) routes by the common composite evaluation score (RTT, loss, measured burst throughput) shared across diagnostics and pool comparisons. Deterministic rotation breaks ties among equal scores. Explicit strategies (0–8) retain their documented behaviors. Note that routing requirements (such as preserving a stream's preferred path until failover, or requiring duplicated packets to use distinct physical endpoints rather than multiple domains on one endpoint) can intentionally select a candidate other than the overall highest-scoring one. |
 | `PACKET_DUPLICATION_COUNT` | `2` | clamp to valid range in code | Normal outgoing packet duplication count.<br>Higher values increase traffic cost but improve survivability on weak links. |
 | `SETUP_PACKET_DUPLICATION_COUNT` | `2` | clamp to valid range in code | Similar to `PACKET_DUPLICATION_COUNT`, but used for setup-sensitive packets such as stream creation and other critical control events. |
 | `STREAM_RESOLVER_FAILOVER_RESEND_THRESHOLD` | `2` | If `<1`, fallback applies | If a stream accumulates repeated resend pressure on the same preferred resolver, the client may fail over that stream to another resolver.<br>This threshold controls how quickly that happens. |
 | `STREAM_RESOLVER_FAILOVER_COOLDOWN` | `2.5` | If `<=0`, fallback applies | Minimum delay between two failovers for the same stream.<br>This prevents unstable oscillation between resolvers. |
-| `RECHECK_INACTIVE_SERVERS_ENABLED` | `true` | `true/false` | Enables background rechecks for currently disabled or unhealthy resolvers.<br>If disabled, once a resolver becomes unusable, it will stay disabled until restart or manual rebuild. |
+| `RECHECK_INACTIVE_SERVERS_ENABLED` | `true` | `true/false` | Enables background rechecks for currently disabled or unhealthy resolvers.<br>Also activates **FastStart**: client connects immediately once `RX_TX_WORKERS` working resolvers are validated, then discovers remaining resolvers in the background.<br>If disabled, once a resolver becomes unusable, it will stay disabled until restart, and initial startup will synchronously scan 100% of resolvers. |
+| `AUTO_SAVE_RANKED_RESOLVERS` | `true` | `true/false` | Automatically saves the top-performing resolvers to the managed header of `client_resolvers.txt`.<br>On next startup, FastStart uses these proven fastest resolvers immediately without scanning the entire pool from scratch.<br>Preserves all user comments, formatting, and custom CIDRs below the managed block. |
 | `AUTO_DISABLE_TIMEOUT_SERVERS` | `true` | `true/false` | Enables automatic disabling of resolvers that keep timing out and show no successful activity. |
 | `AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS` | `30.0` | If `<=0`, fallback applies | Time window used to decide whether a resolver is timeout-only.<br>If all observations in this window are timeouts, it may be disabled. |
 | `FD_CONTROL_UNIX_SOCKET` | `""` | Empty, or a Unix socket path | Android VpnService hosts only.<br>When set, the client sends the fd of every upstream UDP socket (resolver pool, MTU probes, health checks, tunnel workers) to this Unix socket before connect/bind, so the host can call `VpnService.protect(fd)` and keep resolver traffic out of the tunnel.<br>The client never sends local listeners (SOCKS5/TCP, SOCKS5 UDP relay, local DNS). If the protect server is unreachable or rejects the fd, socket creation fails.<br>Leave empty on desktop and server setups. |
@@ -641,7 +661,27 @@ These settings are critical on the server:
 | `MTU_ADDED_SERVER_LOG_FORMAT` | `"Resolver {IP} ({DOMAIN}) added back at {TIME} (UP {UP_MTU}, DOWN {DOWN_MTU})"` | string | Log/output format when a resolver is restored. |
 | `MTU_REACTIVE_ADDED_SERVER_LOG_FORMAT` | `"Resolver {IP} ({DOMAIN}) added back at {TIME} after reactive recheck (UP {UP_MTU}, DOWN {DOWN_MTU})"` | string | Log/output format when a resolver is restored by background health checks. |
 
-### 3.4.7) 🧵 Runtime Workers, Queues, and Timers
+### 3.4.7) ⚡ Micro-Burst Throughput Testing and Speed Qualification
+
+| Parameter | Sample Value | Allowed Values / Real Behavior | Full Explanation |
+| :--- | :--- | :--- | :--- |
+| `MICRO_BURST_TEST_ENABLED` | `true` | `true/false` | If enabled, runs pipelined micro-burst qualification after MTU testing to measure burst throughput, packet loss under load, and rate-limiting behavior. |
+| `MICRO_BURST_PACKET_COUNT` | `6` | `2..32` | Number of pipelined queries sent to each candidate resolver during the burst test. |
+| `MICRO_BURST_PARALLELISM` | `8` | `1..128` | Concurrency for micro-burst qualification. Recommended `6-8` for Android/mobile, `16-32` for desktop/server. |
+| `MAX_ACTIVE_RESOLVERS` | `15` | `>=0` | Maximum number of highest-scoring Active Paths admitted to the Resolver Pool (`0` = no limit). Remaining passing candidates are placed on standby. |
+| `MAX_BURST_LOSS_RATIO` | `0.20` | `0.0..1.0` | Maximum tolerated packet loss ratio during burst testing before a resolver is rejected (`0.20` = 20% loss). |
+| `MIN_BURST_THROUGHPUT_KBPS` | `0.0` | `>=0.0` | Optional minimum throughput cutoff in KB/s (`0.0` disables cutoff). |
+| `RECHECK_BURST_TEST_ENABLED` | `true` | `true/false` | If enabled, background health rechecks test inactive candidates with a micro-burst before returning them to active duty. |
+| `RECHECK_BURST_PACKET_COUNT` | `4` | `2..32` | Number of pipelined queries sent during background health recheck burst tests. |
+
+### 3.4.8) 📊 Live Runtime Resolver Performance Monitoring
+
+| Parameter | Sample Value | Allowed Values / Real Behavior | Full Explanation |
+| :--- | :--- | :--- | :--- |
+| `INTERACTIVE_STATS_ENABLED` | `false` | `true/false` | Opts in to reading stdin for stats hotkeys. Enable only in an attended foreground console; leave disabled for services, background jobs, and piped input. |
+| `RUNTIME_STATS_INTERVAL_SECONDS` | `60.0` | `1.0..86400.0` (or `0` = disabled) | Interval in seconds between periodic console performance table logs when tunnel traffic is active.<br>Setting to `0` disables periodic logging.<br>Resolver pool optimization runs independently every 60 seconds and saves ranked resolvers when the pool changes (if auto-save is enabled).<br>When `INTERACTIVE_STATS_ENABLED = true`, pressing `'s'` + Enter (or Enter) triggers an immediate stats dump regardless of the timer. |
+
+### 3.4.9) 🧵 Runtime Workers, Queues, and Timers
 
 | Parameter | Sample Value | Allowed Values / Real Behavior | Full Explanation |
 | :--- | :--- | :--- | :--- |
@@ -659,7 +699,7 @@ These settings are critical on the server:
 | `SESSION_INIT_RETRY_MAX_SECONDS` | `60.0` | if invalid, fallback applies | Maximum retry delay for session initialization. |
 | `SESSION_INIT_BUSY_RETRY_INTERVAL_SECONDS` | `60.0` | if invalid, fallback applies | Retry delay when the server explicitly responds with `SESSION_BUSY`. |
 
-### 3.4.8) 📡 Ping / Keepalive
+### 3.4.10) 📡 Ping / Keepalive
 
 | Parameter | Sample Value | Allowed Values / Real Behavior | Full Explanation |
 | :--- | :--- | :--- | :--- |
@@ -671,7 +711,7 @@ These settings are critical on the server:
 | `PING_COOL_THRESHOLD_SECONDS` | `20.0` | positive number | Threshold after which the session is treated as cooling down. |
 | `PING_COLD_THRESHOLD_SECONDS` | `30.0` | positive number | Threshold after which the session is treated as cold. |
 
-### 3.4.9) 🔄 ARQ and Packet Packing
+### 3.4.11) 🔄 ARQ and Packet Packing
 
 | Parameter | Sample Value | Allowed Values / Real Behavior | Full Explanation |
 | :--- | :--- | :--- | :--- |
@@ -692,7 +732,7 @@ These settings are critical on the server:
 | `ARQ_TERMINAL_DRAIN_TIMEOUT_SECONDS` | `120.0` | clamped in code | After a stream becomes terminal, how long the client waits for queue drain. |
 | `ARQ_TERMINAL_ACK_WAIT_TIMEOUT_SECONDS` | `90.0` | clamped in code | How long the client waits for the final terminal ACK. |
 
-### 3.4.10) 🪵 Logging
+### 3.4.12) 🪵 Logging
 
 | Parameter | Sample Value | Allowed Values / Real Behavior | Full Explanation |
 | :--- | :--- | :--- | :--- |
@@ -1066,7 +1106,7 @@ sequenceDiagram
     participant Destination as 🌐 Destination
 
     App->>Client: Create SOCKS5 / TCP connection
-    Note over Client: Build Session/Stream<br/>Encrypt, ARQ, choose resolver pairing
+    Note over Client: Build Session/Stream<br/>Encrypt, ARQ, choose Tunnel Path
     Client->>Resolvers: Send DNS query with duplication and balancing
     Resolvers->>Server: Deliver query to the server NS
     Note over Server: Checksum / Cookie / Session lookup<br/>Deferred setup / ARQ / Queueing
@@ -1088,22 +1128,22 @@ sequenceDiagram
 | **Resolver** | An external recursive DNS server (such as an ISP recursor or public DNS) relaying queries between Client and Server. |
 | **Resolver Endpoint** | Concrete network address (`IP:Port`) of a Resolver. |
 | **Tunnel Domain** | Delegated domain (e.g. `v.example.com`) served by the Server used to address tunnel queries. |
-| **Pairing (Candidate)** | A pair combining one Resolver Endpoint and one Tunnel Domain evaluated or admitted by the client. |
-| **Resolver Pool** | The client-side collection of candidate Pairings, categorized by health (Active, Standby, Rechecking, Inactive). |
-| **Resolver Balancer** | Client component that selects which active Pairing transmits each outgoing query based on loss/latency metrics. |
+| **Tunnel Path** (or **Path**) | A distinct transmission path carrying DNS tunnel queries, defined by one Resolver Endpoint and one Tunnel Domain. |
+| **Resolver Pool** | The client-side collection of candidate Tunnel Paths, tracked across five authoritative lifecycle states: Untested, Checking, Active, Standby, and Rejected. |
+| **Resolver Balancer** | Client component that selects which Active Path transmits each outgoing query based on composite score or configured strategy. |
 | **Packet Priority Queue (MLQ)** | Internal queue ordering outbound packets by priority (control signals and ACKs jump ahead of stream data). |
 | **Session** | The long-lived authenticated association established between Client and Server. |
 | **Stream** | An individual multiplexed connection (e.g. one TCP connection or SOCKS request) carried inside a Session. |
 | **Destination** | The final internet host and port (`example.com:443`) that the user application connects to through the tunnel. |
 | **ARQ** | Selective-repeat reliability protocol guaranteeing ordered, reliable packet delivery over DNS. |
 | **Duplication** | Sending redundant copies of a fragment across different resolvers to survive severe packet loss. |
-| **Synced MTU** | The negotiated shared MTU across healthy active Pairings in the Resolver Pool. |
+| **Synced MTU** | The negotiated shared MTU across healthy Active Paths in the Resolver Pool. |
 
 ---
 
 ## Section 7: ⚙️ Advanced Technical Notes
 
-- ⚡ **Direct connect or external SOCKS5:** If `USE_EXTERNAL_SOCKS5 = false`, the server connects directly to the target. If `true`, it chains through an external SOCKS5 proxy. In general usage you usually do not need an external SOCKS5 server, so this can stay disabled.
+- ⚡ **Direct connect or external SOCKS5:** If `USE_EXTERNAL_SOCKS5 = false`, the server connects directly to the Destination. If `true`, it chains through an external SOCKS5 proxy. In general usage you usually do not need an external SOCKS5 server, so this can stay disabled.
 - 🧠 **Per-stream resolver failover:** If a stream gets stuck on a weak resolver, its preferred resolver can move to another one.
 - 📦 **Repeated packed control blocks:** The server can repeat the last packed control block for extra turns so important ACK/close packets have a better chance to survive on lossy links.
 - 🔒 **Server-side key generation:** If `encrypt_key.txt` does not exist, the server creates it during startup.

@@ -8,6 +8,7 @@ import (
 )
 
 func buildTestClientWithResolvers(cfg config.ClientConfig, keys ...string) *Client {
+	cfg.AutoSaveRankedResolvers = false
 	c := New(cfg, nil, nil)
 	c.active_streams = make(map[uint16]*Stream_client)
 

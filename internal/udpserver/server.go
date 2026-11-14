@@ -186,6 +186,11 @@ func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Se
 	return s
 }
 
+// HandlePacket processes an incoming raw DNS query packet and returns the generated DNS response.
+func (s *Server) HandlePacket(packet []byte) []byte {
+	return s.handlePacket(packet)
+}
+
 type throttledLogState struct {
 	mu   sync.Mutex
 	last map[string]int64

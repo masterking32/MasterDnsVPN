@@ -11,6 +11,7 @@ package client
 
 import (
 	"container/heap"
+	"context"
 	"crypto/rand"
 	"fmt"
 	"net"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"masterdnsvpn-go/internal/arq"
+	"masterdnsvpn-go/internal/config"
 	Enums "masterdnsvpn-go/internal/enums"
 	"masterdnsvpn-go/internal/logger"
 	"masterdnsvpn-go/internal/version"
@@ -61,8 +63,30 @@ func formatResolverEndpoint(resolver string, port int) string {
 	return fmt.Sprintf("%s:%d", resolver, port)
 }
 
-func makeConnectionKey(resolver string, port int, domain string) string {
-	return resolver + "|" + strconv.Itoa(port) + "|" + domain
+// EndpointKey represents the unique transport address identity of a Resolver Endpoint.
+type EndpointKey string
+
+// String returns the string representation of an EndpointKey.
+func (k EndpointKey) String() string { return string(k) }
+
+// PathKey represents the unique identity of a Tunnel Path (Resolver Endpoint + Tunnel Domain).
+type PathKey string
+
+// String returns the string representation of a PathKey.
+func (k PathKey) String() string { return string(k) }
+
+func connectionEndpointKey(conn Connection) EndpointKey {
+	if conn.ResolverLabel != "" {
+		return EndpointKey(conn.ResolverLabel)
+	}
+	if conn.Resolver != "" {
+		return EndpointKey(formatResolverEndpoint(conn.Resolver, conn.ResolverPort))
+	}
+	return EndpointKey(conn.Key)
+}
+
+func makeConnectionKey(resolver string, port int, domain string) PathKey {
+	return PathKey(resolver + "|" + strconv.Itoa(port) + "|" + domain)
 }
 
 func isHotPacketLogType(packetType uint8) bool {
@@ -590,14 +614,13 @@ func (c *Client) PrintBanner() {
 		strategyName = "Least Loss Top Random"
 	case 8:
 		strategyName = "Least Loss Top Round Robin"
+	case 9:
+		strategyName = "Common Score Ranking (Default)"
 	}
 
 	c.log.Infof("⚖  <cyan>Resolver Balancing, Strategy:</cyan> <yellow>%s (%d)</yellow>", strategyName, c.cfg.ResolverBalancingStrategy)
 
-	domainList := ""
-	if len(c.cfg.Domains) > 0 {
-		domainList = c.cfg.Domains[0]
-	}
+	domainList := strings.Join(c.cfg.Domains, ", ")
 	c.log.Infof("🌐 <cyan>Configured Domains:</cyan> <yellow>%d (%s)</yellow>", len(c.cfg.Domains), domainList)
 	c.log.Infof("📡 <cyan>Loaded Resolvers:</cyan> <yellow>%d endpoints.</yellow>", len(c.cfg.Resolvers))
 }
@@ -619,7 +642,7 @@ func (c *Client) BuildConnectionMap() error {
 	for _, domain := range domains {
 		for _, resolver := range resolvers {
 			label := formatResolverEndpoint(resolver.IP, resolver.Port)
-			key := makeConnectionKey(resolver.IP, resolver.Port, domain)
+			key := string(makeConnectionKey(resolver.IP, resolver.Port, domain))
 			if _, exists := indexByKey[key]; exists {
 				continue
 			}
@@ -651,4 +674,53 @@ func (c *Client) BuildConnectionMap() error {
 	}
 
 	return nil
+}
+
+// NotifyRankedResolversDirty signals the background writer that resolver rankings need saving.
+func (c *Client) NotifyRankedResolversDirty() {
+	if c != nil && c.rankedWriter != nil {
+		c.rankedWriter.NotifyDirty()
+	}
+}
+
+// SaveRankedResolversToFile persists the top-ranked resolver endpoints to the resolvers file
+// under an auto-ranked header block, preserving all custom user lines below.
+func (c *Client) SaveRankedResolversToFile() {
+	if c == nil || (c.balancer == nil && c.pool == nil) || !c.cfg.AutoSaveRankedResolvers {
+		return
+	}
+
+	if c.rankedWriter != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = c.rankedWriter.Flush(ctx)
+		return
+	}
+
+	resolversPath := c.cfg.ResolversPath()
+	if resolversPath == "" {
+		return
+	}
+
+	maxRanked := c.cfg.MaxActiveResolvers * 2
+	if maxRanked < 32 {
+		maxRanked = 32
+	}
+
+	var ranked []config.ResolverAddress
+	if c.pool != nil {
+		ranked = c.pool.RankedEndpoints(maxRanked)
+	} else if c.balancer != nil {
+		ranked = c.balancer.GetRankedEndpoints(maxRanked)
+	}
+	if err := config.UpdateResolversFileWithRanked(resolversPath, ranked); err != nil {
+		if c.log != nil && c.log.Enabled(logger.LevelWarn) {
+			c.log.Warnf("<yellow>[Resolvers]</yellow> Failed to auto-save ranked resolvers to <cyan>%s</cyan>: %v", resolversPath, err)
+		}
+		return
+	}
+
+	if c.log != nil && c.log.Enabled(logger.LevelDebug) {
+		c.log.Debugf("<green>[Resolvers]</green> Saved %d ranked resolvers to <cyan>%s</cyan>", len(ranked), resolversPath)
+	}
 }

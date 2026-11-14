@@ -12,5 +12,10 @@
 #   192.168.1.0/30
 #   192.168.1.0/30:5353
 #   [2001:4860:4860::8888]:53
+#
+# Line order is preserved during startup.
+# When AUTO_SAVE_RANKED_RESOLVERS is enabled, the client automatically persists
+# the highest-scoring resolvers in a managed header block above custom entries.
 
 8.8.8.8
+
