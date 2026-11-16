@@ -10,6 +10,7 @@ package udpserver
 import (
 	"encoding/binary"
 	"fmt"
+	"strings"
 
 	"masterdnsvpn-go/internal/compression"
 	DnsParser "masterdnsvpn-go/internal/dnsparser"
@@ -133,4 +134,35 @@ func fillMTUProbeBytes(dst []byte) {
 		return
 	}
 	clear(dst)
+}
+
+// maxLogFieldLen bounds how much of an external string reaches a log line.
+const maxLogFieldLen = 120
+
+// logField makes an externally-controlled string safe to interpolate into a
+// log line. QNAMEs come off the wire: control characters (including ANSI
+// escapes) let a client forge whole lines, and `<` `>` break the tag-based
+// colour markup the logger uses. Length is capped so one request cannot
+// bloat the log by a quarter kilobyte.
+func logField(s string) string {
+	var b strings.Builder
+	n := 0
+	for _, r := range s {
+		if n >= maxLogFieldLen {
+			b.WriteString("...")
+			break
+		}
+		switch {
+		case r == '<':
+			b.WriteByte('[')
+		case r == '>':
+			b.WriteByte(']')
+		case r < 0x20 || r == 0x7f:
+			// drop control characters
+		default:
+			b.WriteRune(r)
+			n++
+		}
+	}
+	return b.String()
 }
