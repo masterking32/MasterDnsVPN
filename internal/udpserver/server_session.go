@@ -703,7 +703,7 @@ func (s *Server) handleSessionInitRequest(questionPacket []byte, decision domain
 			if s.log != nil {
 				s.log.Errorf(
 					"\U0001F6AB <red>Session Table Full Request: <cyan>SESSION_INIT</cyan>, Domain: <cyan>%s</cyan></red>",
-					decision.RequestName,
+					logField(decision.RequestName),
 				)
 			}
 			return s.buildSessionBusyResponse(questionPacket, decision.RequestName, vpnPacket.Payload[0], vpnPacket.Payload[6:10])
